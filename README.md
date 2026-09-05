@@ -10,8 +10,7 @@ website stuffed into a WebView.
 
 - 📺 **Native video playback** — YouTube, direct files, HLS, Google Drive,
   and more, playing through the phone's own player instead of a browser tab
-- 🔄 **Playback that actually stays in sync** with the room
-- 💬 **Live chat that feels like the site** — inline emotes (including
+- 💬 **Live chat** — inline emotes (including
   animated GIF emotes that actually animate), greentext, spoilers, tap a
   username to reply
 - 🖼️ **Picture-in-picture** — back out of the app and keep watching in a
@@ -21,8 +20,6 @@ website stuffed into a WebView.
   away, plus direct-join by name and a browsable public channel list
 - 📺 **Works on Fire TV / Android TV out of the box** — sideload the same
   APK, no separate build or setup
-- 🔗 **Tap a `cytu.be/r/<channel>` link anywhere** and it opens straight into
-  the app
 - 🔓 **No account required** — join as a guest or log in, your call
 - 🆓 **Free and open source.** No ads, no tracking, no login wall
 
@@ -39,9 +36,9 @@ Settings.
 
 ## Known Issues
 - Picture in Picture (PIP) still a bit janky
-- Google Drive UserScript rooms dont work
+- Google Drive UserScript rooms do not work
 - Some rooms might need a few extra seconds to work correctly
-- General jankiness on more populated channels
+- General jankiness in first release
 
 ---
 
