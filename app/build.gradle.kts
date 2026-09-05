@@ -1,0 +1,115 @@
+import java.util.Properties
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.kotlin.compose)
+}
+
+// Release signing is opt-in via a gitignored keystore.properties (see
+// keystore.properties.example) so the project still builds — unsigned — for
+// anyone who clones it without a keystore of their own. Nothing secret ever
+// lives in this build file or in git.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val hasReleaseKeystore = keystorePropertiesFile.exists()
+val keystoreProperties = Properties().apply {
+    if (hasReleaseKeystore) keystorePropertiesFile.inputStream().use { load(it) }
+}
+
+android {
+    namespace = "com.cytube.mobile"
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = "com.cytube.mobile"
+        minSdk = 26
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        debug { isMinifyEnabled = false }
+        release {
+            // R8 is safe to turn on now that the keep rules for every
+            // reflection-touching dependency (Socket.IO, OkHttp/okio,
+            // NewPipeExtractor) live in proguard-rules.pro.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+        // Core library desugaring is deliberately OFF.
+        //
+        // It rewrites java.util.stream.* to j$.util.stream.*, and it did not
+        // apply that rewrite consistently across NewPipeExtractor and its
+        // nanojson dependency: the call site still looked for
+        //   streamAsJsonObjects()Ljava/util/stream/Stream;
+        // while the rewritten JsonArray returned j$/util/stream/Stream, so
+        // every extraction died with NoSuchMethodError.
+        //
+        // minSdk is 26 and java.util.stream has been available since API 24,
+        // so there is nothing here that needs desugaring in the first place.
+    }
+    kotlinOptions { jvmTarget = "17" }
+    buildFeatures {
+        compose = true
+        // Needed to reference BuildConfig.VERSION_NAME from the home screen's
+        // title bar; AGP 8+ no longer generates BuildConfig unless asked.
+        buildConfig = true
+    }
+    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+}
+
+dependencies {
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.activity.compose)
+
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.ui)
+    implementation(libs.androidx.ui.graphics)
+    implementation(libs.androidx.ui.tooling.preview)
+    implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
+    debugImplementation(libs.androidx.ui.tooling)
+
+    implementation(libs.androidx.navigation.compose)
+
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.hls)
+    implementation(libs.androidx.media3.exoplayer.dash)
+    implementation(libs.androidx.media3.exoplayer.rtsp)
+    implementation(libs.androidx.media3.ui)
+    implementation(libs.androidx.media3.datasource.okhttp)
+
+    implementation(libs.androidx.datastore.preferences)
+    implementation(libs.androidx.security.crypto)
+    implementation(libs.androidx.webkit)
+
+    implementation(libs.okhttp)
+    implementation(libs.jsoup)
+    implementation(libs.socketio)
+    implementation(libs.coil.compose)
+    implementation(libs.coil.gif)
+    implementation(libs.newpipe.extractor)
+}
