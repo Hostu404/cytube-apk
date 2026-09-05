@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A SurfaceView (PlayerView's default) is tied to the window compositor —
+  moving it to a different parent ViewGroup, which is exactly what happens
+  when the player is reparented between the compact/fullscreen/PiP layouts
+  (see ChannelScreen.kt's movableContentOf), tears its Surface down and
+  rebuilds it. ExoPlayer has to reattach video output to the new Surface
+  when that happens, which shows up as a black-frame stutter right at the
+  moment fullscreen or PiP toggles — the "slow/janky" feeling. A
+  TextureView is an ordinary view: it survives being moved to a new parent
+  within the same window with no surface recreation at all, at the minor
+  cost of compositing through the GPU instead of getting its own hardware
+  overlay. There's no DRM content in this app, so that trade-off is free.
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/player_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:surface_type="texture_view" />

@@ -1,0 +1,20 @@
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.idea/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Release signing — never committed. Copy keystore.properties.example to get
+# started; the .jks/.keystore itself also never belongs in the repo.
+keystore.properties
+*.jks
+*.keystore
+
+# Internal working docs — useful during development, not meant for the
+# published, open-source repo.
+SECURITY_AUDIT.md
+CYTUBE_PROTOCOL_FINDINGS.md
