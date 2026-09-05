@@ -1,18 +1,21 @@
 # CyTube APK
 
-**☕ If this is useful to you, [buy Hostu a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps keep this going.**
+**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps keep this going.**
 
 Ever wanted CyTube on your phone, or your Fire Stick / Android TV?
 **Now you can.**
 
 This is a real native Android app for [CyTube](https://cytu.be) — not a
-website stuffed into a WebView. It connects straight to your channel's
+website stuffed into a WebView.
+
+<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
+
+It connects straight to your channel's
 server and gives you:
 
 - 📺 **Native video playback** — YouTube, direct files, HLS, Google Drive,
   and more, playing through the phone's own player instead of a browser tab
-- 🔄 **Playback that actually stays in sync** with the room, without the
-  stutter/rebuffer loops other clients get on long, high-bitrate files
+- 🔄 **Playback that actually stays in sync** with the room
 - 💬 **Live chat that feels like the site** — inline emotes (including
   animated GIF emotes that actually animate), greentext, spoilers, tap a
   username to reply
