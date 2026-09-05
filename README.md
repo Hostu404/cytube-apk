@@ -8,12 +8,6 @@ Ever wanted CyTube on your phone, or your Fire Stick / Android TV?
 This is a real native Android app for [CyTube](https://cytu.be) — not a
 website stuffed into a WebView.
 
-----
-
-<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
-
-----
-
 - 📺 **Native video playback** — YouTube, direct files, HLS, Google Drive,
   and more, playing through the phone's own player instead of a browser tab
 - 🔄 **Playback that actually stays in sync** with the room
@@ -38,6 +32,10 @@ Dailymotion, a channel with custom embed code — it falls back to
 **Compatibility View**: the real CyTube page in a WebView, so you're never
 just stuck. You can force that mode per-channel or as your default from
 Settings.
+
+
+<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
+
 
 ## Known Issues
 - Picture in Picture (PIP) still a bit janky
