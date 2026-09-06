@@ -12,6 +12,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -40,6 +41,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -108,6 +111,17 @@ fun ChannelScreen(
 
     var fullscreen by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
+
+    // The one on/off switch for the Niconico overlay, shared by both the
+    // fullscreen and windowed player below — neither owns it, so toggling
+    // fullscreen never itself turns the overlay on or off. `nekoState` is
+    // its remembered comment state, recreated only when this actually flips
+    // (a genuine new on-cycle); a fullscreen toggle while already on reuses
+    // the same instance across both call sites instead of resetting it, so
+    // it doesn't replay the catch-up burst just because the player swapped
+    // from windowed to fullscreen chrome or back. See NekoOverlayState.
+    var chatOverlayOn by remember { mutableStateOf(false) }
+    val nekoState = remember(chatOverlayOn) { NekoOverlayState() }
     var openPanel by remember { mutableStateOf<Panel?>(null) }
     var showModeSheet by remember { mutableStateOf(false) }
     var passwordDraft by remember { mutableStateOf("") }
@@ -447,6 +461,8 @@ fun ChannelScreen(
             controlsVisible = controlsVisible,
             onToggleControls = { controlsVisible = !controlsVisible },
             onExit = { fullscreen = false },
+            chatOverlayOn = chatOverlayOn,
+            nekoState = nekoState,
             playerContent = playerContent
         )
         return
@@ -468,6 +484,36 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
+                    // The sole on/off switch for the Niconico overlay — see
+                    // chatOverlayOn's declaration above. Same idea as the
+                    // favourite star right next to it — filled when on,
+                    // outline when off — but drawn by hand rather than via a
+                    // Material icon: CropSquare turned out to be the crop
+                    // tool's corner-frame glyph, not a plain block, so its
+                    // "filled" theme still rendered as an outline and the
+                    // on/off states looked identical on device. A literal
+                    // square Box can't have that problem.
+                    IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
+                        val squareColor = LocalContentColor.current
+                        Box(
+                            Modifier
+                                .size(20.dp)
+                                .then(
+                                    if (chatOverlayOn) {
+                                        Modifier.background(squareColor)
+                                    } else {
+                                        Modifier.border(2.dp, squareColor)
+                                    }
+                                )
+                                .semantics {
+                                    contentDescription = if (chatOverlayOn) {
+                                        "Turn off Niconico chat overlay"
+                                    } else {
+                                        "Turn on Niconico chat overlay"
+                                    }
+                                }
+                        )
+                    }
                     IconButton(onClick = vm::toggleFavourite) {
                         Icon(
                             if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
@@ -598,6 +644,20 @@ fun ChannelScreen(
                     )
                 } else {
                     playerContent()
+                    // Same switch, same remembered comment state as the
+                    // fullscreen player below — see chatOverlayOn/nekoState
+                    // above. Confined to this Box (fillMaxSize of its own
+                    // BoxWithConstraints, which only ever sees this Box's
+                    // bounds), so it flies across the video area only, not
+                    // the whole screen, while windowed.
+                    if (chatOverlayOn) {
+                        NekoChatOverlay(
+                            messages = state.messages,
+                            showEmotes = state.showEmotes,
+                            emotes = state.emotes,
+                            state = nekoState
+                        )
+                    }
                     // Top-right, not bottom-right: Media3's own PlayerView
                     // draws its settings/gear control in the bottom corner,
                     // and the two used to sit right on top of each other.
@@ -889,7 +949,17 @@ private fun NowPlayingBar(title: String, leader: String?) {
  */
 @Composable
 private fun PanelBar(userCount: Int, playlistCount: Int, pollOpen: Boolean, onOpen: (Panel) -> Unit) {
-    Surface(tonalElevation = 2.dp, shadowElevation = 2.dp) {
+    // The stock NavigationBar this replaced pads itself for the system nav
+    // bar automatically; a plain Surface doesn't, so on 3-button navigation
+    // this row was sitting flush against the bottom edge and getting
+    // covered by the triangle/circle/square buttons themselves. Applying
+    // the same NavigationBarDefaults.windowInsets Material3's own component
+    // uses internally reserves that space back.
+    Surface(
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp,
+        modifier = Modifier.windowInsetsPadding(NavigationBarDefaults.windowInsets)
+    ) {
         Row(Modifier.fillMaxWidth().height(48.dp)) {
             PanelBarButton(
                 if (playlistCount > 0) "Playlist ($playlistCount)" else "Playlist",
@@ -1016,6 +1086,8 @@ private fun FullscreenPlayer(
     controlsVisible: Boolean,
     onToggleControls: () -> Unit,
     onExit: () -> Unit,
+    chatOverlayOn: Boolean,
+    nekoState: NekoOverlayState,
     playerContent: @Composable () -> Unit
 ) {
     Box(
@@ -1023,6 +1095,25 @@ private fun FullscreenPlayer(
             .pointerInput(Unit) { detectTapGestures { onToggleControls() } }
     ) {
         playerContent()
+
+        if (chatOverlayOn) {
+            // Fills the whole screen itself (danmaku-style comments fly the
+            // full width, on lanes spanning the full height), so no
+            // alignment/sizing to set here beyond the default. Independent
+            // of controlsVisible on purpose: once turned on, the overlay is
+            // meant to stay up while you watch, Neko/mpv-style — not blink
+            // out the moment the exit button/title fade away on that same
+            // idle timer. `chatOverlayOn`/`nekoState` are hoisted up to
+            // ChannelScreen and shared with the windowed player's own call
+            // site — this no longer has (or needs) an on/off control of its
+            // own; that lives solely in the TopAppBar, above the video.
+            NekoChatOverlay(
+                messages = state.messages,
+                showEmotes = state.showEmotes,
+                emotes = state.emotes,
+                state = nekoState
+            )
+        }
 
         AnimatedVisibility(visible = controlsVisible, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Color(0x66000000))) {

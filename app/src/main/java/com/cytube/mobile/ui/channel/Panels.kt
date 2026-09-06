@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -29,17 +32,24 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
+import kotlin.random.Random
+import kotlinx.coroutines.delay
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -289,6 +299,241 @@ internal fun openInBrowser(context: Context, url: String) {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
     }.onFailure { Log.w("CyTube", "No handler for chat link") }
+}
+
+/**
+ * Everything NekoChatOverlay remembers, hoisted out and owned by the caller
+ * (ChannelScreen) instead of the overlay itself. The overlay now has two call
+ * sites — the fullscreen player's chrome and the windowed player above the
+ * chat panel — and the same on/off switch drives both, so going into or out
+ * of fullscreen unmounts one call site and mounts the other rather than
+ * leaving a single one in place. If each call site remembered its own state
+ * the way the old single-call-site version did, that swap would look exactly
+ * like "just turned on" to the new mount: the one-time catch-up burst would
+ * fire again and replay the same handful of messages. Passing one shared
+ * instance to both call sites (created once, in ChannelScreen, for the whole
+ * time the overlay stays switched on) is what makes the swap invisible.
+ */
+class NekoOverlayState {
+    val active = mutableStateListOf<FlyingComment>()
+    var lastSpawnedSeq = -1L
+    var nextId = 0L
+    val laneFreeAtMs = HashMap<Int, Long>()
+    var hasCaughtUp = false
+}
+
+/**
+ * Niconico-style "danmaku" comments: each new chat message flies across the
+ * screen right-to-left as its own line, rather than sitting in a fixed list.
+ * No background box (transparent — text alone, readable via its own outline
+ * glow rather than a scrim behind it), no username (message text only, same
+ * as the real Niconico), and nothing on it responds to touch. Reuses
+ * ChatHtml's render/inline-emote pipeline (and its cache) so this costs
+ * nothing beyond what the real chat panel already pays.
+ *
+ * Only messages that arrive while this is on screen fly — turning it on
+ * doesn't dump the whole existing backlog across the video at once. `state`
+ * is shared with (and outlives) whichever other call site of this composable
+ * is currently unmounted — see [NekoOverlayState].
+ */
+@Composable
+fun NekoChatOverlay(
+    messages: List<ChatMessage>,
+    showEmotes: Boolean,
+    emotes: EmoteSet,
+    state: NekoOverlayState,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        val density = LocalDensity.current
+        val screenWidthPx = with(density) { maxWidth.toPx() }
+        val laneHeightPx = remember(density) { with(density) { NEKO_LANE_HEIGHT.roundToPx() } }
+        val laneCount = remember(maxHeight) {
+            (maxHeight / NEKO_LANE_HEIGHT).toInt().coerceIn(1, NEKO_MAX_LANES)
+        }
+
+        // Real Niconico thins comments under load rather than letting them
+        // pile up — this is that, in miniature. Each lane records when its
+        // current occupant will have finished crossing; a message only
+        // spawns if some lane is actually free, and is dropped (not queued)
+        // otherwise. That's a hard ceiling on how many of these can ever be
+        // animating and drawing at once — never more than laneCount, which
+        // is already capped — instead of a chat flood spawning one more
+        // blurred, independently-animating line per message with no limit,
+        // which is what was eating frames on the video underneath.
+        fun claimFreeLane(now: Long): Int? {
+            for (lane in 0 until laneCount) {
+                if (now >= (state.laneFreeAtMs[lane] ?: 0L)) return lane
+            }
+            return null
+        }
+
+        // Baseline for "what's new" (see the effect below), set exactly once
+        // per on-cycle. This runs during composition — strictly before either
+        // effect below gets a chance to start — so there is no race between
+        // this and the catch-up effect over who reads `messages` first. A
+        // fullscreen/windowed remount re-enters this same block, but by then
+        // hasCaughtUp is already true (set on the very first mount, well
+        // before a later fullscreen toggle), so it's skipped.
+        remember(state) {
+            if (!state.hasCaughtUp) {
+                state.lastSpawnedSeq = messages.lastOrNull()?.seq ?: -1L
+            }
+        }
+
+        // Turning this on with a quiet channel used to mean a blank screen
+        // until someone happened to say something new — which, on a short
+        // test, looks exactly like "it does nothing". This one-time,
+        // staggered replay of whatever's already in the buffer means there's
+        // always something on screen the moment it's enabled. hasCaughtUp is
+        // what keeps this to exactly once per on-cycle rather than once per
+        // mount — see [NekoOverlayState].
+        LaunchedEffect(state) {
+            if (state.hasCaughtUp) return@LaunchedEffect
+            state.hasCaughtUp = true
+            val catchUp = messages.filterNot { it.isServerMessage }.takeLast(NEKO_CATCHUP_COUNT)
+            catchUp.forEach { msg ->
+                val now = System.currentTimeMillis()
+                val lane = claimFreeLane(now)
+                if (lane != null) {
+                    val durationMs = Random.nextInt(7000, 10001)
+                    state.laneFreeAtMs[lane] = now + durationMs
+                    state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                }
+                delay(350)
+            }
+        }
+
+        LaunchedEffect(messages) {
+            val fresh = messages.filter { !it.isServerMessage && it.seq > state.lastSpawnedSeq }
+            fresh.forEach { msg ->
+                val now = System.currentTimeMillis()
+                val lane = claimFreeLane(now)
+                if (lane != null) {
+                    // A little speed variety — the same trick real Niconico
+                    // comments use so a burst of fast chat doesn't turn into
+                    // a single flat line all moving in lockstep.
+                    val durationMs = Random.nextInt(7000, 10001)
+                    state.laneFreeAtMs[lane] = now + durationMs
+                    state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                }
+                // No free lane: this message is dropped from the overlay,
+                // same as a real Niconico feed thinning under load — it's
+                // still in the real chat panel, this is just a glance-over.
+            }
+            if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
+        }
+
+        state.active.forEach { comment ->
+            key(comment.id) {
+                FlyingCommentItem(
+                    comment = comment,
+                    laneHeightPx = laneHeightPx,
+                    screenWidthPx = screenWidthPx,
+                    showEmotes = showEmotes,
+                    emotes = emotes,
+                    onFinished = { state.active.remove(comment) }
+                )
+            }
+        }
+    }
+}
+
+// Not private: NekoOverlayState.active (public, so ChannelScreen can hoist
+// and share it) is a list of these, and a public property can't expose a
+// private type.
+data class FlyingComment(
+    val id: Long,
+    val msg: ChatMessage,
+    val lane: Int,
+    val durationMs: Int
+)
+
+/** Vertical space each flying line gets — tall enough for NEKO_TEXT_STYLE's
+ *  20sp bold plus a little breathing room between lines. */
+private val NEKO_LANE_HEIGHT = 34.dp
+
+/** However tall the video is, don't spread comments thinner than this —
+ *  Niconico itself only ever uses a modest number of rows regardless of
+ *  screen size. */
+private const val NEKO_MAX_LANES = 10
+
+/** How many already-buffered messages replay immediately when the overlay
+ *  is turned on — enough to feel alive right away without dumping the
+ *  entire backlog across the video at once. */
+private const val NEKO_CATCHUP_COUNT = 5
+
+private val NEKO_LINK_COLOR = Color(0xFF80D8FF)
+
+/** White with a soft black glow instead of a background box — legible over
+ *  arbitrary video without ever needing to darken it. Bold for the same
+ *  reason Niconico's own comments are bold: thin strokes wash out fastest
+ *  against a bright, busy frame. Blur is deliberately modest — it's the
+ *  single most expensive thing about redrawing one of these lines every
+ *  frame while it moves, and now that the lane cap bounds how many can be
+ *  on screen at once, it's the next easiest lever if it's still not smooth. */
+private val NEKO_TEXT_STYLE = TextStyle(
+    fontSize = 20.sp,
+    fontWeight = FontWeight.Bold,
+    shadow = Shadow(color = Color.Black, offset = Offset.Zero, blurRadius = 6f)
+)
+
+@Composable
+private fun FlyingCommentItem(
+    comment: FlyingComment,
+    laneHeightPx: Int,
+    screenWidthPx: Float,
+    showEmotes: Boolean,
+    emotes: EmoteSet,
+    onFinished: () -> Unit
+) {
+    val rendered = remember(comment.id) {
+        ChatHtml.render(comment.msg.html, comment.msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
+    }
+    // Same solo-emote sizing rule as the real chat panel — a message that's
+    // nothing but emotes still gets to be seen at a glance here too.
+    val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
+    val inline = inlineEmotes(rendered.imageUrls, emoteHeight)
+
+    // How far past the left edge counts as "fully off-screen" depends on the
+    // message's own width, not just the screen's. This used to always be a
+    // flat -screenWidthPx: fine for a short message, but a message wider
+    // than the screen would still have its tail end visible at that point —
+    // onFinished (below) removed it from the overlay right then anyway, so a
+    // long comment visibly vanished mid-flight instead of sliding fully off.
+    // 0f until the first layout pass below reports the real width, which
+    // happens on the very first frame, before the comment has travelled any
+    // visible distance — so retargeting the animation the moment it's known
+    // isn't seen as a stutter. Duration is deliberately left as chosen at
+    // spawn time rather than stretched for the extra distance: that's also
+    // what NekoOverlayState.laneFreeAtMs assumed when it reserved this
+    // comment's lane, and stretching it here without telling that bookkeeping
+    // would let the next comment claim the lane before this one actually
+    // clears it.
+    var textWidthPx by remember(comment.id) { mutableStateOf(0f) }
+
+    val x = remember(comment.id) { Animatable(screenWidthPx) }
+    LaunchedEffect(comment.id, screenWidthPx, textWidthPx) {
+        x.animateTo(
+            targetValue = -(screenWidthPx + textWidthPx),
+            animationSpec = tween(durationMillis = comment.durationMs, easing = LinearEasing)
+        )
+        onFinished()
+    }
+
+    Text(
+        text = rendered.text,
+        inlineContent = inline,
+        style = NEKO_TEXT_STYLE,
+        color = Color.White,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.Visible,
+        onTextLayout = { layout -> textWidthPx = layout.size.width.toFloat() },
+        modifier = Modifier.offset {
+            IntOffset(x.value.roundToInt(), laneHeightPx * comment.lane)
+        }
+    )
 }
 
 /**
