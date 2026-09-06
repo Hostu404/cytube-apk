@@ -43,7 +43,7 @@ website stuffed into a WebView.
   custom ranks aren't
 - Fire TV / Android TV navigation works fully with a D-pad, but the layouts
   are the same ones used on phones — no dedicated 10-foot UI yet
-- Google Drive links occasionally fail to resolve or drift out of sync —
+- Google Drive links fail to resolve or drift out of sync —
   CyTube has no official server-side support for Drive playback, so this
   talks to the same unofficial endpoint Drive's own web player uses, which
   Google can change without notice
