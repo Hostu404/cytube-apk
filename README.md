@@ -24,6 +24,7 @@ website stuffed into a WebView.
 - 🍞 **Works on a toaster!** — Probably
 
 ## Known Issues
+- Lingering syncing issue. Solution at the moment is to just wait it out. I'll spend some time on this over the coming week and iron out remaining kinks.
 - Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
 - Google Drive UserScript rooms do not work
 - Some rooms might need a few extra seconds to work correctly
