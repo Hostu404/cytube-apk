@@ -105,7 +105,12 @@ connection can't rebuffer a scrub as fast as a browser can.
 This app exists because of [CyTube](https://github.com/calzoneman/sync)
 itself — all of the protocol behaviour here (sync logic, emote handling,
 frame shapes) is a port of what CyTube's own client and server already do,
-not something invented from scratch. It also depends on:
+not something invented from scratch. 
+And a very special thank you to
+[Roberts Kinoplex](https://cytu.be/r/the-kinoplex)
+for the many hours of time that brought me countless free joy.
+
+It also depends on:
 
 - [Jetpack Compose](https://developer.android.com/jetpack/compose) and
   [Media3/ExoPlayer](https://developer.android.com/media/media3) — UI and
