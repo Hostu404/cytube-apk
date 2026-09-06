@@ -7,9 +7,13 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -23,8 +27,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -131,6 +138,18 @@ fun ChannelScreen(
     // entering/exiting fullscreen. movableContentOf instead moves the same
     // already-playing instance to wherever it's called from.
     val pipModeState = rememberUpdatedState(isInPictureInPicture)
+
+    // Dominant color behind the windowed player (see WindowedAmbientGlow
+    // below) — a single stable holder for the whole life of this screen, not
+    // re-remembered per media id, since the callback captured inside
+    // playerContent (created exactly once, just below) needs to keep
+    // writing to the SAME state object for as long as this screen exists.
+    // Cleared back to null on every media change so a new item never
+    // briefly glows with the PREVIOUS item's leftover color while its own
+    // first frame is still on the way.
+    var ambientColor by remember { mutableStateOf<Color?>(null) }
+    LaunchedEffect(state.media?.id) { ambientColor = null }
+
     val playerContent = remember {
         movableContentOf {
             PlayerSurface(
@@ -140,7 +159,8 @@ fun ChannelScreen(
                 onHandle = onAttachPlayer,
                 onFailed = vm::reportPlaybackFailure,
                 epoch = state.playerEpoch,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                onFrameSnapshot = { bitmap -> ambientColor = averageColor(bitmap) }
             )
         }
     }
@@ -396,7 +416,28 @@ fun ChannelScreen(
             } else {
                 playerContent()
             }
+            // No Column to slot this into on TV like the phone layout has —
+            // an overlay is the only way a disconnect ever becomes visible
+            // here at all. Without it a dropped connection on TV was just a
+            // frozen black screen with no explanation and no way to retry.
+            state.kicked?.let { reason ->
+                Box(Modifier.align(Alignment.BottomCenter).padding(32.dp)) {
+                    DisconnectedNotice(reason = reason, onRetry = vm::retry, onBack = onBack)
+                }
+            }
         }
+
+        // See PlaybackDialogs' own doc comment: without this, a
+        // password-protected channel was simply unjoinable on TV, and a
+        // native playback failure was a silent black screen with no offer
+        // to fall back to WebView.
+        PlaybackDialogs(
+            state = state,
+            vm = vm,
+            passwordDraft = passwordDraft,
+            onPasswordDraftChange = { passwordDraft = it },
+            onBack = onBack
+        )
         return
     }
 
@@ -464,13 +505,87 @@ fun ChannelScreen(
         Column(Modifier.fillMaxSize()) {
 
             val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
+
+            // The fullscreen toggle used to just sit on screen forever — a
+            // bare white icon with nothing behind it reads as a stray white
+            // square parked over the video. Fading it out after a few
+            // idle seconds, and back in the instant the player is touched,
+            // matches how the true-fullscreen controls below already work.
+            var windowedControlsVisible by remember { mutableStateOf(true) }
+            LaunchedEffect(windowedControlsVisible, webMode) {
+                if (windowedControlsVisible && !webMode) {
+                    delay(3_000)
+                    windowedControlsVisible = false
+                }
+            }
+
+            // Reserved as soon as this item is eligible at all (setting on,
+            // not Compatibility View or an embed) rather than waiting for a
+            // color — that way the margin never pops in as a sudden layout
+            // shift once the snapshot lands. Before a color exists (or when
+            // the setting is off) it's just 16dp of ordinary background,
+            // indistinguishable from normal spacing.
+            val ambientGlowActive = state.ambientGlowEnabled && !webMode &&
+                state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
+
+            // Animated, not snapped: this crossfades from fully transparent
+            // up to the real color (and directly between two colors on a
+            // channel switch) over half a second. Reading .value inside
+            // drawBehind below — rather than destructuring this with `by`
+            // up here in the composable body — is what keeps this cheap:
+            // that defers the read to the draw phase, so each animation
+            // tick only re-runs this one gradient draw, not a recomposition
+            // of the screen around it.
+            val animatedGlow = animateColorAsState(
+                targetValue = ambientColor ?: Color.Transparent,
+                animationSpec = tween(durationMillis = 500),
+                label = "ambientGlow"
+            )
+
             Box(
                 Modifier.fillMaxWidth()
+                    .then(
+                        if (ambientGlowActive) Modifier.drawBehind {
+                            val glow = animatedGlow.value
+                            if (glow.alpha <= 0f) return@drawBehind
+                            // Bottom-only: color hangs below the video and
+                            // fades out toward the outer edge, like light
+                            // spilling out from underneath rather than a
+                            // halo all the way around. ~0.93 is where the
+                            // video's own bottom edge lands for a typical
+                            // phone width, given the 16dp margin below it —
+                            // approximate, not pixel-exact, since the
+                            // opaque video covers everything above that
+                            // regardless of what the gradient does there.
+                            drawRect(
+                                brush = Brush.verticalGradient(
+                                    0f to Color.Transparent,
+                                    0.93f to glow.copy(alpha = glow.alpha * 0.55f),
+                                    1f to Color.Transparent
+                                )
+                            )
+                        } else Modifier
+                    )
+                    .then(if (ambientGlowActive) Modifier.padding(bottom = 16.dp) else Modifier)
                     .then(
                         if (webMode) Modifier.weight(1f)
                         else Modifier.aspectRatio(16f / 9f)
                     )
                     .background(Color.Black)
+                    .then(
+                        if (webMode) Modifier else Modifier.pointerInput(Unit) {
+                            // Only observing, never consuming: the native
+                            // ExoPlayer controller underneath still needs
+                            // every one of these touches for its own
+                            // play/pause/seek handling. This just also
+                            // notices "the player was touched" so the
+                            // fullscreen button can reappear.
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                windowedControlsVisible = true
+                            }
+                        }
+                    )
             ) {
                 if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
                     // Compatibility View is the whole CyTube page again, not a
@@ -486,12 +601,11 @@ fun ChannelScreen(
                     // Top-right, not bottom-right: Media3's own PlayerView
                     // draws its settings/gear control in the bottom corner,
                     // and the two used to sit right on top of each other.
-                    IconButton(
+                    WindowedFullscreenButton(
+                        visible = windowedControlsVisible,
                         onClick = { fullscreen = true },
-                        modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
-                    ) {
-                        Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White)
-                    }
+                        modifier = Modifier.align(Alignment.TopEnd)
+                    )
                 }
             }
 
@@ -560,6 +674,46 @@ fun ChannelScreen(
         )
     }
 
+    PlaybackDialogs(
+        state = state,
+        vm = vm,
+        passwordDraft = passwordDraft,
+        onPasswordDraftChange = { passwordDraft = it },
+        onBack = onBack
+    )
+    }
+}
+
+/**
+ * Pulled out into its own composable (rather than calling AnimatedVisibility
+ * inline inside the Column/Box above) specifically so it has no inherited
+ * ColumnScope — calling AnimatedVisibility directly inside a Column's content
+ * lambda makes Kotlin see both the plain top-level AnimatedVisibility and the
+ * ColumnScope.AnimatedVisibility extension as implicit-receiver candidates
+ * and refuse to pick one ("cannot be called in this context with an implicit
+ * receiver"). A separate function has no such receiver in scope, so the call
+ * below resolves unambiguously.
+ */
+/**
+ * The three dialogs that can interrupt joining or watching a channel —
+ * a password prompt, and the two "native playback didn't work, try
+ * WebView?" offers. These used to live only in the phone Scaffold path
+ * below, which the isTv branch above never reaches (it returns before
+ * getting there). That meant a TV user hitting a password-protected
+ * channel had no way to ever enter it — no prompt, just a channel that
+ * silently never joined — and the same for any native-playback failure:
+ * no offer to fall back to WebView, just a black screen. Pulling these out
+ * into one shared composable, called from both places, fixes that without
+ * keeping two copies in sync by hand.
+ */
+@Composable
+private fun PlaybackDialogs(
+    state: ChannelUiState,
+    vm: ChannelViewModel,
+    passwordDraft: String,
+    onPasswordDraftChange: (String) -> Unit,
+    onBack: () -> Unit
+) {
     state.playbackOffer?.let { reason ->
         AlertDialog(
             onDismissRequest = vm::declinePlaybackOffer,
@@ -604,20 +758,28 @@ fun ChannelScreen(
                     }
                     OutlinedTextField(
                         value = passwordDraft,
-                        onValueChange = { passwordDraft = it },
+                        onValueChange = onPasswordDraftChange,
                         singleLine = true,
                         label = { Text("Password") }
                     )
                 }
             },
             confirmButton = {
-                TextButton(onClick = { vm.submitPassword(passwordDraft); passwordDraft = "" }) {
+                TextButton(onClick = { vm.submitPassword(passwordDraft); onPasswordDraftChange("") }) {
                     Text("Join")
                 }
             },
             dismissButton = { TextButton(onClick = onBack) { Text("Leave") } }
         )
     }
+}
+
+@Composable
+private fun WindowedFullscreenButton(visible: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
+        IconButton(onClick = onClick, modifier = Modifier.padding(8.dp)) {
+            Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White)
+        }
     }
 }
 
@@ -717,26 +879,40 @@ private fun NowPlayingBar(title: String, leader: String?) {
     }
 }
 
+/**
+ * A standard NavigationBar reserves ~80dp for what is really just three
+ * text-only buttons — most of that height is padding a label never needs.
+ * This slim custom row keeps the same 48dp minimum touch target (Android's
+ * own accessibility floor) while giving noticeably more of a phone screen
+ * back to chat. Fire TV never calls this at all (see the isTv branch above),
+ * so it only ever affects the touch UI.
+ */
 @Composable
 private fun PanelBar(userCount: Int, playlistCount: Int, pollOpen: Boolean, onOpen: (Panel) -> Unit) {
-    NavigationBar {
-        NavigationBarItem(
-            selected = false, onClick = { onOpen(Panel.PLAYLIST) },
-            icon = { Text(if (playlistCount > 0) "Playlist ($playlistCount)" else "Playlist") },
-            label = null
-        )
-        NavigationBarItem(
-            selected = false, onClick = { onOpen(Panel.USERS) },
-            icon = { Text("Users ($userCount)") }, label = null
-        )
-        // Only shown while a poll is actually running — nothing to vote on
-        // otherwise, so the button would just open an empty panel.
-        if (pollOpen) {
-            NavigationBarItem(
-                selected = false, onClick = { onOpen(Panel.POLL) },
-                icon = { Text("Poll") }, label = null
-            )
+    Surface(tonalElevation = 2.dp, shadowElevation = 2.dp) {
+        Row(Modifier.fillMaxWidth().height(48.dp)) {
+            PanelBarButton(
+                if (playlistCount > 0) "Playlist ($playlistCount)" else "Playlist",
+                Modifier.weight(1f)
+            ) { onOpen(Panel.PLAYLIST) }
+            PanelBarButton("Users ($userCount)", Modifier.weight(1f)) { onOpen(Panel.USERS) }
+            // Only shown while a poll is actually running — nothing to vote on
+            // otherwise, so the button would just open an empty panel.
+            if (pollOpen) {
+                PanelBarButton("Poll", Modifier.weight(1f)) { onOpen(Panel.POLL) }
+            }
         }
+    }
+}
+
+@Composable
+private fun PanelBarButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        modifier = modifier.fillMaxHeight(),
+        contentPadding = PaddingValues(horizontal = 4.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

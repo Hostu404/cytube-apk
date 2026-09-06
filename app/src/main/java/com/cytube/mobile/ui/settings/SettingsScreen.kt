@@ -76,6 +76,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.pipEnabled
             ) { scope.launch { store.setPip(it) } }
 
+            SwitchRow(
+                title = "Ambient glow",
+                subtitle = "A soft glow behind the video, colored to match what's playing.",
+                checked = settings.ambientGlowEnabled
+            ) { scope.launch { store.setAmbientGlow(it) } }
+
             SectionTitle("Compatibility")
 
             Text(
