@@ -1,6 +1,8 @@
 package com.cytube.mobile.ui.channel
 
 import android.app.Activity
+import android.app.UiModeManager
+import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
@@ -48,6 +50,24 @@ import kotlinx.coroutines.delay
 private enum class Panel { PLAYLIST, USERS, POLL }
 
 /**
+ * Android TV / Fire TV — the actual runtime signal, not just "no touchscreen"
+ * (a Chromebook or a phone in a desktop dock can be touchscreen-less too).
+ * `UiModeManager.currentModeType` is what Android itself uses to decide this,
+ * and it's what an Android TV/Fire TV emulator or device reports correctly.
+ *
+ * This is what decides whether ChannelScreen shows the phone-style chrome
+ * (title bar, bottom playlist/users/poll bar) at all. Both assume a
+ * touchscreen and a thumb — there is no way to reach them well with a D-pad
+ * and a remote, and the README already calls out that this app has no
+ * dedicated 10-foot UI yet. Until it does, a TV gets straight-to-fullscreen
+ * video instead of a phone layout it can't really drive.
+ */
+private fun isTvDevice(context: Context): Boolean {
+    val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+    return uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+}
+
+/**
  * What the hosting Activity needs to drive Picture-in-Picture and
  * background/foreground playback for whatever ChannelScreen currently has on
  * screen. Reported fresh on every recomposition via [onPlaybackHostChange],
@@ -77,6 +97,7 @@ fun ChannelScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
+    val isTv = remember { isTvDevice(context) }
 
     var fullscreen by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -205,6 +226,13 @@ fun ChannelScreen(
     // which is a real problem on a TV where they're never supposed to
     // appear at all.
     LaunchedEffect(fullscreen, isInPictureInPicture) {
+        // TV has its own dedicated immersive handling below (it never sets
+        // `fullscreen` at all, since it skips the phone layout entirely) —
+        // without this bail-out, this effect would see `fullscreen == false`
+        // on TV and actively show the system bars back over top of the
+        // video the TV branch just hid them for.
+        if (isTv) return@LaunchedEffect
+
         // Exiting PiP and forcing fullscreen back on (the effect above) can
         // land in the very same recomposition: the window is still
         // mid-resize from the system's own PiP-exit animation right as this
@@ -291,6 +319,7 @@ fun ChannelScreen(
     val configuration = LocalConfiguration.current
     var lastOrientation by remember { mutableStateOf(configuration.orientation) }
     LaunchedEffect(configuration.orientation, isInPictureInPicture) {
+        if (isTv) return@LaunchedEffect
         if (isInPictureInPicture) return@LaunchedEffect
         val previous = lastOrientation
         lastOrientation = configuration.orientation
@@ -331,6 +360,42 @@ fun ChannelScreen(
     if (isInPictureInPicture || settlingFromPip) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             playerContent()
+        }
+        return
+    }
+
+    // Fire TV / Android TV: no title bar, no bottom playlist/users/poll bar —
+    // straight to full-bleed video the moment the channel opens, immersive
+    // (system bars hidden) the same way the phone's own fullscreen is. The
+    // system Back button (which a Fire TV remote's Back button dispatches
+    // the same as anywhere else) leaves the channel entirely rather than
+    // dropping into the phone layout underneath, since that layout is never
+    // shown on TV in the first place — there's nothing to "exit fullscreen"
+    // back into here.
+    if (isTv) {
+        BackHandler { onBack() }
+        LaunchedEffect(Unit) {
+            onFullscreenChange(true)
+            runCatching {
+                activity?.window?.let { window ->
+                    val controller = WindowCompat.getInsetsController(window, window.decorView)
+                    controller.systemBarsBehavior =
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
+                WebCompatView(
+                    baseUrl = Graph.BASE_URL,
+                    channel = channel,
+                    authCookie = Graph.auth(context).savedSession()?.authCookie,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                playerContent()
+            }
         }
         return
     }
