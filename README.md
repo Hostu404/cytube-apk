@@ -20,9 +20,8 @@ website stuffed into a WebView.
   APK, no separate build or setup
 - 🔓 **No account required** — join as a guest or log in, your call
 - 🆓 **Free and open source.** No ads, no tracking, no login wall
-
-<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
-
+  
+<img width="372" height="522" alt="image" src="https://github.com/user-attachments/assets/ae596f21-fef1-4606-93dd-dd88e322575d" />
 
 ## Known Issues
 - Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings

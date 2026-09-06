@@ -435,8 +435,14 @@ private fun ChatRow(
                 style = MaterialTheme.typography.labelLarge,
                 color = if (msg.isPm) MaterialTheme.colorScheme.tertiary
                 else MaterialTheme.colorScheme.primary,
-                // Only the name is clickable, not the row.
-                modifier = Modifier.clickable { onUsernameClick(msg.username) }
+                // Only the name is clickable, not the row. The padding is
+                // applied AFTER clickable (not before) specifically so it
+                // grows the actual tap target instead of just adding
+                // invisible dead space around a target that stays small —
+                // short usernames were easy to miss otherwise.
+                modifier = Modifier
+                    .clickable { onUsernameClick(msg.username) }
+                    .padding(vertical = 4.dp, horizontal = 2.dp)
             )
             Text(
                 TIME_FMT.format(Date(msg.timestamp)),
@@ -458,12 +464,31 @@ private fun ChatRow(
             style = MaterialTheme.typography.bodyMedium,
             onTextLayout = { layout = it },
             modifier = Modifier.pointerInput(rendered.text) {
+                // Emotes render small (28sp inline, still only 56sp even for
+                // a solo emote), and getOffsetForPosition only ever resolves
+                // to the exact character the finger landed on — a tap a few
+                // px off the actual glyph missed the emote's own char index
+                // entirely and fell through as "no emote", which is exactly
+                // the "requires excessive precision" complaint. This adds a
+                // forgiving margin around each emote's own rendered box
+                // before giving up on it, the same way a real touch target
+                // is bigger than its visible icon.
+                val tolerancePx = 10.dp.toPx()
                 detectTapGestures { pos ->
                     val l = layout ?: return@detectTapGestures
                     val offset = l.getOffsetForPosition(pos)
                     // Emotes and links never overlap, but check emotes first
                     // since that's the more specific hit.
-                    val emote = ChatHtml.emoteAt(rendered.text, offset)
+                    val emote = ChatHtml.emoteAt(rendered.text, offset) ?: run {
+                        val spans = rendered.text.getStringAnnotations(
+                            ChatHtml.EMOTE_TAG, 0, rendered.text.length
+                        )
+                        spans.firstOrNull { span ->
+                            val box = l.getBoundingBox(span.start)
+                            pos.x in (box.left - tolerancePx)..(box.right + tolerancePx) &&
+                                pos.y in (box.top - tolerancePx)..(box.bottom + tolerancePx)
+                        }?.item
+                    }
                     if (emote != null) onEmoteClick(emote)
                     else ChatHtml.linkAt(rendered.text, offset)?.let(onLinkClick)
                 }

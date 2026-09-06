@@ -26,6 +26,10 @@ data class Settings(
      *  turn on for everyone unasked; see the "Experimental" label on its
      *  Settings toggle. */
     val pipEnabled: Boolean = false,
+    /** Soft glow behind the windowed player, colored from the video itself.
+     *  On by default — unlike PiP this is pure decoration with nothing to
+     *  misbehave, so there's no reason to make people opt in. */
+    val ambientGlowEnabled: Boolean = true,
     /** Display name used to join chat as a guest. Blank means "not chosen
      *  yet" — one is generated and saved the first time it's needed. */
     val guestName: String = ""
@@ -40,6 +44,7 @@ class SettingsStore(private val context: Context) {
             compatMode = CompatMode.parse(p[COMPAT]),
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
+            ambientGlowEnabled = p[AMBIENT_GLOW] ?: true,
             guestName = p[GUEST_NAME] ?: ""
         )
     }
@@ -49,6 +54,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setCompat(v: CompatMode) = context.dataStore.edit { it[COMPAT] = v.name }.let {}
     suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
     suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
+    suspend fun setAmbientGlow(v: Boolean) = context.dataStore.edit { it[AMBIENT_GLOW] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
 
@@ -94,6 +100,7 @@ class SettingsStore(private val context: Context) {
         val COMPAT = stringPreferencesKey("compat_mode")
         val EMOTES = booleanPreferencesKey("show_emotes")
         val PIP = booleanPreferencesKey("pip_enabled")
+        val AMBIENT_GLOW = booleanPreferencesKey("ambient_glow_enabled")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")

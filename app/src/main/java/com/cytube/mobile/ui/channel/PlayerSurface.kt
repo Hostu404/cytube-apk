@@ -1,8 +1,10 @@
 package com.cytube.mobile.ui.channel
 
+import android.graphics.Bitmap
 import android.net.Uri
 import android.util.Log
 import android.view.LayoutInflater
+import android.view.TextureView
 import android.view.ViewGroup
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -28,6 +30,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaFrame
@@ -53,18 +56,24 @@ fun PlayerSurface(
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
     epoch: Int = 0,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Fires once per video item, right as its first frame renders — not on
+     *  a timer, not per frame. See ExoSurface for why a one-time TextureView
+     *  snapshot is cheap enough to not worry about, unlike sampling every
+     *  frame would be. Used to color the ambient glow behind the windowed
+     *  player; null for EMBED/WEB, which have no ExoPlayer to snapshot. */
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null
 ) {
     val embedSrc = media?.embedSrc
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         when {
             media == null -> Message("Nothing is playing")
             player == MediaTypes.Player.NATIVE ->
-                ExoSurface(media, null, showControls, onHandle, onFailed, epoch)
+                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
             player == MediaTypes.Player.NEWPIPE ->
-                NewPipeSurface(media, showControls, onHandle, onFailed, epoch)
+                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
             player == MediaTypes.Player.GDRIVE ->
-                GDriveSurface(media, showControls, onHandle, onFailed, epoch)
+                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
                 EmbedSurface(embedSrc)
             // WEB is handled by the channel screen, which swaps in the whole
@@ -166,7 +175,8 @@ private fun NewPipeSurface(
     showControls: Boolean,
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int
+    epoch: Int,
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<YouTubeResolver.Resolved?>(null)
@@ -190,7 +200,7 @@ private fun NewPipeSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType),
-            showControls, onHandle, onFailed, epoch
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot
         )
     }
 }
@@ -217,7 +227,8 @@ private fun GDriveSurface(
     showControls: Boolean,
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int
+    epoch: Int,
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<GoogleDriveResolver.Resolved?>(null)
@@ -242,7 +253,7 @@ private fun GDriveSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
-            showControls, onHandle, onFailed, epoch
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot
         )
     }
 }
@@ -268,14 +279,66 @@ private fun ExoSurface(
     showControls: Boolean,
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int
+    epoch: Int,
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val exo = remember(epoch) { ExoPlayer.Builder(context).build() }
     val handle = remember(exo) { NativePlayerHandle(exo) }
+    // Exposes this ExoPlayer to the system: a Fire TV remote's dedicated
+    // media keys, Alexa's "pause"/"resume" voice commands, and any system
+    // Now Playing surface all reach whichever app currently holds the
+    // active session — Media3 keeps this session's playback state and
+    // metadata in sync with `exo` on its own, so there is nothing else to
+    // wire up here beyond creating and releasing it alongside the player.
+    // Scoped to the player's own lifetime (same as the error/frame listener
+    // below), not a standalone service — this app already pauses playback
+    // when backgrounded outside of PiP, so there is no "still playing but
+    // the session's gone" gap to cover.
+    //
+    // The id MUST be unique across every session live in the process at
+    // once, not just "one per ExoSurface" — Compose creates the new
+    // ExoPlayer/MediaSession pair for a bumped epoch (e.g. the manual
+    // refresh button) as part of composing this recomposition, but the OLD
+    // pair's DisposableEffect cleanup below doesn't run until the effects
+    // phase right after, so for one brief moment both the old and new
+    // session exist together. Two sessions both using Media3's default
+    // empty-string id crashed on exactly that overlap with "Session ID
+    // must be unique" the moment the button was tapped. A process-wide
+    // counter guarantees they never collide, regardless of epoch, and
+    // regardless of two different channels' ExoSurfaces overlapping too.
+    val mediaSession = remember(exo) {
+        MediaSession.Builder(context, exo)
+            .setId("cytube-${nextMediaSessionId()}")
+            .build()
+    }
+    // Set from the AndroidView factory below once the PlayerView actually
+    // exists, and read from the listener's onRenderedFirstFrame — a plain
+    // mutable holder rather than Compose state, since nothing here needs to
+    // recompose when it changes; the listener just wants whatever the
+    // current view is at the moment a frame renders.
+    val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
 
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
+            // A one-time snapshot per item, taken the moment its first frame
+            // actually renders — not a timer, not sampled per frame. Media3
+            // calls this again on later transitions within the same
+            // ExoPlayer instance too (e.g. epoch stays put but the media
+            // source is swapped), which is exactly when a fresh snapshot is
+            // wanted anyway: a new video means a new dominant color.
+            override fun onRenderedFirstFrame() {
+                val snapshot = onFrameSnapshot ?: return
+                val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
+                // TextureView.getBitmap(w, h) downsamples internally rather
+                // than copying the full-resolution frame out first — this is
+                // already about as cheap as a frame grab gets, and it only
+                // ever runs once per item.
+                runCatching { textureView.getBitmap(AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE) }
+                    .getOrNull()
+                    ?.let(snapshot)
+            }
+
             override fun onPlayerError(error: PlaybackException) {
                 // ERROR_CODE_IO_BAD_HTTP_STATUS alone doesn't say WHICH status,
                 // and that's the difference between "fixable" (wrong header)
@@ -305,7 +368,14 @@ private fun ExoSurface(
     }
 
     DisposableEffect(handle) {
-        onDispose { onHandle(null); exo.release() }
+        onDispose {
+            onHandle(null)
+            // Session first, then the player it wraps — releasing in the
+            // other order would leave the session momentarily pointing at
+            // an already-released player.
+            mediaSession.release()
+            exo.release()
+        }
     }
 
     // onHandle (which flows straight into ChannelViewModel.attachPlayer and
@@ -360,10 +430,44 @@ private fun ExoSurface(
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 )
-            }
+            }.also { playerViewRef[0] = it }
         },
         update = { it.useController = showControls }
     )
+}
+
+/** Side length (px) of the TextureView snapshot used for the ambient glow —
+ *  tiny on purpose, since it's only ever averaged into one color. */
+private const val AMBIENT_SAMPLE_SIZE = 16
+
+/** Process-wide, ever-increasing — see the doc comment on ExoSurface's
+ *  mediaSession for why every MediaSession this app ever creates needs a
+ *  genuinely unique id, not just one that's unique per ExoSurface call. */
+private val mediaSessionIdCounter = java.util.concurrent.atomic.AtomicInteger(0)
+private fun nextMediaSessionId(): Int = mediaSessionIdCounter.getAndIncrement()
+
+/**
+ * Cheap, good-enough dominant-color extraction for the ambient glow: average
+ * every pixel of the tiny [AMBIENT_SAMPLE_SIZE] snapshot rather than running
+ * a real palette/quantization pass. This runs once per video item (see
+ * ExoSurface's onRenderedFirstFrame above), never per frame, so even a naive
+ * full-bitmap average costs nothing measurable — the snapshot itself is
+ * already tiny by the time this sees it.
+ */
+internal fun averageColor(bitmap: Bitmap): Color {
+    val w = bitmap.width
+    val h = bitmap.height
+    if (w <= 0 || h <= 0) return Color.Black
+    val pixels = IntArray(w * h)
+    bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+    var r = 0L; var g = 0L; var b = 0L
+    for (p in pixels) {
+        r += (p shr 16) and 0xFF
+        g += (p shr 8) and 0xFF
+        b += p and 0xFF
+    }
+    val n = pixels.size
+    return Color(red = (r / n) / 255f, green = (g / n) / 255f, blue = (b / n) / 255f)
 }
 
 @Composable

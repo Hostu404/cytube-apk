@@ -38,6 +38,9 @@ data class ChannelUiState(
      *  to decide whether leaving the app should float the video in PiP or
      *  just pause it. */
     val pipEnabled: Boolean = true,
+    /** Mirrors the Settings toggle for the ambient glow behind the windowed
+     *  player (see ChannelScreen's ambient-color capture). */
+    val ambientGlowEnabled: Boolean = true,
     val leader: String? = null,
     val localUser: String? = null,
     val localRank: Double = 0.0,
@@ -58,7 +61,15 @@ data class ChannelUiState(
      *  only for a backend that was actually running and then failed. */
     val compatOffer: String? = null,
     val refreshing: Boolean = false,
-    /** Bumped to force the player surface to rebuild on an explicit refresh. */
+    /** A hook for forcibly rebuilding the player surface from scratch (see
+     *  PlayerSurface's ExoSurface: `remember(epoch) { ... }`), and, for
+     *  NEWPIPE/GDRIVE, re-resolving the stream URL too, since both key their
+     *  resolve step on this same value (see NewPipeSurface/GDriveSurface's
+     *  `LaunchedEffect(media.id, epoch)`). Deliberately never bumped by
+     *  pull-to-refresh — that silently restarted playback on every refresh,
+     *  even when nothing was actually wrong with the player. Not wired to
+     *  anything right now; left in place for a future "the player is
+     *  genuinely stuck" recovery action. */
     val playerEpoch: Int = 0,
     /** The channel's currently running poll, or null when none is active. */
     val poll: Poll? = null,
@@ -122,6 +133,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 effectiveMode = perChannel ?: settings.compatMode,
                 showEmotes = settings.showEmotes,
                 pipEnabled = settings.pipEnabled,
+                ambientGlowEnabled = settings.ambientGlowEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
             settingsStore.noteVisit(channel)
@@ -130,8 +142,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 settingsStore.settings.collect {
                     settings = it
                     update { s ->
-                        if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled) s
-                        else s.copy(showEmotes = it.showEmotes, pipEnabled = it.pipEnabled)
+                        if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled &&
+                            it.ambientGlowEnabled == s.ambientGlowEnabled
+                        ) s
+                        else s.copy(
+                            showEmotes = it.showEmotes,
+                            pipEnabled = it.pipEnabled,
+                            ambientGlowEnabled = it.ambientGlowEnabled
+                        )
                     }
                 }
             }
@@ -480,18 +498,27 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Pull-to-refresh: reconcile with the server rather than tearing the
-     * connection down. Only re-resolves the socket if we are actually adrift.
+     * connection down. Only re-resolves the socket if we are actually
+     * adrift, and never touches the player — requestPlaylist/
+     * signalPlayerReady alone re-syncs playlist and leader state over the
+     * existing connection. This used to also bump playerEpoch, which tears
+     * the whole ExoPlayer instance down and rebuilds it from scratch (see
+     * PlayerSurface's ExoSurface: `remember(epoch) { ExoPlayer.Builder(...)
+     * .build() }`) — that meant every pull-to-refresh silently restarted
+     * whatever was already playing fine, even when nothing was actually
+     * wrong with playback.
      */
     fun refresh() {
         if (_state.value.refreshing) return
         update { it.copy(refreshing = true) }
         viewModelScope.launch {
             if (_state.value.connection == ConnectionState.CONNECTED) {
-                // Authoritative state comes back on request; no reconnect needed.
                 client.requestPlaylist()
                 client.signalPlayerReady()
-                update { it.copy(playerEpoch = it.playerEpoch + 1) }
             } else {
+                // Only reached when we're actually not connected, so
+                // rebuilding everything here is a real reconnect, not a
+                // gratuitous one — there's no "current playback" to protect.
                 client.disconnect()
                 connect(_state.value.channel)
             }

@@ -3,6 +3,7 @@ package com.cytube.mobile.player
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -49,6 +50,11 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
         Log.i("CyTubePlayer", "load type=${media.type} via=resolved mime=$mimeType headers=${headers.keys}")
         val item = MediaItem.Builder().setUri(url)
             .apply { if (!mimeType.isNullOrBlank()) setMimeType(mimeType) }
+            // Read by the MediaSession (see PlayerSurface's ExoSurface) to
+            // populate whatever system Now Playing UI is showing — without
+            // this, a hardware remote's transport overlay or Alexa's own
+            // response just has a blank title to show for what's playing.
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
             .build()
         val dataSourceFactory = OkHttpDataSource.Factory(Graph.http)
             .apply { if (headers.isNotEmpty()) setDefaultRequestProperties(headers) }
@@ -79,13 +85,15 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
         // For cm/vi the id is a manifest or a page URL; the playable stream comes
         // from meta.direct. Only fi/hl/rt have a directly playable id.
         val source = media.bestSource
+        val metadata = MediaMetadata.Builder().setTitle(media.title).build()
         val item = if (source != null) {
             MediaItem.Builder()
                 .setUri(source.link)
                 .apply { if (source.contentType.isNotBlank()) setMimeType(source.contentType) }
+                .setMediaMetadata(metadata)
                 .build()
         } else {
-            MediaItem.fromUri(media.id)
+            MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
         }
         Log.i("CyTubePlayer", "native load type=${media.type} " +
             "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()}")

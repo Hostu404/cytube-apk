@@ -24,8 +24,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.2.1"
     }
 
     signingConfigs {
@@ -101,6 +101,12 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer.rtsp)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.datasource.okhttp)
+    // MediaSession: exposes playback to the system — hardware media keys
+    // (a Fire TV remote's dedicated play/pause button), Alexa's "pause"/
+    // "resume" voice commands, and any system Now Playing UI. All routed to
+    // whichever app currently has the active session, which Media3 manages
+    // for us as long as one exists (see PlayerSurface's ExoSurface).
+    implementation(libs.androidx.media3.session)
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.security.crypto)
