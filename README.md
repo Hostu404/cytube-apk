@@ -15,12 +15,14 @@ website stuffed into a WebView.
   username to reply
 - 💬 **NicoNico chat** — tap the square!
 - 📋 **Playlist, user list, and polls**, right there in the app
+- 😊 **Quick reply/Emotes** - tap a name in chat to quick reply, works the same for emotes!
 - ⭐ **Favourites and a recents list** so your regular channels are one tap
   away, plus direct-join by name and a browsable public channel list
 - 📺 **Works on Fire TV / Android TV out of the box** — sideload the same
   APK, no separate build or setup
 - 🔓 **No account required** — join as a guest or log in, your call
 - 🆓 **Free and open source.** No ads, no tracking, no login wall
+- 🍞 **Works on a toaster!** — Probably
 
 ## Known Issues
 - Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
