@@ -1,9 +1,9 @@
 # CyTube APK
 
-**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
+**☕ If this is useful to you, [im thirsty for a dunkaccino on (((Ko-fi)))](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
 
-Ever wanted a CyTube app on your phone, or your Fire Stick / Android TV?
-**Now you can.**
+<img width="1063" height="1581" alt="image" src="https://github.com/user-attachments/assets/47d58f2f-5da6-4708-a88b-56fcbd69e4b7" />
+
 
 This is a real native Android app for [CyTube](https://cytu.be) — not a
 website stuffed into a WebView.
@@ -13,6 +13,7 @@ website stuffed into a WebView.
 - 💬 **Live chat** — inline emotes (including
   animated GIF emotes that actually animate), greentext, spoilers, tap a
   username to reply
+- 💬 **NicoNico chat** — tap the square!
 - 📋 **Playlist, user list, and polls**, right there in the app
 - ⭐ **Favourites and a recents list** so your regular channels are one tap
   away, plus direct-join by name and a browsable public channel list
@@ -20,15 +21,12 @@ website stuffed into a WebView.
   APK, no separate build or setup
 - 🔓 **No account required** — join as a guest or log in, your call
 - 🆓 **Free and open source.** No ads, no tracking, no login wall
-  
-<img width="372" height="522" alt="image" src="https://github.com/user-attachments/assets/ae596f21-fef1-4606-93dd-dd88e322575d" />
 
 ## Known Issues
 - Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
 - Google Drive UserScript rooms do not work
 - Some rooms might need a few extra seconds to work correctly
-- General jankiness in first release
-
+- NicoNico chat not available on Fire TV - but will be soon TM.
 ---
 
 ## What's not here yet
