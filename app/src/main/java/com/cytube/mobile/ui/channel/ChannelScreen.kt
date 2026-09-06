@@ -3,8 +3,6 @@ package com.cytube.mobile.ui.channel
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
-import android.view.View
-import android.webkit.WebChromeClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -33,7 +31,6 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -99,21 +96,6 @@ fun ChannelScreen(
         onDispose { view.keepScreenOn = false }
     }
 
-    // The provider's own fullscreen button hands us a View through
-    // WebChromeClient.onShowCustomView. It has to be hosted somewhere or HTML5
-    // fullscreen appears to do nothing at all.
-    var webFullscreenView by remember { mutableStateOf<View?>(null) }
-    var webFullscreenCallback by remember {
-        mutableStateOf<WebChromeClient.CustomViewCallback?>(null)
-    }
-    DisposableEffect(Unit) {
-        onWebFullscreen = { entering, view, cb ->
-            webFullscreenView = if (entering) view else null
-            webFullscreenCallback = if (entering) cb else null
-        }
-        onDispose { onWebFullscreen = { _, _, _ -> } }
-    }
-
     val onSendChat = remember(vm) { vm::sendChat }
     val onJumpTo = remember(vm) { vm::jumpTo }
     val onDeleteItem = remember(vm) { vm::deleteItem }
@@ -152,7 +134,13 @@ fun ChannelScreen(
         onPlaybackHostChange(
             PlaybackHost(
                 pipEnabled = state.pipEnabled,
-                canPip = state.player != com.cytube.mobile.net.MediaTypes.Player.WEB && state.media != null,
+                // EMBED has no PlayerHandle behind it (see PlayerSurface's
+                // EmbedSurface) — nothing for the PiP overlay's play/pause
+                // button to actually control — so it's excluded the same way
+                // WEB already was.
+                canPip = state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
+                    state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED &&
+                    state.media != null,
                 isPlaying = state.playing,
                 onTogglePlayPause = onTogglePlayPause,
                 onPauseForBackground = onPauseForBackground,
@@ -216,7 +204,7 @@ fun ChannelScreen(
     // those too, the nav/status bars stayed visible over a fullscreen video,
     // which is a real problem on a TV where they're never supposed to
     // appear at all.
-    LaunchedEffect(fullscreen, webFullscreenView, isInPictureInPicture) {
+    LaunchedEffect(fullscreen, isInPictureInPicture) {
         // Exiting PiP and forcing fullscreen back on (the effect above) can
         // land in the very same recomposition: the window is still
         // mid-resize from the system's own PiP-exit animation right as this
@@ -227,7 +215,7 @@ fun ChannelScreen(
         // close the app".
         if (justExitedPip) delay(150)
 
-        val immersive = fullscreen || webFullscreenView != null
+        val immersive = fullscreen
         onFullscreenChange(immersive)
         // Android throws IllegalStateException("Only fullscreen activities
         // can request orientation") if setRequestedOrientation is called
@@ -308,7 +296,6 @@ fun ChannelScreen(
         lastOrientation = configuration.orientation
         if (previous == configuration.orientation) return@LaunchedEffect
         if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) return@LaunchedEffect
-        if (webFullscreenView != null) return@LaunchedEffect
         when (configuration.orientation) {
             Configuration.ORIENTATION_LANDSCAPE -> fullscreen = true
             Configuration.ORIENTATION_PORTRAIT -> fullscreen = false
@@ -344,19 +331,6 @@ fun ChannelScreen(
     if (isInPictureInPicture || settlingFromPip) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             playerContent()
-        }
-        return
-    }
-
-    // Provider fullscreen wins: show only its view, and let Back hand control
-    // back to the player so its own state stays consistent.
-    webFullscreenView?.let { view ->
-        BackHandler { webFullscreenCallback?.onCustomViewHidden() }
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            AndroidView(
-                factory = { view },
-                modifier = Modifier.fillMaxSize()
-            )
         }
         return
     }
@@ -786,6 +760,8 @@ private fun backendNote(state: ChannelUiState): String {
         com.cytube.mobile.net.MediaTypes.Player.NATIVE -> "Playing $label natively."
         com.cytube.mobile.net.MediaTypes.Player.NEWPIPE -> "Playing $label natively via NewPipe."
         com.cytube.mobile.net.MediaTypes.Player.GDRIVE -> "Playing $label natively via Google Drive."
+        com.cytube.mobile.net.MediaTypes.Player.EMBED ->
+            "$label plays via the provider's own embed. Chat, playlist and sync stay native."
         com.cytube.mobile.net.MediaTypes.Player.WEB ->
             "$label needs Compatibility View. Chat and playlist come from the page."
         com.cytube.mobile.net.MediaTypes.Player.UNAVAILABLE ->

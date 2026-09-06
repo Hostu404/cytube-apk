@@ -155,12 +155,30 @@ fun ChatPanel(
         }
     }
 
+    // The very first time this channel's history actually has anything in
+    // it, land on the newest message unconditionally — not gated on
+    // pinnedToBottom, which reads the LazyColumn's own layoutInfo and can
+    // still be settling from the empty-list state at the exact moment the
+    // whole chat backlog arrives in one burst right after joining. There is
+    // no way the user could have scrolled away from a chat that had nothing
+    // in it yet, so this is always correct for a fresh join. Once that has
+    // happened once, later messages go back to only following if the user
+    // is already at the bottom, same as always — this is a ChatPanel
+    // instance is recreated fresh per channel (see ChannelScreen's note on
+    // switching channels getting a new vm/state entirely), so this flag
+    // naturally resets on the next channel too.
+    var hasJumpedToInitialBottom by remember { mutableStateOf(false) }
+
     // Keyed on the last message's own id, not messages.size: once the chat
     // buffer is full (MAX_CHAT_MESSAGES), appending trims the oldest message
     // at the same rate, so size never changes again and a key of messages.size
     // would silently stop autoscrolling for the rest of the session.
     LaunchedEffect(messages.lastOrNull()?.seq) {
-        if (messages.isNotEmpty() && pinnedToBottom) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        if (!hasJumpedToInitialBottom) {
+            hasJumpedToInitialBottom = true
+            listState.scrollToItem(messages.lastIndex)
+        } else if (pinnedToBottom) {
             listState.scrollToItem(messages.lastIndex)
         }
     }

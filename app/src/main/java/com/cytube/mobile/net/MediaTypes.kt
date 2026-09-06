@@ -29,6 +29,16 @@ object MediaTypes {
         NEWPIPE,
         /** Media3 on a URL GoogleDriveResolver resolves first. */
         GDRIVE,
+        /**
+         * The provider's own embeddable iframe URL (meta.embed.src), hosted
+         * in a small WebView that's just the video surface — chat, playlist
+         * and sync all stay native around it. This is what AUTOMATIC was
+         * always documented to prefer over WEB (see resolvePlayer's comment)
+         * for cu/bc/bn items, but nothing ever actually routed to it before:
+         * playerFor had no branch for it, so every one of these fell all the
+         * way through to the whole-page WEB fallback instead.
+         */
+        EMBED,
         /** The real CyTube page in a WebView. Last resort. */
         WEB,
         /**
@@ -49,12 +59,20 @@ object MediaTypes {
      * Otherwise Google Drive gets its own app-side resolution (GoogleDriveResolver)
      * rather than falling back to WebView — see that class for why the
      * userscript's own approach (a legacy Google endpoint) isn't used here.
+     *
+     * `embedSrc` (meta.embed.src) is what cu/bc/bn carry instead of a direct
+     * source: a URL meant to be dropped straight into an iframe. Routing
+     * those to EMBED rather than WEB is what lets a custom-embed channel
+     * (e.g. one streaming from an 8chan.tv "?embedded=True" view link) play
+     * with native chat/playlist/sync intact, instead of needing the whole
+     * CyTube page loaded in Compatibility View just to show one iframe.
      */
-    fun playerFor(type: String, hasDirect: Boolean): Player = when {
+    fun playerFor(type: String, hasDirect: Boolean, embedSrc: String? = null): Player = when {
         type in PLAYABLE_ID -> Player.NATIVE
         hasDirect -> Player.NATIVE          // cm, vi, gd-with-userscript-metadata
         type == "yt" -> Player.NEWPIPE
         type == "gd" -> Player.GDRIVE
+        !embedSrc.isNullOrBlank() -> Player.EMBED
         else -> Player.WEB
     }
 

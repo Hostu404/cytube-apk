@@ -418,7 +418,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun resolvePlayer(media: MediaFrame): MediaTypes.Player =
         when (_state.value.effectiveMode) {
             CompatMode.WEB -> MediaTypes.Player.WEB
-            else -> MediaTypes.playerFor(media.type, media.hasDirect)
+            else -> MediaTypes.playerFor(media.type, media.hasDirect, media.embedSrc)
         }
 
     /**

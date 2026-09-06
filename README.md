@@ -1,39 +1,34 @@
 # CyTube APK
 
-**☕ If this is useful to you, [buy Hostu a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps keep this going.**
+**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps keep this going.**
 
 Ever wanted CyTube on your phone, or your Fire Stick / Android TV?
 **Now you can.**
 
 This is a real native Android app for [CyTube](https://cytu.be) — not a
-website stuffed into a WebView. It connects straight to your channel's
-server and gives you:
+website stuffed into a WebView.
 
-- 📺 **Native video playback** — YouTube, direct files, HLS, Google Drive,
+- 📺 **Native video playback** — YouTube, direct files, HLS, The Kinoplex
   and more, playing through the phone's own player instead of a browser tab
-- 🔄 **Playback that actually stays in sync** with the room, without the
-  stutter/rebuffer loops other clients get on long, high-bitrate files
-- 💬 **Live chat that feels like the site** — inline emotes (including
+- 💬 **Live chat** — inline emotes (including
   animated GIF emotes that actually animate), greentext, spoilers, tap a
   username to reply
-- 🖼️ **Picture-in-picture** — back out of the app and keep watching in a
-  small floating window instead of losing the video entirely
 - 📋 **Playlist, user list, and polls**, right there in the app
 - ⭐ **Favourites and a recents list** so your regular channels are one tap
   away, plus direct-join by name and a browsable public channel list
 - 📺 **Works on Fire TV / Android TV out of the box** — sideload the same
   APK, no separate build or setup
-- 🔗 **Tap a `cytu.be/r/<channel>` link anywhere** and it opens straight into
-  the app
 - 🔓 **No account required** — join as a guest or log in, your call
 - 🆓 **Free and open source.** No ads, no tracking, no login wall
 
-If a channel is playing something exotic enough that native playback can't
-handle it — Twitch, SoundCloud, a Vimeo link with no direct source,
-Dailymotion, a channel with custom embed code — it falls back to
-**Compatibility View**: the real CyTube page in a WebView, so you're never
-just stuck. You can force that mode per-channel or as your default from
-Settings.
+<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
+
+
+## Known Issues
+- Picture in Picture (PIP) still a bit janky (listed in settings as experimental)
+- Google Drive UserScript rooms do not work
+- Some rooms might need a few extra seconds to work correctly
+- General jankiness in first release
 
 ---
 
@@ -45,8 +40,6 @@ Settings.
   doesn't. Do kicks, bans, mutes, and permission changes from the site.
 - No sending private messages (PMs you receive show up in chat; there's no
   compose flow yet)
-- Channels that replace chat with their own custom JavaScript (Neko and
-  similar) fall back to Compatibility View rather than getting native support
 - Only the standard CyTube rank tiers are labelled by name; per-channel
   custom ranks aren't
 - Fire TV / Android TV navigation works fully with a D-pad, but the layouts
@@ -108,11 +101,6 @@ is written once and applies to all of them. It's a faithful port of CyTube's
 own client-side sync logic — same leader/drift rules, adapted to close small
 drift with a gentle speed nudge instead of a hard seek, since a mobile
 connection can't rebuffer a scrub as fast as a browser can.
-
-##Known Issues
-Picture in Picture (PIP) still a bit janky
-Google Drive UserScript rooms dont work
-Some rooms might need a few extra seconds to work correctly
 
 ## Credit
 

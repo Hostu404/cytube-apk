@@ -69,8 +69,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
 
             SwitchRow(
-                title = "Picture-in-picture",
-                subtitle = "Keep the video playing when you leave the app.",
+                title = "Picture-in-picture (Experimental)",
+                subtitle = "Keep the video playing when you leave the app. Still " +
+                    "rough — expanding back out of it can misbehave or crash. " +
+                    "Off by default until that's solid.",
                 checked = settings.pipEnabled
             ) { scope.launch { store.setPip(it) } }
 
