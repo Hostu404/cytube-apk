@@ -11,8 +11,7 @@ website stuffed into a WebView.
 - 📺 **Native video playback** — YouTube, direct files, HLS, The Kinoplex
   and more, playing through the phone's own player instead of a browser tab
 - 💬 **Live chat** — inline emotes (including
-  animated GIF emotes that actually animate), greentext, spoilers, tap a
-  username to reply
+  animated GIFs), greentext, spoilers
 - 💬 **NicoNico chat** — tap the square!
 - 📋 **Playlist, user list, and polls**, right there in the app
 - 😊 **Quick reply/Emotes** - tap a name in chat to quick reply, works the same for emotes!
@@ -160,3 +159,6 @@ This is a hobby project, built and maintained in spare time. If you get some
 use out of it:
 
 **☕ [ko-fi.com/hostu](https://ko-fi.com/hostu)**
+
+we sittin on a stoop where we get a scoop
+this is how we keep it cool this is how we do
