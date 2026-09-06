@@ -34,7 +34,25 @@ object ChatHtml {
     private val GREENTEXT = Color(0xFF789922)
     private val SPOILER = Color(0xFF444444)
 
-    data class Rendered(val text: AnnotatedString, val imageUrls: List<String>)
+    /** A message of just one to this many emotes (no other visible text)
+     *  renders them big instead of at inline-text size — see [Rendered.soloEmoteCount].
+     *  Beyond this it falls back to normal inline size; a wall of a dozen
+     *  giant custom images is a worse read than a wall of small ones. */
+    private const val MAX_SOLO_EMOTES = 4
+
+    data class Rendered(
+        val text: AnnotatedString,
+        val imageUrls: List<String>,
+        /**
+         * Nonzero when the message is ENTIRELY emotes — no other visible
+         * text — and there are few enough of them (see [MAX_SOLO_EMOTES]) to
+         * render big without the row taking over the chat. A ":smile:" typed
+         * mid-sentence never sets this; only a message that is just emotes,
+         * the case where making them bigger doesn't cost anything (there's
+         * no surrounding text for a taller row to crowd).
+         */
+        val soloEmoteCount: Int = 0
+    )
 
     fun render(
         raw: String,
@@ -77,7 +95,20 @@ object ChatHtml {
             walk(body, this, images, linkColor, showImages, dropImages)
             if (greentext) pop()
         }
-        return Rendered(annotated, images)
+        return Rendered(annotated, images, soloEmoteCount(annotated, images))
+    }
+
+    /** See [Rendered.soloEmoteCount]: nonzero only when every bit of visible
+     *  text in the message is covered by an EMOTE_TAG span (i.e. nothing but
+     *  emotes, no sentence around them) and there aren't too many of them. */
+    private fun soloEmoteCount(annotated: AnnotatedString, images: List<String>): Int {
+        if (images.isEmpty()) return 0
+        val spans = annotated.getStringAnnotations(EMOTE_TAG, 0, annotated.text.length)
+        if (spans.isEmpty() || spans.size > MAX_SOLO_EMOTES) return 0
+        val covered = BooleanArray(annotated.text.length)
+        for (span in spans) for (i in span.start until span.end) covered[i] = true
+        val hasOtherText = annotated.text.withIndex().any { (i, ch) -> !covered[i] && !ch.isWhitespace() }
+        return if (hasOtherText) 0 else spans.size
     }
 
     private fun walk(

@@ -66,9 +66,18 @@ private val TIME_FMT = SimpleDateFormat("HH:mm", Locale.getDefault())
  * Emote box height, in sp so it tracks the user's font scale. CyTube emotes are
  * typically 28-32px tall; 20sp rendered them noticeably smaller than the site.
  * Placeholders taller than the line box would inflate every chat row, so this is
- * the practical ceiling before rows start growing.
+ * the practical ceiling before rows start growing — used for an emote sitting
+ * inline in a sentence, where a taller placeholder inflates that whole row.
  */
 private const val EMOTE_HEIGHT = 28f
+
+/**
+ * A message that's nothing but emotes (see ChatHtml.Rendered.soloEmoteCount)
+ * has no sentence around it for a taller row to crowd, so it can afford to
+ * actually be seen — roughly double EMOTE_HEIGHT, the same move Discord/
+ * Telegram/Slack make for an emoji-only message.
+ */
+private const val SOLO_EMOTE_HEIGHT = 56f
 
 /**
  * Inline content needs a size before the image has loaded, but emotes are all
@@ -81,11 +90,14 @@ private object EmoteAspect {
 }
 
 @Composable
-private fun inlineEmotes(urls: List<String>): Map<String, InlineTextContent> {
+private fun inlineEmotes(
+    urls: List<String>,
+    emoteHeight: Float = EMOTE_HEIGHT
+): Map<String, InlineTextContent> {
     if (urls.isEmpty()) return emptyMap()
     val context = LocalContext.current
     val density = LocalDensity.current
-    val heightPx = with(density) { EMOTE_HEIGHT.sp.roundToPx() }.coerceAtLeast(1)
+    val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
     return urls.distinct().associateWith { url ->
         // Until the real aspect ratio is known a square is the least-wrong
         // guess; once loaded the true ratio is reused for the whole session so
@@ -94,8 +106,8 @@ private fun inlineEmotes(urls: List<String>): Map<String, InlineTextContent> {
         val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
         InlineTextContent(
             Placeholder(
-                width = (EMOTE_HEIGHT * ratio).sp,
-                height = EMOTE_HEIGHT.sp,
+                width = (emoteHeight * ratio).sp,
+                height = emoteHeight.sp,
                 placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
             )
         ) {
@@ -399,7 +411,11 @@ private fun ChatRow(
     val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes) {
         ChatHtml.render(msg.html, msg.addClass == "greentext", linkColor, showEmotes, emotes)
     }
-    val inline = inlineEmotes(rendered.imageUrls)
+    // A message that's nothing but emotes gets to actually be seen; one
+    // sitting mid-sentence stays at the compact inline size so it doesn't
+    // inflate a normal chat row. See ChatHtml.Rendered.soloEmoteCount.
+    val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
+    val inline = inlineEmotes(rendered.imageUrls, emoteHeight)
 
     if (msg.isServerMessage) {
         Text(

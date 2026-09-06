@@ -1,8 +1,8 @@
 # CyTube APK
 
-**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps keep this going.**
+**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
 
-Ever wanted CyTube on your phone, or your Fire Stick / Android TV?
+Ever wanted a CyTube app on your phone, or your Fire Stick / Android TV?
 **Now you can.**
 
 This is a real native Android app for [CyTube](https://cytu.be) — not a
@@ -25,18 +25,7 @@ website stuffed into a WebView.
 
 
 ## Known Issues
-- Picture in Picture (PIP) still a bit janky (listed in settings as experimental)
-- Google Drive UserScript rooms do not work
-- Some rooms might need a few extra seconds to work correctly
-- General jankiness in first release
-
-
-<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
-
-
-## Known Issues
-- kinoplex not currently working but will do soon tm
-- Picture in Picture (PIP) still a bit janky
+- Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
 - Google Drive UserScript rooms do not work
 - Some rooms might need a few extra seconds to work correctly
 - General jankiness in first release
