@@ -5,7 +5,7 @@
 <img width="1063" height="1581" alt="image" src="https://github.com/user-attachments/assets/47d58f2f-5da6-4708-a88b-56fcbd69e4b7" />
 
 
-This is a real native Android app for [CyTube](https://cytu.be) — not a
+This is a **real and working** native **Android app** for [CyTube](https://cytu.be) — not a
 website stuffed into a WebView.
 
 - 📺 **Native video playback** — YouTube, direct files, HLS, The Kinoplex
