@@ -22,7 +22,10 @@ data class Settings(
     val syncAccuracy: Double = 2.0,
     val compatMode: CompatMode = CompatMode.AUTOMATIC,
     val showEmotes: Boolean = true,
-    val pipEnabled: Boolean = true,
+    /** Off by default — PiP-to-fullscreen still isn't reliable enough to
+     *  turn on for everyone unasked; see the "Experimental" label on its
+     *  Settings toggle. */
+    val pipEnabled: Boolean = false,
     /** Display name used to join chat as a guest. Blank means "not chosen
      *  yet" — one is generated and saved the first time it's needed. */
     val guestName: String = ""
@@ -36,7 +39,7 @@ class SettingsStore(private val context: Context) {
             syncAccuracy = p[ACCURACY] ?: 2.0,
             compatMode = CompatMode.parse(p[COMPAT]),
             showEmotes = p[EMOTES] ?: true,
-            pipEnabled = p[PIP] ?: true,
+            pipEnabled = p[PIP] ?: false,
             guestName = p[GUEST_NAME] ?: ""
         )
     }

@@ -1,10 +1,13 @@
 package com.cytube.mobile.ui.channel
 
+import android.net.Uri
 import android.util.Log
 import android.view.LayoutInflater
-import android.view.View
 import android.view.ViewGroup
-import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -35,12 +38,6 @@ import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.YouTubeResolver
 
 /**
- * Set by the channel screen so a page's fullscreen button can drive the
- * activity. Null when nothing is fullscreen.
- */
-var onWebFullscreen: (Boolean, View?, WebChromeClient.CustomViewCallback?) -> Unit = { _, _, _ -> }
-
-/**
  * Layer 4: player implementations.
  *
  * NATIVE and NEWPIPE are the same ExoPlayer surface — the only difference is
@@ -58,6 +55,7 @@ fun PlayerSurface(
     epoch: Int = 0,
     modifier: Modifier = Modifier
 ) {
+    val embedSrc = media?.embedSrc
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         when {
             media == null -> Message("Nothing is playing")
@@ -67,11 +65,98 @@ fun PlayerSurface(
                 NewPipeSurface(media, showControls, onHandle, onFailed, epoch)
             player == MediaTypes.Player.GDRIVE ->
                 GDriveSurface(media, showControls, onHandle, onFailed, epoch)
+            player == MediaTypes.Player.EMBED && embedSrc != null ->
+                EmbedSurface(embedSrc)
             // WEB is handled by the channel screen, which swaps in the whole
             // CyTube page rather than a player.
             else -> Message("${MediaTypes.label(media.type)} needs Compatibility View.")
         }
     }
+}
+
+/**
+ * A provider's own embeddable iframe (cu/bc/bn — meta.embed.src), hosted in a
+ * WebView that's just the video surface. This is deliberately NOT the whole
+ * CyTube page: chat, playlist, users and sync all stay native around it, and
+ * the WebView here only ever has to render one already-built embed URL
+ * (e.g. an "?embedded=True" view link) rather than run the channel's own
+ * page scripts inside a stripped-down WebView.
+ *
+ * No PlayerHandle comes out of this — there is no ExoPlayer to hand over, so
+ * SyncEngine leaves this item alone entirely (ChannelViewModel.onTimeUpdate
+ * bails out whenever `player` is null), exactly like Compatibility View does
+ * for WEB. The embed manages its own playback pace.
+ */
+@Composable
+private fun EmbedSurface(embedSrc: String) {
+    val context = LocalContext.current
+    val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            WebView(ctx).apply {
+                // The default WebView canvas is white, and it paints that
+                // white before the page's own CSS ever gets a chance to load
+                // — the flash (and often a lingering white margin around
+                // whatever the page doesn't fill) is what was "ruining the
+                // immersion" here. Black is the one background that's always
+                // right for a video surface sitting in an otherwise-black
+                // player area.
+                setBackgroundColor(android.graphics.Color.BLACK)
+                isVerticalScrollBarEnabled = false
+                isHorizontalScrollBarEnabled = false
+                overScrollMode = android.view.View.OVER_SCROLL_NEVER
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    mediaPlaybackRequiresUserGesture = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    // A popup/new-window is how some embed players try to
+                    // "open in a new tab" rather than navigate the iframe in
+                    // place; there is nowhere for that to go here, so it's
+                    // refused outright rather than silently doing nothing.
+                    javaScriptCanOpenWindowsAutomatically = false
+                    setSupportMultipleWindows(false)
+                }
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView,
+                        request: WebResourceRequest
+                    ): Boolean {
+                        // Only a top-level navigation away from the embed's
+                        // own host counts as "this isn't the video anymore" —
+                        // a subframe the embed itself creates (its own
+                        // player chrome, an ad/asset host, etc.) needs to load
+                        // in place same as in WebCompatView.
+                        if (!request.isForMainFrame) return false
+                        if (request.url.host == embedHost) return false
+                        openInBrowser(context, request.url.toString())
+                        return true
+                    }
+
+                    // setBackgroundColor above only covers the WebView's own
+                    // canvas — it does nothing about a white background the
+                    // page's own CSS paints on top of it, which is exactly
+                    // what most bare video-embed pages do (a plain <body>
+                    // with no background rule at all defaults to white).
+                    // Forcing it dark here, once the page has actually
+                    // loaded, is the only way to reach that.
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        view.evaluateJavascript(
+                            "document.documentElement.style.background='#000';" +
+                                "document.body.style.background='#000';" +
+                                "document.body.style.margin='0';",
+                            null
+                        )
+                    }
+                }
+                loadUrl(embedSrc)
+            }
+        }
+    )
 }
 
 /** Resolves a YouTube id to a stream URL, then hands over to the normal player. */

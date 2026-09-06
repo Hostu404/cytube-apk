@@ -3,7 +3,6 @@ package com.cytube.mobile.ui.channel
 import android.annotation.SuppressLint
 import android.net.Uri
 import android.webkit.CookieManager
-import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -77,14 +76,15 @@ fun WebCompatView(
                 }
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
-                // Needed for the page's own fullscreen buttons to do anything.
-                webChromeClient = object : WebChromeClient() {
-                    override fun onShowCustomView(
-                        view: android.view.View?, cb: CustomViewCallback?
-                    ) = onWebFullscreen(true, view, cb)
-
-                    override fun onHideCustomView() = onWebFullscreen(false, null, null)
-                }
+                // The page's own fullscreen buttons (CyTube's player controls,
+                // or a channel's custom embed) are deliberately left doing
+                // nothing here — no WebChromeClient.onShowCustomView override
+                // means HTML5 fullscreen requests are just ignored, so the
+                // video stays inline instead of taking over the whole app.
+                // This used to be wired up so tapping fullscreen on the page
+                // would hand the app a full-bleed view of it, but that's been
+                // pulled back out.
+                //
                 // Keep navigation inside CyTube; anything else is a chat link
                 // and belongs in the user's browser. shouldOverrideUrlLoading
                 // is what actually enforces that — without it, the default
@@ -96,6 +96,15 @@ fun WebCompatView(
                         request: WebResourceRequest
                     ): Boolean {
                         val url = request.url
+                        // Only a top-level navigation away from the channel's
+                        // own host is a "chat link, open it externally" case.
+                        // A subframe navigating to a different host is exactly
+                        // what a custom video embed needs to do (e.g.
+                        // the-kinoplex's 8chan.tv streams) — intercepting
+                        // those meant CyTube's page would try to load the
+                        // embed iframe, get yanked out to the external
+                        // browser instead, and the video never rendered.
+                        if (!request.isForMainFrame) return false
                         if (url.host == homeHost) return false
                         openInBrowser(context, url.toString())
                         return true
