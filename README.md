@@ -35,6 +35,7 @@ Settings.
 
 
 ## Known Issues
+- kinoplex not currently working but will do soon tm
 - Picture in Picture (PIP) still a bit janky
 - Google Drive UserScript rooms do not work
 - Some rooms might need a few extra seconds to work correctly
