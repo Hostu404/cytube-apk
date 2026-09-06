@@ -25,8 +25,9 @@ website stuffed into a WebView.
 
 ## Known Issues
 - Lingering syncing issue. Solution at the moment is to just wait it out. I'll spend some time on this over the coming week and iron out remaining kinks.
+- Further compatibility for video playback needed.
 - Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
-- Google Drive UserScript rooms do not work
+- Google Drive UserScript rooms do not work and probably won't ever work.
 - Some rooms might need a few extra seconds to work correctly
 - NicoNico chat not available on Fire TV - but will be soon TM.
 ---
