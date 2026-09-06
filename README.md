@@ -30,6 +30,17 @@ website stuffed into a WebView.
 - Some rooms might need a few extra seconds to work correctly
 - General jankiness in first release
 
+
+<img width="259" height="514" alt="image" src="https://github.com/user-attachments/assets/706eb018-7094-4ee0-9fd2-cda636462199" />
+
+
+## Known Issues
+- kinoplex not currently working but will do soon tm
+- Picture in Picture (PIP) still a bit janky
+- Google Drive UserScript rooms do not work
+- Some rooms might need a few extra seconds to work correctly
+- General jankiness in first release
+
 ---
 
 ## What's not here yet
