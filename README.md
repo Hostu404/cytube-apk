@@ -4,7 +4,8 @@ CyTube APK for Android, Android TV and Fire TV — an open-source native CyTube 
 
 **☕ If this is useful to you, [im thirsty for a dunkaccino on (((Ko-fi)))](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
 
-<img width="1063" height="1581" alt="image" src="https://github.com/user-attachments/assets/7cbbbc0f-873e-485f-9d22-2f63c80304ad" />
+<img width="638" height="949" alt="image" src="https://github.com/user-attachments/assets/7b413327-dee4-4cda-8360-9713109d3e07" />
+
 
 This is a **real and working** native **Android app** for [CyTube](https://cytu.be) — not a
 website stuffed into a WebView.
