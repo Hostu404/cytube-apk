@@ -161,18 +161,22 @@ Build the application using the standard Android Studio build tools.
 
 ## Credits
 
-This app exists because of **CyTube itself** — all of the protocol behaviour here (sync logic, emote handling, frame shapes) is a port of what CyTube's own client and server already do, not something invented from scratch.
+This app exists because of [CyTube](https://github.com/calzoneman/sync)
+itself — all of the protocol behaviour here (sync logic, emote handling,
+frame shapes) is a port of what CyTube's own client and server already do,
+not something invented from scratch. It also depends on:
 
-And a very special thank you to **Roberts Kinoplex** for the many hours of time that brought me countless free joy.
-
-It also depends on:
-
-* **Jetpack Compose** and **Media3/ExoPlayer** — UI and playback
-* **Socket.IO (Java client)** — the same realtime protocol the CyTube site itself speaks
-* **OkHttp** — networking
-* **NewPipeExtractor** — resolving YouTube items to a direct stream
-* **Jsoup** — parsing/sanitising the HTML CyTube sends for chat, MOTDs, and polls
-* **Coil** — image and animated-GIF loading
+- [Jetpack Compose](https://developer.android.com/jetpack/compose) and
+  [Media3/ExoPlayer](https://developer.android.com/media/media3) — UI and
+  playback
+- [Socket.IO (Java client)](https://github.com/socketio/socket.io-client-java) —
+  the same realtime protocol the CyTube site itself speaks
+- [OkHttp](https://square.github.io/okhttp/) — networking
+- [NewPipeExtractor](https://github.com/TeamNewPipe/NewPipeExtractor) —
+  resolving YouTube items to a direct stream
+- [Jsoup](https://jsoup.org/) — parsing/sanitising the HTML CyTube sends for
+  chat, MOTDs, and polls
+- [Coil](https://coil-kt.github.io/coil/) — image and animated-GIF loading
 
 ---
 
