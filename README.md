@@ -1,5 +1,7 @@
 # CyTube APK
 
+CyTube APK for Android, Android TV and Fire TV — an open-source native CyTube client with synchronized video playback, chat, playlists and custom emotes.
+
 **☕ If this is useful to you, [im thirsty for a dunkaccino on (((Ko-fi)))](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
 
 <img width="1063" height="1581" alt="image" src="https://github.com/user-attachments/assets/47d58f2f-5da6-4708-a88b-56fcbd69e4b7" />
