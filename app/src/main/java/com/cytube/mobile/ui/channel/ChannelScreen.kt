@@ -6,6 +6,11 @@ import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -36,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
@@ -63,6 +69,16 @@ import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import kotlinx.coroutines.delay
 
 private enum class Panel { PLAYLIST, USERS, POLL }
+
+/** How far each new ambient-glow sample moves the glow toward itself, out of
+ *  1.0 — see the onFrameSnapshot comment in ChannelScreen for why this
+ *  exists. Low on purpose: a single sample should nudge the color, not set
+ *  it, so a fast-cutting video's glow drifts with the overall footage
+ *  instead of snapping to whatever one frame happened to look like. Kept
+ *  gentle enough that, combined with the long near-continuous crossfade in
+ *  WindowedAmbientGlow, the color's motion stays subtle rather than a
+ *  series of visible steps. */
+private const val AMBIENT_SAMPLE_BLEND = 0.22f
 
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
@@ -171,7 +187,27 @@ fun ChannelScreen(
                 onFailed = vm::reportPlaybackFailure,
                 epoch = state.playerEpoch,
                 modifier = Modifier.fillMaxSize(),
-                onFrameSnapshot = { bitmap -> ambientColor = averageColor(bitmap) }
+                // Each sample here is ONE instant of the video, and on
+                // fast-cutting content (an action scene, a music video) two
+                // consecutive samples 4s apart can land on wildly different
+                // frames — a dark shot, then an explosion, then a close-up.
+                // Feeding each raw sample straight to the crossfade made the
+                // glow visibly yank toward a new hue every few seconds,
+                // which is what actually reads as "distracting", not the
+                // crossfade itself. Blending each new sample partway toward
+                // the PREVIOUS glow color (rather than replacing it outright)
+                // turns that into a slow drift toward wherever the footage's
+                // overall tone is trending, so one outlier frame can't swing
+                // it on its own — it takes several samples in the same
+                // direction to actually move the glow. Skipped for the very
+                // first sample of a new item (ambientColor still null there,
+                // per the LaunchedEffect above) so a fresh item still snaps
+                // to its own color immediately rather than easing up from
+                // the previous item's leftover one.
+                onFrameSnapshot = { bitmap ->
+                    val sample = averageColor(bitmap)
+                    ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
+                }
             )
         }
     }
@@ -238,10 +274,30 @@ fun ChannelScreen(
     // the system's own transition has had time to finish, and by the time
     // it is touched, `fullscreen` (set synchronously above) is already
     // correct, so there is exactly one move, not two.
+    // `settlingFromPip` itself has to flip to true in the SAME synchronous
+    // pass as `fullscreen` above, not inside the LaunchedEffect below — a
+    // LaunchedEffect's body only starts running after this composition
+    // commits, so if the "= true" lived there, there was exactly one
+    // recomposition (the one where isInPictureInPicture first goes false)
+    // where isInPictureInPicture was already false AND settlingFromPip was
+    // still its old value of false. On that one frame the guard below is
+    // false, so playerContent() got moved straight out of the PiP Box into
+    // FullscreenPlayer's Box while the system's own PiP-exit window
+    // animation was still running — and one recomposition later, once the
+    // effect's `settlingFromPip = true` landed, it got moved straight back
+    // into the PiP Box, then forward again 220ms after that. That extra
+    // there-and-back move of the same movableContentOf-hoisted player
+    // content (see playerContent's own comment above) is what was tripping
+    // Compose's "Cannot insert LayoutNode... because it already has a
+    // parent" crash on expand-from-PiP — not the single clean move this was
+    // written to produce. Setting it synchronously here, exactly like
+    // `fullscreen` just above, closes that gap: both flip in the same pass
+    // isInPictureInPicture does, so the PiP Box stays the host without
+    // interruption until the (still-async) timeout below hands it off.
     var settlingFromPip by remember { mutableStateOf(false) }
+    if (justExitedPip) settlingFromPip = true
     LaunchedEffect(justExitedPip) {
         if (justExitedPip) {
-            settlingFromPip = true
             delay(220)
             settlingFromPip = false
         }
@@ -688,17 +744,45 @@ fun ChannelScreen(
 
             // Animated, not snapped: this crossfades from fully transparent
             // up to the real color (and directly between two colors on a
-            // channel switch) over half a second. Reading .value inside
-            // drawBehind below — rather than destructuring this with `by`
-            // up here in the composable body — is what keeps this cheap:
-            // that defers the read to the draw phase, so each animation
-            // tick only re-runs this one gradient draw, not a recomposition
-            // of the screen around it.
+            // channel switch) over most of the gap between samples (see
+            // AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface — samples land
+            // every 3s, this runs 2.8s of it), so the hue is nearly always
+            // gently in motion rather than easing in and then sitting still
+            // until the next sample. Combined with the sample blending in
+            // onFrameSnapshot above (which keeps any one step small), the
+            // color drifts continuously and slowly instead of visibly
+            // "updating". Reading .value inside drawBehind below — rather
+            // than destructuring this with `by` up here in the composable
+            // body — is what keeps this cheap: that defers the read to the
+            // draw phase, so each animation tick only re-runs this one
+            // gradient draw, not a recomposition of the screen around it.
             val animatedGlow = animateColorAsState(
                 targetValue = ambientColor ?: Color.Transparent,
-                animationSpec = tween(durationMillis = 500),
+                animationSpec = tween(durationMillis = 2_800),
                 label = "ambientGlow"
             )
+
+            // A slow, independent brightness pulse on top of the hue drift
+            // above — the actual "hypnotic" part. The color alone drifting
+            // smoothly reads as calm; a steady, gentle breathing rhythm
+            // layered on it is what reads as hypnotic rather than just
+            // static. Small amplitude (0.85-1.0) and a slow, even pace
+            // (4s each way, eased rather than linear) so it stays felt more
+            // than seen — this should never be something a viewer notices
+            // as "the corner is pulsing", just something that makes the
+            // glow feel alive rather than a flat wash of color. Only
+            // animated at all while the glow is actually shown.
+            val glowPulse = if (ambientGlowActive) {
+                rememberInfiniteTransition(label = "ambientPulse").animateFloat(
+                    initialValue = 0.85f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 4_000, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "ambientPulseAlpha"
+                )
+            } else null
 
             Box(
                 Modifier.fillMaxWidth()
@@ -706,6 +790,7 @@ fun ChannelScreen(
                         if (ambientGlowActive) Modifier.drawBehind {
                             val glow = animatedGlow.value
                             if (glow.alpha <= 0f) return@drawBehind
+                            val pulse = glowPulse?.value ?: 1f
                             // Bottom-only: color hangs below the video and
                             // fades out toward the outer edge, like light
                             // spilling out from underneath rather than a
@@ -718,7 +803,7 @@ fun ChannelScreen(
                             drawRect(
                                 brush = Brush.verticalGradient(
                                     0f to Color.Transparent,
-                                    0.93f to glow.copy(alpha = glow.alpha * 0.55f),
+                                    0.93f to glow.copy(alpha = glow.alpha * 0.55f * pulse),
                                     1f to Color.Transparent
                                 )
                             )
@@ -855,16 +940,6 @@ fun ChannelScreen(
     }
 }
 
-/**
- * Pulled out into its own composable (rather than calling AnimatedVisibility
- * inline inside the Column/Box above) specifically so it has no inherited
- * ColumnScope — calling AnimatedVisibility directly inside a Column's content
- * lambda makes Kotlin see both the plain top-level AnimatedVisibility and the
- * ColumnScope.AnimatedVisibility extension as implicit-receiver candidates
- * and refuse to pick one ("cannot be called in this context with an implicit
- * receiver"). A separate function has no such receiver in scope, so the call
- * below resolves unambiguously.
- */
 /**
  * The three dialogs that can interrupt joining or watching a channel —
  * a password prompt, and the two "native playback didn't work, try
@@ -1214,6 +1289,7 @@ private fun TvChatView(
     modifier: Modifier = Modifier
 ) {
     val nicoFocusRequester = remember { FocusRequester() }
+    val chatInputFocusRequester = remember { FocusRequester() }
     var nicoFocused by remember { mutableStateOf(false) }
     // Focus the Nico toggle on entry so there's an immediate, visible focus
     // target — without this the chat view opened with nothing focused at
@@ -1235,12 +1311,36 @@ private fun TvChatView(
     Column(
         Modifier
             .fillMaxSize()
+            // Up is one stop at a time, not a straight exit from anywhere in
+            // here: from the chat bar it goes to Nico, and only a *second*
+            // Up — now with Nico actually focused — leaves to the video.
+            // This has to live up here rather than on the input field itself
+            // (see ChatPanel's inputFieldModifier) because preview key events
+            // reach this Column before they reach whatever's focused below
+            // it, so this is the first and only place that sees every Up
+            // press regardless of which of the two stops currently has focus.
+            //
+            // Both KeyDown and KeyUp phases have to be swallowed here, not
+            // just KeyUp (where the actual action below fires) — this Column
+            // is not an ancestor of the message list, so ChatPanel's own
+            // Up/Down swallow on it never runs when focus is sitting in the
+            // chat input field a sibling below. Left unconsumed, the KeyDown
+            // phase fell through to Compose's default arrow-key focus
+            // search, which happily found the nearest focusable thing
+            // upward — a message's username, focusable via its own
+            // clickable — and jumped focus (and the list's scroll) there,
+            // at the same time this handler was also moving focus to Nico
+            // on the KeyUp that followed. That's what "chat should not be
+            // scrollable" was actually seeing: not a real scroll gesture,
+            // just a focus-search side effect nothing here was blocking.
             .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyUp && event.key == Key.DirectionUp) {
-                    onExit()
-                    true
-                } else {
+                if (event.key != Key.DirectionUp) {
                     false
+                } else {
+                    if (event.type == KeyEventType.KeyUp) {
+                        if (nicoFocused) onExit() else runCatching { nicoFocusRequester.requestFocus() }
+                    }
+                    true
                 }
             }
     ) {
@@ -1266,10 +1366,17 @@ private fun TvChatView(
                     .onFocusChanged { nicoFocused = it.isFocused }
                     .focusable()
                     .onKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyUp &&
-                            (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)
-                        ) {
+                        if (event.type != KeyEventType.KeyUp) {
+                            false
+                        } else if (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter) {
                             onToggleChatOverlay()
+                            true
+                        } else if (event.key == Key.DirectionDown) {
+                            // Straight to the chat bar, deliberately not a
+                            // default focus search — the message list sits
+                            // in between in the layout and must never be
+                            // what a Down press from here lands on.
+                            runCatching { chatInputFocusRequester.requestFocus() }
                             true
                         } else {
                             false
@@ -1302,9 +1409,9 @@ private fun TvChatView(
             }
         }
 
-        // Same ChatPanel the phone layout uses (message list, input, send,
-        // emote picker) — no Polls/User List/Playlist content in it at all,
-        // so there's nothing TV-specific to hide here and no separate
+        // Same ChatPanel the phone layout uses (message list, input, send)
+        // — no Polls/User List/Playlist content in it at all, so there's
+        // nothing else TV-specific to hide here and no separate
         // implementation to keep in sync with the phone one.
         ChatPanel(
             messages = state.messages,
@@ -1312,7 +1419,16 @@ private fun TvChatView(
             showEmotes = state.showEmotes,
             emotes = state.emotes,
             onSend = onSendChat,
-            modifier = Modifier.weight(1f).fillMaxWidth()
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            // No D-pad interaction with individual messages on TV — the
+            // list stays pinned to the latest message and is never a focus
+            // stop, so it can't get in the way of Nico <-> chat bar <-> video.
+            messagesFocusable = false,
+            inputFieldModifier = Modifier.focusRequester(chatInputFocusRequester),
+            // No touch to pick an emote with on TV, and the picker's grid
+            // is its own separate focus surface this screen isn't built to
+            // host — see ChatPanel's doc comment on the parameter.
+            showEmotePickerButton = false
         )
     }
     }

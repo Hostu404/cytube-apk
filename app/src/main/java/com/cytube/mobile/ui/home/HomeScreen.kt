@@ -17,7 +17,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,6 +34,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.BuildConfig
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
+import com.cytube.mobile.ui.isTvDevice
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,12 +45,20 @@ fun HomeScreen(
     vm: HomeViewModel = viewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val isTv = remember { isTvDevice(context) }
 
     LaunchedEffect(Unit) { vm.refreshSession() }
 
     Scaffold(
         topBar = {
-            LargeTopAppBar(
+            // A plain TopAppBar, not LargeTopAppBar — the large variant's
+            // whole point is a tall, expanded title area meant to collapse
+            // as the user scrolls, which just left a big empty gap above
+            // "CyTube APK" here since nothing collapses it. This one sits
+            // at the standard ~64dp height, so the title and everything
+            // below it (search, favourites, the list) all sit higher.
+            TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.Bottom) {
                         Text("CyTube APK", fontWeight = FontWeight.Bold)
@@ -73,7 +90,8 @@ fun HomeScreen(
                 SearchField(
                     query = state.query,
                     onQueryChange = vm::setQuery,
-                    onSubmit = { state.directEntryName?.let(onOpenChannel) }
+                    onSubmit = { state.directEntryName?.let(onOpenChannel) },
+                    isTv = isTv
                 )
             }
 
@@ -174,7 +192,13 @@ fun HomeScreen(
 }
 
 @Composable
-private fun SearchField(query: String, onQueryChange: (String) -> Unit, onSubmit: () -> Unit) {
+private fun SearchField(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onSubmit: () -> Unit,
+    isTv: Boolean
+) {
+    val focusManager = LocalFocusManager.current
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -191,7 +215,34 @@ private fun SearchField(query: String, onQueryChange: (String) -> Unit, onSubmit
         shape = RoundedCornerShape(16.dp),
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
         keyboardActions = KeyboardActions(onGo = { onSubmit() }),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .then(
+                if (isTv) {
+                    // Focusing this field on TV pops the on-screen keyboard, and
+                    // a bare D-pad Down press here was landing in the handoff
+                    // between that IME window and the activity's own window —
+                    // an "Input dispatching timed out (Application does not have
+                    // a focused window)" ANR that reproduced every time on the
+                    // TV emulator. onPreviewKeyEvent sees Down before the field
+                    // (and the IME it triggers) ever gets a chance to touch it,
+                    // so it's consumed here and turned into an explicit Compose
+                    // focus move instead — no IME window transition involved.
+                    Modifier.onPreviewKeyEvent { event ->
+                        if (event.key != Key.DirectionDown) {
+                            false
+                        } else {
+                            if (event.type == KeyEventType.KeyDown) {
+                                runCatching { focusManager.moveFocus(FocusDirection.Down) }
+                            }
+                            true
+                        }
+                    }
+                } else {
+                    Modifier
+                }
+            )
     )
 }
 

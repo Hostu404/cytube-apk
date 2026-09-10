@@ -17,6 +17,13 @@ enum class CompatMode { AUTOMATIC, NATIVE, WEB;
     companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: AUTOMATIC }
 }
 
+/** System default / Light / Dark — drives CyTubeSettingsTheme, which is what
+ *  the home and settings screens use (see MainActivity). SYSTEM is the
+ *  default so a fresh install still just follows the phone's own setting. */
+enum class ThemeMode { SYSTEM, LIGHT, DARK;
+    companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: SYSTEM }
+}
+
 data class Settings(
     val syncEnabled: Boolean = true,
     val syncAccuracy: Double = 2.0,
@@ -32,7 +39,10 @@ data class Settings(
     val ambientGlowEnabled: Boolean = true,
     /** Display name used to join chat as a guest. Blank means "not chosen
      *  yet" — one is generated and saved the first time it's needed. */
-    val guestName: String = ""
+    val guestName: String = "",
+    /** Manual override for CyTubeSettingsTheme (home + settings screens).
+     *  SYSTEM follows the phone's own light/dark setting. */
+    val themeMode: ThemeMode = ThemeMode.SYSTEM
 )
 
 class SettingsStore(private val context: Context) {
@@ -45,7 +55,8 @@ class SettingsStore(private val context: Context) {
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
             ambientGlowEnabled = p[AMBIENT_GLOW] ?: true,
-            guestName = p[GUEST_NAME] ?: ""
+            guestName = p[GUEST_NAME] ?: "",
+            themeMode = ThemeMode.parse(p[THEME_MODE])
         )
     }
 
@@ -57,6 +68,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setAmbientGlow(v: Boolean) = context.dataStore.edit { it[AMBIENT_GLOW] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
+    suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { it[THEME_MODE] = v.name }.let {}
 
     // ---- per-channel state ----
 
@@ -102,6 +114,7 @@ class SettingsStore(private val context: Context) {
         val PIP = booleanPreferencesKey("pip_enabled")
         val AMBIENT_GLOW = booleanPreferencesKey("ambient_glow_enabled")
         val GUEST_NAME = stringPreferencesKey("guest_name")
+        val THEME_MODE = stringPreferencesKey("theme_mode")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")
 

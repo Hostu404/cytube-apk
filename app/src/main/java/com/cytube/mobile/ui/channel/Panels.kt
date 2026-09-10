@@ -36,6 +36,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
@@ -48,7 +49,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
-import kotlin.random.Random
 import kotlinx.coroutines.delay
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
@@ -159,7 +159,24 @@ fun ChatPanel(
     showEmotes: Boolean,
     emotes: EmoteSet,
     onSend: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // TV only (see TvChatView) — the message list has no business capturing
+    // D-pad focus at all there: the whole point of that screen is a fixed
+    // video -> Nico -> chat bar stop order, and a chat message list that can
+    // steal focus (and, via Compose's default focus-into-view behavior,
+    // scroll itself away from the latest message) breaks both halves of
+    // that at once. False everywhere else, since phone/touch chat obviously
+    // still needs to scroll by hand.
+    messagesFocusable: Boolean = true,
+    // TV only — lets TvChatView attach its own FocusRequester/key handling
+    // (jump here from Nico on Down, jump back to Nico on Up) to the actual
+    // input field, without ChatPanel needing to know anything about Nico or
+    // focus requesters itself.
+    inputFieldModifier: Modifier = Modifier,
+    // TV only — there's no touch to pick an emote with, and the emote
+    // picker's own grid is a whole separate focus surface this screen's
+    // fixed video -> Nico -> chat bar stop order was never built to host.
+    showEmotePickerButton: Boolean = true
 ) {
     val context = LocalContext.current
     var draft by remember { mutableStateOf(TextFieldValue("")) }
@@ -208,7 +225,26 @@ fun ChatPanel(
     Column(modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+            modifier = Modifier.weight(1f).fillMaxWidth()
+                // Swallowing Up/Down here (rather than relying on every
+                // ChatRow's clickable bits somehow not being focusable) is
+                // what actually guarantees this: it stops D-pad focus from
+                // ever entering the list in the first place, so there is
+                // nothing here for Compose's default arrow-key focus search
+                // to land on or scroll into view.
+                .then(
+                    if (!messagesFocusable) {
+                        // Swallow both phases of Up/Down unconditionally —
+                        // not just KeyUp — so nothing here ever gets a
+                        // chance to treat the press as a focus-search or
+                        // scroll trigger.
+                        Modifier.onPreviewKeyEvent { event ->
+                            event.key == Key.DirectionUp || event.key == Key.DirectionDown
+                        }
+                    } else {
+                        Modifier
+                    }
+                ),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -222,7 +258,17 @@ fun ChatPanel(
                     // Tapping an emote someone already posted drops the same
                     // shortcode into the draft as picking it from the emote
                     // picker would — a quick way to reuse one you just saw.
-                    onEmoteClick = { code -> draft = draft.insertAtCursor(code) }
+                    onEmoteClick = { code -> draft = draft.insertAtCursor(code) },
+                    // TV: the username's own clickable is what was actually
+                    // grabbing D-pad focus out from under Up/Down swallowing
+                    // above — that only stops key events that reach the list
+                    // as an ancestor of the focused node, which isn't the
+                    // case when focus is sitting in the input field just
+                    // below it. Dropping the modifier entirely here (rather
+                    // than trying to keep it clickable-but-unfocusable) is
+                    // also just correct: there's no touch to tap a name with
+                    // on TV in the first place.
+                    usernameClickable = messagesFocusable
                 )
             }
         }
@@ -234,7 +280,7 @@ fun ChatPanel(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (emotes.all.isNotEmpty()) {
+            if (emotes.all.isNotEmpty() && showEmotePickerButton) {
                 IconButton(onClick = { showEmotePicker = true }) {
                     Icon(Icons.Default.Mood, contentDescription = "Emotes")
                 }
@@ -250,7 +296,7 @@ fun ChatPanel(
                 keyboardActions = KeyboardActions(onSend = {
                     onSend(draft.text); draft = TextFieldValue("")
                 }),
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f).then(inputFieldModifier)
             )
             FilledIconButton(
                 onClick = { onSend(draft.text); draft = TextFieldValue("") },
@@ -407,9 +453,11 @@ fun NekoChatOverlay(
                 val now = System.currentTimeMillis()
                 val lane = claimFreeLane(now)
                 if (lane != null) {
-                    val durationMs = Random.nextInt(7000, 10001)
+                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
                     state.laneFreeAtMs[lane] = now + durationMs
-                    state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                    state.active.add(
+                        FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
+                    )
                 } else {
                     // Every lane already busy the instant this one wanted to
                     // spawn — queue it instead of dropping it; the drain
@@ -449,11 +497,11 @@ fun NekoChatOverlay(
                     val lane = claimFreeLane(now)
                     if (lane != null) {
                         val msg = state.pending.removeFirst()
-                        // Same speed variety as before — a burst draining in
-                        // a row shouldn't move in lockstep either.
-                        val durationMs = Random.nextInt(7000, 10001)
+                        val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
                         state.laneFreeAtMs[lane] = now + durationMs
-                        state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                        state.active.add(
+                            FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
+                        )
                     }
                 }
                 delay(150)
@@ -482,8 +530,78 @@ data class FlyingComment(
     val id: Long,
     val msg: ChatMessage,
     val lane: Int,
+    /** Spawn-time estimate (see [estimateNekoDurationMs]) — used only to book
+     *  [NekoOverlayState.laneFreeAtMs] before the real text width is known,
+     *  and as the very first frame's animation target before that.
+     *  FlyingCommentItem recomputes the real value from the real measured
+     *  width via the same [nekoDurationMs] formula once it has one. */
     val durationMs: Int
 )
+
+/**
+ * Traditional niconico "naka" (scrolling) comments cross the screen in a
+ * fixed duration regardless of length — confirmed against danmaku2ass, the
+ * reference tool the danmaku community uses to precisely replicate real
+ * niconico/bilibili comment movement for burning into video: it moves every
+ * scrolling comment across (stageWidth + textWidth) in one fixed
+ * "duration_marquee" window, never a length-dependent one. That fixed window
+ * is exactly why a longer comment visibly moves FASTER on the real site —
+ * it has farther to travel in the very same time — which is the "traditional
+ * nico speed" this now emulates, per user request, in place of the constant-
+ * speed model tried right before this (which kept every message at the same
+ * pace and read as too slow for a long one by comparison).
+ *
+ * 4s (the literal traditional-nico figure) still read as a bit fast overall
+ * once this was actually on a phone screen — scaled to 5s per follow-up user
+ * feedback. NEKO_MAX_SPEED_PX_PER_MS and NEKO_MAX_DURATION_MS below are
+ * scaled by the same 5/4 factor alongside it, so the relationship between
+ * them — where the speed ceiling starts overriding the baseline — lands in
+ * the same place relative to message length as before, just uniformly 25%
+ * slower throughout instead of only for short messages.
+ */
+private const val NEKO_BASELINE_DURATION_MS = 5_000
+
+/**
+ * Speed ceiling — a safety net the real site doesn't need. Niconico itself
+ * caps a single comment at a modest character count, so its fixed duration
+ * above never has to cover more than a bounded distance. CyTube chat has no
+ * such cap, so without this, a genuinely long message would still be
+ * squeezed into the same fixed window and end up racing past unreadably
+ * fast — the original "long messages get cut off" complaint this whole
+ * thing started from. Anything within roughly niconico's own real-world
+ * comment length crosses at the traditional fixed duration above,
+ * untouched; only messages longer than that get a stretched-out (slower)
+ * duration to stay legible.
+ */
+private const val NEKO_MAX_SPEED_PX_PER_MS = 0.72f
+
+/** Absolute upper bound alongside the speed ceiling above — belt-and-braces
+ *  against something pathological (a pasted wall of text) camping a lane for
+ *  the better part of a minute; ordinary chat, even a long message, never
+ *  comes close to this. */
+private const val NEKO_MAX_DURATION_MS = 15_000
+
+/** Rough px-per-character (deliberately a bit generous for NEKO_TEXT_STYLE's
+ *  20sp bold) used only to ESTIMATE a not-yet-measured message's width at
+ *  spawn time, so [NekoOverlayState.laneFreeAtMs] is booked for roughly the
+ *  right length of time before FlyingCommentItem has actually measured it.
+ *  Overestimating here means a lane frees a little later than strictly
+ *  needed, never earlier while the real message is still on screen — this
+ *  estimate never affects what's drawn, only how long a lane is
+ *  provisionally held. */
+private const val NEKO_ESTIMATED_PX_PER_CHAR = 16f
+
+/** The actual traditional-nico duration formula: fixed baseline duration,
+ *  stretched out only once the message is long enough that holding the
+ *  speed ceiling would otherwise require less than that baseline. */
+private fun nekoDurationMs(distancePx: Float): Int =
+    (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
+        .coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
+
+private fun estimateNekoDurationMs(rawHtml: String, screenWidthPx: Float): Int {
+    val estimatedWidthPx = rawHtml.length * NEKO_ESTIMATED_PX_PER_CHAR
+    return nekoDurationMs(screenWidthPx + estimatedWidthPx)
+}
 
 /** Vertical space each flying line gets — tall enough for NEKO_TEXT_STYLE's
  *  20sp bold plus a little breathing room between lines. */
@@ -547,19 +665,23 @@ private fun FlyingCommentItem(
     // 0f until the first layout pass below reports the real width, which
     // happens on the very first frame, before the comment has travelled any
     // visible distance — so retargeting the animation the moment it's known
-    // isn't seen as a stutter. Duration is deliberately left as chosen at
-    // spawn time rather than stretched for the extra distance: that's also
-    // what NekoOverlayState.laneFreeAtMs assumed when it reserved this
-    // comment's lane, and stretching it here without telling that bookkeeping
-    // would let the next comment claim the lane before this one actually
-    // clears it.
+    // isn't seen as a stutter.
     var textWidthPx by remember(comment.id) { mutableStateOf(0f) }
 
     val x = remember(comment.id) { Animatable(screenWidthPx) }
     LaunchedEffect(comment.id, screenWidthPx, textWidthPx) {
+        // Duration is recomputed here from the REAL measured width via the
+        // same nekoDurationMs formula, not read off comment.durationMs — that
+        // field is only the spawn-time estimate used to book
+        // NekoOverlayState.laneFreeAtMs before this layout pass happened, and
+        // (being a bit generous by design, see NEKO_ESTIMATED_PX_PER_CHAR) it
+        // frees the lane at or after this real duration finishes, never
+        // before.
+        val distance = screenWidthPx + textWidthPx
+        val durationMs = nekoDurationMs(distance)
         x.animateTo(
-            targetValue = -(screenWidthPx + textWidthPx),
-            animationSpec = tween(durationMillis = comment.durationMs, easing = LinearEasing)
+            targetValue = -distance,
+            animationSpec = tween(durationMillis = durationMs, easing = LinearEasing)
         )
         onFinished()
     }
@@ -693,7 +815,8 @@ private fun ChatRow(
     emotes: EmoteSet,
     onUsernameClick: (String) -> Unit,
     onLinkClick: (String) -> Unit,
-    onEmoteClick: (String) -> Unit
+    onEmoteClick: (String) -> Unit,
+    usernameClickable: Boolean = true
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes) {
@@ -729,7 +852,13 @@ private fun ChatRow(
                 // invisible dead space around a target that stays small —
                 // short usernames were easy to miss otherwise.
                 modifier = Modifier
-                    .clickable { onUsernameClick(msg.username) }
+                    .then(
+                        if (usernameClickable) {
+                            Modifier.clickable { onUsernameClick(msg.username) }
+                        } else {
+                            Modifier
+                        }
+                    )
                     .padding(vertical = 4.dp, horizontal = 2.dp)
             )
             Text(

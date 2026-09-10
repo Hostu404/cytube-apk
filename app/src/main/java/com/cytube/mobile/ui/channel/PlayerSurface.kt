@@ -25,7 +25,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -473,11 +472,14 @@ private fun ExoSurface(
 private const val AMBIENT_SAMPLE_SIZE = 16
 
 /** How often the ambient glow resamples the video while it's playing — see
- *  the LaunchedEffect in ExoSurface. Infrequent on purpose: this is a poll,
- *  not a frame hook, and the glow's own crossfade already smooths each new
- *  color in over half a second, so there is nothing to gain from sampling
- *  more often than a viewer could actually perceive as a color change. */
-private const val AMBIENT_RESAMPLE_INTERVAL_MS = 4_000L
+ *  the LaunchedEffect in ExoSurface. Still infrequent (a poll, not a frame
+ *  hook) but shorter than it once was: ChannelScreen's crossfade now runs
+ *  nearly this whole interval on purpose, so the glow is close to always in
+ *  motion rather than easing in and then sitting still — a shorter interval
+ *  is what keeps that continuous feel from also meaning a longer crossfade
+ *  per step, since each sample only nudges the color (see
+ *  AMBIENT_SAMPLE_BLEND in ChannelScreen) rather than setting it outright. */
+private const val AMBIENT_RESAMPLE_INTERVAL_MS = 3_000L
 
 /** Process-wide, ever-increasing — see the doc comment on ExoSurface's
  *  mediaSession for why every MediaSession this app ever creates needs a

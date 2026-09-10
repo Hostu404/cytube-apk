@@ -1,21 +1,16 @@
 package com.cytube.mobile.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-private val Accent = Color(0xFF4F7CFF)
 private val AccentDark = Color(0xFF8AA8FF)
 
 private val DarkScheme = darkColorScheme(
@@ -28,13 +23,6 @@ private val DarkScheme = darkColorScheme(
     onBackground = Color(0xFFE4E5E8)
 )
 
-private val LightScheme = lightColorScheme(
-    primary = Accent,
-    surface = Color(0xFFFBFBFD),
-    surfaceContainer = Color(0xFFF1F2F6),
-    background = Color(0xFFFFFFFF)
-)
-
 private val AppTypography = Typography(
     titleLarge = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.SemiBold),
     titleMedium = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium),
@@ -42,18 +30,43 @@ private val AppTypography = Typography(
     labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium)
 )
 
+/**
+ * Always dark, deliberately — not driven by the system light/dark setting
+ * or (on API 31+) Material You dynamic color the way this used to be. CyTube
+ * itself only ships a dark skin (see CyTubeChannelScheme's own doc comment
+ * below, which already committed the channel screen to this), and dynamic
+ * color in particular was the reason this could come out looking nothing
+ * like the app's own intended palette — it recolors everything from the
+ * device wallpaper, light or dark, independent of what's defined here.
+ */
 @Composable
-fun CyTubeTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
-) {
-    val context = LocalContext.current
-    val scheme = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        darkTheme -> DarkScheme
-        else -> LightScheme
-    }
+fun CyTubeTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = DarkScheme, typography = AppTypography, content = content)
+}
+
+/** Light counterpart to DarkScheme above, used only by CyTubeSettingsTheme
+ *  below — everywhere else in the app is always dark, deliberately, per the
+ *  doc comment on CyTubeTheme. */
+private val LightScheme = lightColorScheme(
+    primary = Color(0xFF3B5FC4),
+    onPrimary = Color(0xFFFFFFFF)
+)
+
+/**
+ * Settings-only theme, used for the home and settings screens (see
+ * MainActivity). Unlike the channel screen (matching CyTube's own dark skin)
+ * or the rest of the app (deliberately always dark — see CyTubeTheme's doc
+ * comment), these are plain screens with no CyTube-branded look to protect,
+ * so by default this just follows the phone's own light/dark setting.
+ *
+ * [darkTheme] defaults to the system setting but is a parameter, not read
+ * internally, so a caller can resolve the user's ThemeMode preference
+ * (Settings > Appearance — System default/Light/Dark) and pass the result
+ * in instead of always trusting isSystemInDarkTheme().
+ */
+@Composable
+fun CyTubeSettingsTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    val scheme = if (darkTheme) DarkScheme else LightScheme
     MaterialTheme(colorScheme = scheme, typography = AppTypography, content = content)
 }
 
@@ -88,8 +101,10 @@ private val CyTubeChannelScheme = darkColorScheme(
 )
 
 /**
- * Wraps only the channel screen. Home, favourites and settings keep the normal
- * app theme, which restores itself automatically when this leaves composition.
+ * Wraps the channel screen (and, on phone, home too — see MainActivity's
+ * "home" destination). Settings has its own CyTubeSettingsTheme above instead,
+ * which follows the system setting rather than this always-dark palette. This
+ * restores itself automatically when it leaves composition.
  */
 @Composable
 fun CyTubeChannelTheme(content: @Composable () -> Unit) {

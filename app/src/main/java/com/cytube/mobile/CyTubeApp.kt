@@ -10,6 +10,8 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.player.YouTubeResolver
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 
 /**
  * Emotes are the same handful of small images repeated thousands of times in a
@@ -27,17 +29,33 @@ class CyTubeApp : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
-            // A client built off Graph.http (same connection pool/dispatcher),
-            // not Graph.http itself — this header is specific to fetching
-            // third-party emote images, not something the login flow,
-            // channel-index scrape, or socket handshake want touched.
-            // Some emote hosts (Discord's CDN and Imgur in particular) 403 a
-            // hotlinked request carrying OkHttp's default "okhttp/x.y.z"
-            // User-Agent; a plain browser-looking one is enough to pass
-            // their hotlink-protection check, which is all this is — the
-            // same request a browser's own <img> tag would have made.
+            // A client built off Graph.http, not Graph.http itself — but
+            // deliberately NOT sharing its Dispatcher/ConnectionPool.
+            // `newBuilder()` copies those by reference by default, which
+            // would mean emote-image fetches compete for the exact same
+            // connection slots as the video player's own byte-fetching —
+            // NativePlayerHandle's OkHttpDataSource is built on this same
+            // Graph.http instance. A chat-heavy channel's backlog can fire
+            // a real burst of emote image requests right as a video is
+            // loading, and OkHttp's default limits (64 total, 5/host) are
+            // shared process-wide unless a client explicitly gets its own —
+            // so giving this one its own keeps a busy chat from ever being
+            // able to delay the player. Everything else (timeouts, no
+            // cookie jar — see the User-Agent comment below) still comes
+            // from Graph.http.
             .okHttpClient {
                 Graph.http.newBuilder()
+                    .dispatcher(Dispatcher())
+                    .connectionPool(ConnectionPool())
+                    // This header is specific to fetching third-party emote
+                    // images, not something the login flow, channel-index
+                    // scrape, or socket handshake want touched. Some emote
+                    // hosts (Discord's CDN and Imgur in particular) 403 a
+                    // hotlinked request carrying OkHttp's default
+                    // "okhttp/x.y.z" User-Agent; a plain browser-looking one
+                    // is enough to pass their hotlink-protection check,
+                    // which is all this is — the same request a browser's
+                    // own <img> tag would have made.
                     .addNetworkInterceptor { chain ->
                         chain.proceed(
                             chain.request().newBuilder()

@@ -3,8 +3,10 @@ package com.cytube.mobile.player
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Dispatcher
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -41,7 +43,21 @@ object YouTubeResolver {
 
     fun init(http: OkHttpClient) {
         if (initialised) return
+        // Built off Graph.http, but deliberately NOT sharing its
+        // Dispatcher/ConnectionPool — same reasoning as the emote image
+        // loader in CyTubeApp.kt. `newBuilder()` copies those by reference
+        // by default, and NewPipeExtractor's StreamInfo.getInfo() fires a
+        // whole burst of requests (player page, config, cipher fetches...)
+        // for a single YouTube resolution, exactly when the player is
+        // trying to start up. Without its own pool that burst would
+        // compete with the player's own byte-fetching (NativePlayerHandle's
+        // OkHttpDataSource, also on Graph.http) for the same limited
+        // connection slots — this is likely the more impactful of the two,
+        // since it happens on every YouTube load and playlist advance, not
+        // just in chat-heavy channels.
         val newPipeHttp = http.newBuilder()
+            .dispatcher(Dispatcher())
+            .connectionPool(ConnectionPool())
             .followRedirects(true)
             .cookieJar(SessionCookieJar())
             .build()

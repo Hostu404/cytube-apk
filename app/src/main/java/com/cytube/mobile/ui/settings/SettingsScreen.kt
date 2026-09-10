@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
+import com.cytube.mobile.data.ThemeMode
 import com.cytube.mobile.ui.channel.openInBrowser
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.launch
@@ -49,6 +50,30 @@ fun SettingsScreen(onBack: () -> Unit) {
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
         ) {
+            SectionTitle("Appearance")
+
+            // Drives CyTubeSettingsTheme for this screen and home (see
+            // MainActivity) — System default just follows the phone's own
+            // light/dark setting, same as before this existed.
+            ThemeMode.entries.forEach { mode ->
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = settings.themeMode == mode,
+                        onClick = { scope.launch { store.setThemeMode(mode) } }
+                    )
+                    Text(
+                        when (mode) {
+                            ThemeMode.SYSTEM -> "System default"
+                            ThemeMode.LIGHT -> "Light"
+                            ThemeMode.DARK -> "Dark"
+                        }
+                    )
+                }
+            }
+
             SectionTitle("Playback")
 
             SwitchRow(
@@ -76,10 +101,9 @@ fun SettingsScreen(onBack: () -> Unit) {
 
             if (!isTv) {
                 SwitchRow(
-                    title = "Picture-in-picture (Experimental)",
-                    subtitle = "Keep the video playing when you leave the app. Still " +
-                        "rough — expanding back out of it can misbehave or crash. " +
-                        "Off by default until that's solid.",
+                    title = "Picture-in-picture",
+                    subtitle = "Keep the video playing in a small floating window when " +
+                        "you leave the app. Off by default — turn it on to try it out.",
                     checked = settings.pipEnabled
                 ) { scope.launch { store.setPip(it) } }
 
@@ -126,6 +150,13 @@ fun SettingsScreen(onBack: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
             ) {
                 Text("☕ Buy Hostu a dunkaccino! ❤️")
+            }
+
+            OutlinedButton(
+                onClick = { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
+            ) {
+                Text("View source on GitHub")
             }
 
             Spacer(Modifier.height(32.dp))
