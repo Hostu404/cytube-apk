@@ -276,7 +276,7 @@ fun ChatPanel(
  * the cursor and nothing is sent. Existing input is preserved.
  */
 private fun TextFieldValue.insertReply(username: String): TextFieldValue =
-    insertAtCursor(if (text.isBlank()) "$username: " else "$username: ")
+    insertAtCursor("$username: ")
 
 private fun TextFieldValue.insertAtCursor(fragment: String): TextFieldValue {
     val at = selection.start.coerceIn(0, text.length)
@@ -320,6 +320,17 @@ class NekoOverlayState {
     var nextId = 0L
     val laneFreeAtMs = HashMap<Int, Long>()
     var hasCaughtUp = false
+
+    /** Messages waiting for a lane to free up — see the drain loop in
+     *  [NekoChatOverlay]. Every message that arrives while the overlay is on
+     *  is queued here and animated as soon as a lane opens, rather than
+     *  being silently skipped the moment it arrives just because all lanes
+     *  happened to be busy that instant; that was making chat look like it
+     *  was dropping messages that had actually just gone through fine.
+     *  Bounded so a genuinely pathological sustained flood can't grow this
+     *  without limit — under that extreme the OLDEST queued message is the
+     *  one given up on, never one already animating or a brand-new arrival. */
+    val pending = ArrayDeque<ChatMessage>()
 }
 
 /**
@@ -399,29 +410,54 @@ fun NekoChatOverlay(
                     val durationMs = Random.nextInt(7000, 10001)
                     state.laneFreeAtMs[lane] = now + durationMs
                     state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                } else {
+                    // Every lane already busy the instant this one wanted to
+                    // spawn — queue it instead of dropping it; the drain
+                    // loop below picks it up the moment a lane opens.
+                    state.pending.addLast(msg)
                 }
                 delay(350)
             }
         }
 
+        // Fresh arrivals are only ever enqueued here, never spawned
+        // directly — claiming a lane and actually animating a message is
+        // entirely the drain loop's job below. That way a message that
+        // arrives the same instant every lane happens to be busy is simply
+        // queued, not skipped: previously this dropped it outright the
+        // moment claimFreeLane came back empty, which is exactly what made
+        // some typed messages look like they "didn't go through" on the
+        // overlay even though they were always in the real chat panel.
         LaunchedEffect(messages) {
             val fresh = messages.filter { !it.isServerMessage && it.seq > state.lastSpawnedSeq }
-            fresh.forEach { msg ->
-                val now = System.currentTimeMillis()
-                val lane = claimFreeLane(now)
-                if (lane != null) {
-                    // A little speed variety — the same trick real Niconico
-                    // comments use so a burst of fast chat doesn't turn into
-                    // a single flat line all moving in lockstep.
-                    val durationMs = Random.nextInt(7000, 10001)
-                    state.laneFreeAtMs[lane] = now + durationMs
-                    state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
-                }
-                // No free lane: this message is dropped from the overlay,
-                // same as a real Niconico feed thinning under load — it's
-                // still in the real chat panel, this is just a glance-over.
+            for (msg in fresh) {
+                if (state.pending.size >= NEKO_MAX_PENDING) state.pending.removeFirstOrNull()
+                state.pending.addLast(msg)
             }
             if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
+        }
+
+        // Drains the queue as lanes free up, for as long as the overlay is
+        // on. A short, fixed poll interval rather than reacting to lane
+        // expiry directly — simple, and cheap enough (a HashMap scan over
+        // at most NEKO_MAX_LANES entries) that it costs nothing noticeable
+        // against the video it's drawn over.
+        LaunchedEffect(state) {
+            while (true) {
+                if (state.pending.isNotEmpty()) {
+                    val now = System.currentTimeMillis()
+                    val lane = claimFreeLane(now)
+                    if (lane != null) {
+                        val msg = state.pending.removeFirst()
+                        // Same speed variety as before — a burst draining in
+                        // a row shouldn't move in lockstep either.
+                        val durationMs = Random.nextInt(7000, 10001)
+                        state.laneFreeAtMs[lane] = now + durationMs
+                        state.active.add(FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs))
+                    }
+                }
+                delay(150)
+            }
         }
 
         state.active.forEach { comment ->
@@ -457,6 +493,13 @@ private val NEKO_LANE_HEIGHT = 34.dp
  *  Niconico itself only ever uses a modest number of rows regardless of
  *  screen size. */
 private const val NEKO_MAX_LANES = 10
+
+/** Hard cap on [NekoOverlayState.pending] — protects against unbounded
+ *  growth under a genuinely pathological sustained flood. Ordinary chat,
+ *  even a busy one, never comes close: at ~150ms drain ticks and up to
+ *  NEKO_MAX_LANES spawning per tick, the queue drains far faster than it
+ *  could realistically fill. */
+private const val NEKO_MAX_PENDING = 200
 
 /** How many already-buffered messages replay immediately when the overlay
  *  is turned on — enough to feel alive right away without dumping the

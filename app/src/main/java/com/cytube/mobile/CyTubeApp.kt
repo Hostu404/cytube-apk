@@ -27,7 +27,30 @@ class CyTubeApp : Application(), ImageLoaderFactory {
 
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
-            .okHttpClient { Graph.http }
+            // A client built off Graph.http (same connection pool/dispatcher),
+            // not Graph.http itself — this header is specific to fetching
+            // third-party emote images, not something the login flow,
+            // channel-index scrape, or socket handshake want touched.
+            // Some emote hosts (Discord's CDN and Imgur in particular) 403 a
+            // hotlinked request carrying OkHttp's default "okhttp/x.y.z"
+            // User-Agent; a plain browser-looking one is enough to pass
+            // their hotlink-protection check, which is all this is — the
+            // same request a browser's own <img> tag would have made.
+            .okHttpClient {
+                Graph.http.newBuilder()
+                    .addNetworkInterceptor { chain ->
+                        chain.proceed(
+                            chain.request().newBuilder()
+                                .header(
+                                    "User-Agent",
+                                    "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 " +
+                                        "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                                )
+                                .build()
+                        )
+                    }
+                    .build()
+            }
             .components {
                 // Animated GIF emotes in chat (CyTube channels use a lot of
                 // them). Registered globally on the loader, but the emote
@@ -35,8 +58,22 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                 // since a whole grid of simultaneously-animating GIFs is real
                 // decode/CPU cost for a picker that's only up for a second to
                 // tap an emote.
+                //
+                // GifDecoder is registered ahead of ImageDecoderDecoder on
+                // every API level, not just <28. Coil tries factories in
+                // registration order and uses the first one that claims the
+                // source; platform ImageDecoder (API 28+) silently produces a
+                // *static* first frame for a subset of real-world GIFs (odd
+                // frame-disposal/timing metadata some emote packs use) rather
+                // than failing, so it was winning the claim and quietly
+                // de-animating them. GifDecoder's own Movie-based decoder is
+                // the one CyTube's own web client effectively relies on and
+                // handles that metadata correctly, so it goes first; that
+                // also means it now handles GIFs on all API levels. Non-GIF
+                // formats (PNG/WebP/etc.) aren't claimed by GifDecoder, so
+                // ImageDecoderDecoder still decodes those, on API 28+.
+                add(GifDecoder.Factory())
                 if (Build.VERSION.SDK_INT >= 28) add(ImageDecoderDecoder.Factory())
-                else add(GifDecoder.Factory())
             }
             .memoryCache {
                 MemoryCache.Builder(this)

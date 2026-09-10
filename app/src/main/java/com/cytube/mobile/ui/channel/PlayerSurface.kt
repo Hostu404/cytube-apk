@@ -39,6 +39,7 @@ import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.YouTubeResolver
+import kotlinx.coroutines.delay
 
 /**
  * Layer 4: player implementations.
@@ -57,11 +58,14 @@ fun PlayerSurface(
     onFailed: (String) -> Unit,
     epoch: Int = 0,
     modifier: Modifier = Modifier,
-    /** Fires once per video item, right as its first frame renders — not on
-     *  a timer, not per frame. See ExoSurface for why a one-time TextureView
-     *  snapshot is cheap enough to not worry about, unlike sampling every
-     *  frame would be. Used to color the ambient glow behind the windowed
-     *  player; null for EMBED/WEB, which have no ExoPlayer to snapshot. */
+    /** Fires right as each item's first frame renders, and then again on a
+     *  slow, fixed interval for as long as that item keeps playing — see
+     *  ExoSurface for why a tiny downsampled TextureView grab is cheap
+     *  enough to repeat every few seconds without it costing anything
+     *  worth worrying about, unlike sampling every frame would be. Used to
+     *  color the ambient glow behind the windowed player, which crossfades
+     *  between whatever colors arrive here rather than snapping; null for
+     *  EMBED/WEB, which have no ExoPlayer to snapshot. */
     onFrameSnapshot: ((Bitmap) -> Unit)? = null
 ) {
     val embedSrc = media?.embedSrc
@@ -321,19 +325,24 @@ private fun ExoSurface(
 
     DisposableEffect(exo) {
         val listener = object : Player.Listener {
-            // A one-time snapshot per item, taken the moment its first frame
-            // actually renders — not a timer, not sampled per frame. Media3
-            // calls this again on later transitions within the same
-            // ExoPlayer instance too (e.g. epoch stays put but the media
-            // source is swapped), which is exactly when a fresh snapshot is
-            // wanted anyway: a new video means a new dominant color.
+            // The immediate snapshot: taken the moment a new item's first
+            // frame actually renders, so the glow doesn't sit on the
+            // PREVIOUS item's color for the first few seconds of a new one.
+            // Media3 also calls this on a media-source swap within the same
+            // ExoPlayer instance (epoch unchanged, e.g. a playlist advance),
+            // which is exactly when a fresh snapshot is wanted too. The
+            // periodic resample loop below (see the LaunchedEffect right
+            // after this listener) is what keeps the color moving with the
+            // video for the rest of that item's runtime, rather than this
+            // one-shot being the only update it ever gets.
             override fun onRenderedFirstFrame() {
                 val snapshot = onFrameSnapshot ?: return
                 val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
                 // TextureView.getBitmap(w, h) downsamples internally rather
                 // than copying the full-resolution frame out first — this is
-                // already about as cheap as a frame grab gets, and it only
-                // ever runs once per item.
+                // already about as cheap as a frame grab gets. This call site
+                // only fires once per item (right as it starts); the
+                // periodic resample loop below is the separate, ongoing one.
                 runCatching { textureView.getBitmap(AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE) }
                     .getOrNull()
                     ?.let(snapshot)
@@ -365,6 +374,29 @@ private fun ExoSurface(
         }
         exo.addListener(listener)
         onDispose { exo.removeListener(listener) }
+    }
+
+    // Keeps the ambient glow actually tracking the video instead of freezing
+    // on whatever color the first frame happened to be — the gap the one-shot
+    // snapshot above left. Deliberately a slow poll rather than a frame
+    // callback: AMBIENT_RESAMPLE_INTERVAL_MS is long enough that this is a
+    // handful of tiny 16x16 TextureView grabs per minute, not a per-frame
+    // cost, and ChannelScreen already crossfades every new color in over half
+    // a second, so infrequent sampling still reads as smooth rather than a
+    // visible jump. Skipped entirely while paused — nothing new to sample,
+    // and a paused screen is exactly the "avoid processing when paused"
+    // case — and it costs nothing at all when onFrameSnapshot is null
+    // (ambient glow can't be shown for this surface, e.g. EMBED/WEB).
+    LaunchedEffect(exo) {
+        val snapshot = onFrameSnapshot ?: return@LaunchedEffect
+        while (true) {
+            delay(AMBIENT_RESAMPLE_INTERVAL_MS)
+            if (!exo.isPlaying) continue
+            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
+            runCatching { textureView.getBitmap(AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE) }
+                .getOrNull()
+                ?.let(snapshot)
+        }
     }
 
     DisposableEffect(handle) {
@@ -440,6 +472,13 @@ private fun ExoSurface(
  *  tiny on purpose, since it's only ever averaged into one color. */
 private const val AMBIENT_SAMPLE_SIZE = 16
 
+/** How often the ambient glow resamples the video while it's playing — see
+ *  the LaunchedEffect in ExoSurface. Infrequent on purpose: this is a poll,
+ *  not a frame hook, and the glow's own crossfade already smooths each new
+ *  color in over half a second, so there is nothing to gain from sampling
+ *  more often than a viewer could actually perceive as a color change. */
+private const val AMBIENT_RESAMPLE_INTERVAL_MS = 4_000L
+
 /** Process-wide, ever-increasing — see the doc comment on ExoSurface's
  *  mediaSession for why every MediaSession this app ever creates needs a
  *  genuinely unique id, not just one that's unique per ExoSurface call. */
@@ -449,10 +488,10 @@ private fun nextMediaSessionId(): Int = mediaSessionIdCounter.getAndIncrement()
 /**
  * Cheap, good-enough dominant-color extraction for the ambient glow: average
  * every pixel of the tiny [AMBIENT_SAMPLE_SIZE] snapshot rather than running
- * a real palette/quantization pass. This runs once per video item (see
- * ExoSurface's onRenderedFirstFrame above), never per frame, so even a naive
- * full-bitmap average costs nothing measurable — the snapshot itself is
- * already tiny by the time this sees it.
+ * a real palette/quantization pass. Called on each item's first frame and
+ * then on ExoSurface's slow [AMBIENT_RESAMPLE_INTERVAL_MS] poll while it
+ * keeps playing — never per frame — so even a naive full-bitmap average
+ * costs nothing measurable at either the snapshot's tiny size or this rate.
  */
 internal fun averageColor(bitmap: Bitmap): Color {
     val w = bitmap.width

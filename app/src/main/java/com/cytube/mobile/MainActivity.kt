@@ -25,6 +25,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.ui.channel.ChannelScreen
 import com.cytube.mobile.ui.channel.PlaybackHost
 import com.cytube.mobile.ui.home.HomeScreen
@@ -46,12 +47,6 @@ class MainActivity : ComponentActivity() {
      *  instead of once per recomposition while floating. Reset whenever PiP
      *  is (re)entered so the icon is still synced at least once. */
     private var lastPipIsPlaying: Boolean? = null
-
-    /** True only right after we ourselves entered PiP from [onUserLeaveHint] —
-     *  distinguishes "the app is still visible, just small" from "the app is
-     *  genuinely backgrounded", which is what decides whether [onStop] should
-     *  pause playback. */
-    private var enteredPip = false
 
     private val pipActionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -128,23 +123,16 @@ class MainActivity : ComponentActivity() {
     /**
      * PiP on leaving the app — but only while something is actually eligible
      * for it (a native player showing video) and the user has the Settings
-     * toggle on. If we don't enter PiP here, [onStop] pauses playback instead
-     * of leaving it running invisibly in the background.
+     * toggle on. When it isn't (disabled, ineligible item, or the OS
+     * declines), playback is deliberately left alone rather than paused:
+     * Home/Recents should let video and audio keep playing in the
+     * background using ExoPlayer/NewPipe's own normal lifecycle, the same
+     * way PiP's floating window already does — not something this Activity
+     * has to drive. onStop()/onStart() intentionally do nothing to playback.
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        enteredPip = maybeEnterPip()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        if (!enteredPip) playbackHost?.onPauseForBackground?.invoke()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        enteredPip = false
-        playbackHost?.onResumeForForeground?.invoke()
+        maybeEnterPip()
     }
 
     override fun onDestroy() {
@@ -155,7 +143,6 @@ class MainActivity : ComponentActivity() {
     override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         inPip = isInPictureInPictureMode
-        if (!isInPictureInPictureMode) enteredPip = false
         // Forget the last-synced play/pause icon state on every transition
         // so the next time PiP is active it gets synced fresh at least once,
         // rather than possibly skipping the very first update after re-entry.
@@ -204,11 +191,10 @@ class MainActivity : ComponentActivity() {
         if (data.host != "cytu.be") return null
         val segments = data.pathSegments
         if (segments.size < 2 || segments[0] != "r") return null
-        return segments[1].takeIf { CHANNEL_NAME.matches(it) }
+        return segments[1].takeIf { CHANNEL_NAME_REGEX.matches(it) }
     }
 
     private companion object {
         const val ACTION_PIP_PLAY_PAUSE = "com.cytube.mobile.PIP_PLAY_PAUSE"
-        val CHANNEL_NAME = Regex("^[A-Za-z0-9_-]{1,100}$")
     }
 }

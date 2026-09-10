@@ -121,7 +121,7 @@ class SyncEngine {
         if (withinGracePeriod) return Result()
 
         val local = player.currentTimeSeconds()
-        val diff = if (currentTime - local != 0.0) currentTime - local else currentTime
+        val diff = if (currentTime - local != 0.0) currentTime - local else 0.0
 
         return when {
             diff > HARD_SEEK_THRESHOLD -> {

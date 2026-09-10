@@ -19,14 +19,24 @@ object Graph {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
-            .followRedirects(false)   // we need to read Set-Cookie on the 302
             .build()
+    }
+
+    // AuthRepository's login POST needs to read Set-Cookie off the 302 that
+    // CyTube's /login returns, which OkHttp would otherwise follow and discard
+    // before that header is ever seen. Scoped to its own client — built off
+    // `http` so it still shares its connection pool and dispatcher — rather
+    // than disabling redirects on `http` itself, which every other consumer
+    // (media byte fetches, the channel-index scrape, Drive/YouTube resolving)
+    // shares and none of which want redirects suppressed.
+    private val authHttp: OkHttpClient by lazy {
+        http.newBuilder().followRedirects(false).build()
     }
 
     private var authRepo: AuthRepository? = null
 
     fun auth(context: Context): AuthRepository =
-        authRepo ?: AuthRepository(context.applicationContext, http, BASE_URL).also { authRepo = it }
+        authRepo ?: AuthRepository(context.applicationContext, authHttp, BASE_URL).also { authRepo = it }
 
     val channelIndex: ChannelIndexRepository by lazy {
         ChannelIndexRepository(http, BASE_URL)

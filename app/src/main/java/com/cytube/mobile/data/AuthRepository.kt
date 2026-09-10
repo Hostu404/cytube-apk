@@ -1,9 +1,11 @@
 package com.cytube.mobile.data
 
 import android.content.Context
+import android.webkit.CookieManager
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.cytube.mobile.net.CyTubeClient
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
@@ -75,6 +77,19 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
             }
         }
         prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
+
+        // WebCompatView shares the auth cookie into Android's WebView
+        // CookieManager so the user isn't asked to log in twice there. That
+        // store is process-wide and disk-persisted, entirely separate from
+        // the EncryptedSharedPreferences cleared above — left alone, a
+        // logged-out user who had ever opened Compatibility Mode would still
+        // be shown as logged in when they opened it again.
+        runCatching {
+            CookieManager.getInstance().apply {
+                removeAllCookies(null)
+                flush()
+            }
+        }
     }
 
     suspend fun login(username: String, password: String, remember: Boolean): LoginOutcome =
@@ -116,6 +131,11 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                     }
                     LoginOutcome.Success(session)
                 }
+            } catch (e: CancellationException) {
+                // Not a login failure — the caller (e.g. the login screen's
+                // ViewModel scope) was cancelled out from under this request.
+                // Let it propagate so structured concurrency isn't broken.
+                throw e
             } catch (e: Exception) {
                 // Never surface the exception verbatim — it can carry the URL
                 // with query params. Keep it generic.

@@ -1,107 +1,178 @@
 # CyTube APK
 
-**☕ If this is useful to you, [buy me a dunkaccino on Ko-fi](https://ko-fi.com/hostu) — it genuinely helps to keep this going.**
+**A native CyTube client for Android, Android TV and Amazon Fire TV.**
 
-Ever wanted a CyTube app on your phone, or your Fire Stick / Android TV?
-**Now you can.**
+Watch synchronized videos with others, chat in real time, browse channels, manage playlists and use CyTube custom emotes — without relying on a browser.
 
-This is a real native Android app for [CyTube](https://cytu.be) — not a
-website stuffed into a WebView.
-
-- 📺 **Native video playback** — YouTube, direct files, HLS, The Kinoplex
-  and more, playing through the phone's own player instead of a browser tab
-- 💬 **Live chat** — inline emotes (including
-  animated GIF emotes that actually animate), greentext, spoilers, tap a
-  username to reply
-- 📋 **Playlist, user list, and polls**, right there in the app
-- ⭐ **Favourites and a recents list** so your regular channels are one tap
-  away, plus direct-join by name and a browsable public channel list
-- 📺 **Works on Fire TV / Android TV out of the box** — sideload the same
-  APK, no separate build or setup
-- 🔓 **No account required** — join as a guest or log in, your call
-- 🆓 **Free and open source.** No ads, no tracking, no login wall
-  
-<img width="372" height="522" alt="image" src="https://github.com/user-attachments/assets/ae596f21-fef1-4606-93dd-dd88e322575d" />
-
-## Known Issues
-- Picture in Picture (PIP) still janky *turned off by default and marked experimental in settings
-- Google Drive UserScript rooms do not work
-- Some rooms might need a few extra seconds to work correctly
-- General jankiness in first release
+[**Download the latest APK →**](https://github.com/Hostu404/CyTube-APK/releases/latest)
 
 ---
 
-## What's not here yet
+## Screenshots
 
-- No vote-to-skip button in the UI (the app can vote, there's just no button
-  for it yet)
-- No poll creation or moderation tools — voting works, running the room
-  doesn't. Do kicks, bans, mutes, and permission changes from the site.
-- No sending private messages (PMs you receive show up in chat; there's no
-  compose flow yet)
-- Only the standard CyTube rank tiers are labelled by name; per-channel
-  custom ranks aren't
-- Fire TV / Android TV navigation works fully with a D-pad, but the layouts
-  are the same ones used on phones — no dedicated 10-foot UI yet
-- Google Drive links occasionally fail to resolve or drift out of sync —
-  CyTube has no official server-side support for Drive playback, so this
-  talks to the same unofficial endpoint Drive's own web player uses, which
-  Google can change without notice
-- Requires Android 8.0 (API 26) or newer
+<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
 
-## Install
 
-Grab the APK from this repo's [Releases](../../releases) page and install
-it. Android will ask permission to install from whatever app you downloaded
-it with the first time — that's expected for anything installed outside an
-app store.
+---
 
-- **Phone or tablet**: open the downloaded `.apk` directly.
-- **Fire TV / Android TV**: the easiest path is
-  [Downloader](https://amzn.to/2Ihmizw) (search "Downloader" on the Fire TV
-  Appstore) — enter the direct link to the APK and it installs it for you.
-  You'll need "Apps from Unknown Sources" turned on for whichever app you
-  used to download it, under Settings → My Fire TV → Developer Options.
+## What is CyTube APK?
+
+CyTube APK brings the CyTube experience to Android devices as a dedicated native application.
+
+It is designed for phones, tablets, Android TV and Amazon Fire TV, with the interface adapting to the device you're using.
+
+You can join CyTube channels, watch synchronized media with other people, participate in chat and manage playlists directly from the app.
+
+This is a **native Android application**, not simply the CyTube website wrapped inside a WebView.
+
+---
+
+## Features
+
+* Browse and join channels
+* Channel information
+* User list
+* Playlists
+* Polls
+* Favourites
+* Recently joined channels
+* Guest access
+* Native video playback (YouTube, direct files, HLS, Google Drive and more)
+* Automatic fallback to Compatibility View for sources native playback can't handle
+* Playback stays in sync with the room, with an adjustable sync tolerance
+* Custom CyTube emotes
+* NicoNico Chat - Enable by tapping the square.
+* Quick tap to reply/repost emotes
+* Real-time channel chat
+* User messages and system messages
+* Mute toggle
+* Ambient glow behind the video
+* Fullscreen playback
+* Tap the channel name to refresh chat and playback (rate-limited)
+* Password-protected channel support
+* Opens `cytu.be/r/<channel>` links directly into the app
+
+### TV support
+
+Designed to work on:
+
+* Android TV
+* Amazon Fire TV
+* TV remotes and D-pad navigation
+* A dedicated full-screen chat view, reachable with the D-pad
+* Large-screen displays
+
+The same APK can be sideloaded onto supported Android TV and Fire TV devices.
+
+---
+
+## Download
+
+### Android
+
+Download the latest release:
+
+[**Download the latest APK**](https://github.com/Hostu404/CyTube-APK/releases/latest)
+
+Then open the APK on your Android device and install it.
+
+You may need to allow installation from unknown sources depending on your device.
+
+### Android TV / Fire TV
+
+The easiest path is [Downloader](https://amzn.to/2Ihmizw) (search "Downloader" on the Fire TV
+Appstore) — enter the direct link to the APK and it installs it for you.
+You'll need "Apps from Unknown Sources" turned on for whichever app you
+used to download it, under Settings → My Fire TV → Developer Options.
 
 There's no Play Store or Amazon Appstore listing — this is a hobby project,
 distributed as an open-source APK.
 
-## Building it yourself
+---
+
+## Requirements
+
+* **Android 8.0 (API 26) or newer**
+* Internet connection
+* A CyTube account is optional
+
+Some media sources may have additional playback requirements or compatibility limitations.
+
+---
+
+## Privacy & Security
+
+CyTube APK is open source.
+
+CyTube credentials are handled locally by the application.
+
+Your password is sent once, directly to your CyTube server, the same way the CyTube website itself logs in — it is never written to disk. If you choose to stay logged in, only the signed session cookie the server returns is saved, encrypted on your device. Logging out clears it locally and tells the server to invalidate it too.
+
+The source code is available in this repository for inspection.
+
+---
+
+## Current limitations
+
+CyTube supports a large variety of media sources, and compatibility can vary between them.
+
+Known limitations include:
+
+* Some video sources may not play correctly.
+* Some playback synchronisation edge cases remain.
+* Picture-in-picture support is still being improved.
+* Certain media providers have their own restrictions.
+* TV-specific behaviour and compatibility are still being refined.
+
+The application is actively being developed, so behaviour may change between releases.
+
+If you find a problem, please report it with enough information to reproduce it.
+
+---
+
+## Reporting a problem
+
+Found a bug?
+
+[**Open an issue →**](https://github.com/Hostu404/CyTube-APK/issues)
+
+When reporting an issue, include:
+
+* Device model
+* Android version
+* App version
+* CyTube channel, if relevant
+* What you expected to happen
+* What actually happened
+* Steps to reproduce the problem
+
+Screenshots or logs are useful when available.
+
+---
+
+## For developers
+
+CyTube APK is built as a native Android application.
+
+The project is structured around separate components for the CyTube connection, playback handling, chat and application UI.
+
+The source code is available here on GitHub.
+
+### Build from source
+
+Clone the repository:
 
 ```bash
-git clone https://github.com/hostu404/cytube-apk.git
-cd cytube-apk
-./gradlew assembleDebug
-# app/build/outputs/apk/debug/app-debug.apk
+git clone https://github.com/Hostu404/CyTube-APK.git
 ```
 
-Or open the folder in Android Studio (Ladybug or newer) and press Run.
-Requires JDK 17. No API keys or manual setup needed for a debug build —
-everything it needs is either in the repo or resolved from public Maven
-repositories (including [JitPack](https://jitpack.io), which hosts
-NewPipeExtractor).
+Open the project in Android Studio and allow Gradle to synchronise.
 
-## How it's put together
+Build the application using the standard Android Studio build tools.
 
-```
-Compose UI
-    ↓
-ViewModels (ChannelViewModel, HomeViewModel)
-    ↓
-CyTubeClient · SyncEngine · AuthRepository · ChannelIndexRepository
-    ↓
-Socket.IO · OkHttp · Media3 · WebView
-```
+---
 
-`net/` doesn't know about Android UI; `ui/` never touches a socket directly.
-Playback goes through one `PlayerHandle` interface regardless of which
-backend actually resolved the stream, so the sync algorithm in `SyncEngine`
-is written once and applies to all of them. It's a faithful port of CyTube's
-own client-side sync logic — same leader/drift rules, adapted to close small
-drift with a gentle speed nudge instead of a hard seek, since a mobile
-connection can't rebuffer a scrub as fast as a browser can.
-
-## Credit
+## Credits
 
 This app exists because of [CyTube](https://github.com/calzoneman/sync)
 itself — all of the protocol behaviour here (sync logic, emote handling,
@@ -120,39 +191,15 @@ not something invented from scratch. It also depends on:
   chat, MOTDs, and polls
 - [Coil](https://coil-kt.github.io/coil/) — image and animated-GIF loading
 
-## Security & privacy
-
-- **Your password is never stored.** Login uses the same flow the CyTube
-  site itself uses (a CSRF token, one POST with your credentials, then only
-  the signed session cookie the server hands back). The password is
-  discarded the instant that request finishes. The session cookie is kept in
-  [`EncryptedSharedPreferences`](https://developer.android.com/reference/androidx/security/crypto/EncryptedSharedPreferences)
-  (AES-256, keyed to your device), and logging out tells the server to
-  invalidate the session too, not just forget it locally.
-- **No secrets are checked into this repo.** The only embedded key is a
-  public, non-secret one Google Drive's own web player uses for anyone with
-  a "link sharing" file — the same one tools like yt-dlp use.
-- **Cleartext traffic is disabled app-wide**, and the app only trusts your
-  device's built-in certificate store.
-- **The Compatibility View WebView can't reach into the app** — no
-  JavaScript bridge, file/content access disabled, mixed content blocked,
-  and navigation locked to the channel's own host, so a chat link opens in
-  your normal browser instead of inside the WebView.
-- **Channel names are validated** against CyTube's own naming rules before
-  they ever reach a network request — this matters because a
-  `cytu.be/r/<channel>` link can hand a channel name to the app from any
-  other installed app, not just from typing it in yourself.
-
-Found a security issue? Please open an issue (or reach out privately if it's
-sensitive) rather than a public PR with exploit details.
+---
 
 ## License
 
-GPLv3. This project depends on
-[NewPipeExtractor](https://github.com/TeamNewPipe/NewPipeExtractor), which is
-GPLv3, compiled directly into the same app rather than run separately — so
-the whole app is distributed under GPLv3 too. Full text in
-[`LICENSE`](LICENSE).
+CyTube APK is released under the **GNU General Public License v3.0**.
+
+See [`LICENSE`](LICENSE) for the complete licence.
+
+---
 
 ## Support
 
