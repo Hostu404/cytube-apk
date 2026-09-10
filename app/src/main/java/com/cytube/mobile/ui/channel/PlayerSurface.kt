@@ -86,12 +86,10 @@ fun PlayerSurface(
             player == MediaTypes.Player.GDRIVE ->
                 GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
-                // Reuses the same backgrounded signal ExoSurface uses for
-                // audioOnly, but a WebView has no "drop video, keep audio"
-                // switch the way ExoPlayer's track selection does — see
-                // EmbedSurface's own comment on why this means a real pause,
-                // audio included, rather than video-only.
-                EmbedSurface(embedSrc, paused = audioOnly)
+                // Deliberately NOT wired to the backgrounded signal
+                // ExoSurface uses for audioOnly — see EmbedSurface's own
+                // comment on why there's no safe way to reuse it here.
+                EmbedSurface(embedSrc)
             // WEB is handled by the channel screen, which swaps in the whole
             // CyTube page rather than a player.
             else -> Message("${MediaTypes.label(media.type)} needs Compatibility View.")
@@ -111,27 +109,26 @@ fun PlayerSurface(
  * SyncEngine leaves this item alone entirely (ChannelViewModel.onTimeUpdate
  * bails out whenever `player` is null), exactly like Compatibility View does
  * for WEB. The embed manages its own playback pace.
+ *
+ * No backgrounded-pause hook, unlike ExoSurface's audioOnly. There is no way
+ * to tell an arbitrary provider's embedded page to stop decoding video while
+ * leaving its audio running — that would mean reaching into whatever player
+ * JS the embed itself runs, which varies per provider and isn't something
+ * this WebView controls. The only lever this WebView actually has,
+ * WebView.onPause()/onResume(), stops everything, audio included — that was
+ * tried and reverted: it meant an embed went fully silent the instant the app
+ * was backgrounded, a real behavior difference from the native path (which
+ * keeps playing audio-only via ExoSurface's track selection instead). So an
+ * embed just keeps running, full cost, while backgrounded — correct playback
+ * over a battery win this surface can't deliver safely.
  */
 @Composable
-private fun EmbedSurface(
-    embedSrc: String,
-    /** True while backgrounded-and-not-PiP (see PlayerSurface's own doc on
-     *  this param). Unlike ExoSurface's audioOnly, there is no way to tell
-     *  an arbitrary provider's embedded page to stop decoding video while
-     *  leaving its audio running — that would mean reaching into whatever
-     *  player JS the embed itself runs, which varies per provider and isn't
-     *  something this WebView controls. WebView.onPause()/onResume() is the
-     *  closest available lever, and it stops everything, audio included —
-     *  an embed genuinely goes silent while the app is backgrounded, unlike
-     *  a native/NewPipe/GDrive item playing alongside it would. */
-    paused: Boolean = false
-) {
+private fun EmbedSurface(embedSrc: String) {
     val context = LocalContext.current
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
-        update = { view -> if (paused) view.onPause() else view.onResume() },
         factory = { ctx ->
             WebView(ctx).apply {
                 // The default WebView canvas is white, and it paints that

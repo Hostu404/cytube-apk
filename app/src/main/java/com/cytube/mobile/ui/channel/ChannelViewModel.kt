@@ -11,6 +11,10 @@ import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
 import com.cytube.mobile.player.PlayerHandle
+import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.mutate
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,11 +32,22 @@ data class ChannelUiState(
     val needsPassword: Boolean = false,
     val passwordWasWrong: Boolean = false,
     val media: MediaFrame? = null,
-    val playlist: List<PlaylistItem> = emptyList(),
+    // PersistentList rather than plain List: a plain List/Map parameter is
+    // exactly the case Compose's compiler can't prove is safe to skip (it
+    // could secretly be a MutableList mutated in place), so every composable
+    // taking one — ChatPanel, PlaylistPanel, UsersPanel, NekoChatOverlay —
+    // was forced non-skippable and fully recomposed on EVERY emission of
+    // this state, not just when its own field actually changed. A single
+    // incoming chat message was enough to force the playlist and user list
+    // to redo their own composition too. PersistentList is in Compose's own
+    // hardcoded list of known-stable types, so this fixes that; it's also a
+    // genuine structural-sharing collection (see appendChat), so updates no
+    // longer copy the whole list either.
+    val playlist: PersistentList<PlaylistItem> = persistentListOf(),
     val currentUid: Int = -1,
-    val users: List<ChannelUser> = emptyList(),
+    val users: PersistentList<ChannelUser> = persistentListOf(),
     val userCount: Int = 0,
-    val messages: List<ChatMessage> = emptyList(),
+    val messages: PersistentList<ChatMessage> = persistentListOf(),
     val emotes: EmoteSet = EmoteSet.EMPTY,
     val showEmotes: Boolean = true,
     /** Mirrors the Settings toggle; MainActivity reads this (via PlaybackHost)
@@ -175,6 +190,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun observeEvents() {
         client.events.collect { event ->
+            // A bug in any single branch below must not kill this collector —
+            // there's no restart, so an uncaught exception here would silently
+            // stop all future chat/playlist/user updates for the rest of the
+            // channel session (or crash the process outright).
+            runCatching {
             when (event) {
                 is CyTubeEvent.Connected ->
                     update { it.copy(connection = ConnectionState.CONNECTED, statusMessage = null) }
@@ -252,16 +272,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     onTimeUpdate(event.update)
                 }
 
-                is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items) }
+                is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.toPersistentList()) }
                 is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid) }
                 is CyTubeEvent.ItemQueued -> update { s ->
                     val idx = s.playlist.indexOfFirst { it.uid == event.afterUid }
-                    val next = s.playlist.toMutableList()
-                    if (idx >= 0) next.add(idx + 1, event.item) else next.add(event.item)
+                    val next = if (idx >= 0) s.playlist.add(idx + 1, event.item) else s.playlist.add(event.item)
                     s.copy(playlist = next)
                 }
                 is CyTubeEvent.ItemDeleted -> update { s ->
-                    s.copy(playlist = s.playlist.filterNot { it.uid == event.uid })
+                    s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
                 }
 
                 is CyTubeEvent.Chat -> update { s ->
@@ -270,17 +289,23 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     if (event.message.shadow && s.localRank < 2) s
                     else s.copy(messages = appendChat(s.messages, event.message))
                 }
-                is CyTubeEvent.ChatCleared -> update { it.copy(messages = emptyList()) }
+                is CyTubeEvent.ChatCleared -> update { it.copy(messages = persistentListOf()) }
 
-                is CyTubeEvent.UserListReplaced -> update { it.copy(users = event.users) }
+                is CyTubeEvent.UserListReplaced -> update { it.copy(users = event.users.toPersistentList()) }
                 is CyTubeEvent.UserJoined -> update { s ->
-                    s.copy(users = (s.users.filterNot { it.name == event.user.name } + event.user))
+                    s.copy(users = s.users.removeAll { it.name == event.user.name }.add(event.user))
                 }
                 is CyTubeEvent.UserLeft -> update { s ->
-                    s.copy(users = s.users.filterNot { it.name == event.name })
+                    s.copy(users = s.users.removeAll { it.name == event.name })
                 }
                 is CyTubeEvent.UserMetaChanged -> update { s ->
-                    s.copy(users = s.users.map { if (it.name == event.user.name) event.user else it })
+                    // set(idx, ...) rather than map{} over everyone: a plain
+                    // map would rebuild the whole list (and force a fresh
+                    // PersistentList, defeating the structural sharing this
+                    // type exists for) even though at most one entry ever
+                    // actually changes here.
+                    val idx = s.users.indexOfFirst { it.name == event.user.name }
+                    if (idx < 0) s else s.copy(users = s.users.set(idx, event.user))
                 }
                 is CyTubeEvent.UserCount -> update { it.copy(userCount = event.count) }
 
@@ -316,6 +341,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 else -> Unit
             }
+            }.onFailure { Log.e("CyTube", "Error handling ${event::class.simpleName}", it) }
         }
     }
 
@@ -649,17 +675,23 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Appends one message and trims the buffer in a single allocation. The
-     * previous (list + item).takeLast(N) built two throwaway lists per message,
-     * which on a busy channel is a lot of garbage for no reason.
+     * Appends one message and trims the buffer. Previously an ArrayList(current
+     * size - keepFrom + 1) rebuilt from a manual copy loop — a full copy of up
+     * to MAX_CHAT_MESSAGES items on EVERY single incoming chat message, plain
+     * List having no way to share structure between the old and new list.
+     * PersistentList.mutate {} uses a Builder (an efficient, temporarily-mutable
+     * view over the same underlying structure) so add/removeAt here don't copy
+     * the whole buffer — the common case (already at MAX_CHAT_MESSAGES) is one
+     * structural-sharing add plus one removeAt(0), not a fresh 300-element copy
+     * per message. This is what a chat flood was actually paying for, on top of
+     * the Compose recomposition cost fixed by PersistentList's stability.
      */
-    private fun appendChat(current: List<ChatMessage>, message: ChatMessage): List<ChatMessage> {
+    private fun appendChat(current: PersistentList<ChatMessage>, message: ChatMessage): PersistentList<ChatMessage> {
         val tagged = message.copy(seq = ++chatSeq)
-        val keepFrom = (current.size + 1 - MAX_CHAT_MESSAGES).coerceAtLeast(0)
-        val next = ArrayList<ChatMessage>(current.size - keepFrom + 1)
-        for (i in keepFrom until current.size) next.add(current[i])
-        next.add(tagged)
-        return next
+        return current.mutate { list ->
+            list.add(tagged)
+            while (list.size > MAX_CHAT_MESSAGES) list.removeAt(0)
+        }
     }
 
     /**

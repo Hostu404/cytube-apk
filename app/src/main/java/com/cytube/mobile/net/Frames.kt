@@ -1,5 +1,6 @@
 package com.cytube.mobile.net
 
+import androidx.compose.runtime.Immutable
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
@@ -14,7 +15,11 @@ import org.jsoup.Jsoup
  * or unexpected fields; nothing here is allowed to throw.
  */
 
-/** changeMedia — full frame. */
+/** changeMedia — full frame. Passed to PlayerSurface/etc. as a single object,
+ *  so @Immutable here matters less than the List-typed state fields, but it's
+ *  free — `direct` is the only field that would otherwise make the compiler's
+ *  automatic stability inference give up on this class. */
+@Immutable
 data class MediaFrame(
     val id: String,
     val title: String,
@@ -102,6 +107,12 @@ data class TimeUpdate(val currentTime: Double, val paused: Boolean) {
     }
 }
 
+// All-primitive/String fields, so the compiler would likely infer this stable
+// on its own — explicit anyway since it's the item type of ChannelUiState's
+// hottest list (see ChannelViewModel's PersistentList doc comment) and a
+// silent regression here (e.g. a future List-typed field) would be easy to
+// miss without this asserting the contract directly.
+@Immutable
 data class ChatMessage(
     val username: String,
     /** Sanitized HTML, not plain text — filters and emotes rewrite it server-side. */
@@ -131,6 +142,7 @@ data class ChatMessage(
     }
 }
 
+@Immutable
 data class ChannelUser(
     val name: String,
     val rank: Double,
@@ -160,6 +172,7 @@ data class ChannelUser(
     }
 }
 
+@Immutable
 data class PlaylistItem(
     val uid: Int,
     val title: String,
@@ -222,6 +235,7 @@ data class Permissions(val raw: JSONObject) {
  * closes; those come through as -1 here rather than 0, so the UI can tell
  * "no votes yet" apart from "hidden".
  */
+@Immutable
 data class Poll(
     val initiator: String,
     val title: String,
