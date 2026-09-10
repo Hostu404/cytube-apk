@@ -197,7 +197,10 @@ data class Emote(val name: String, val image: String, val source: String) {
     companion object {
         fun from(o: JSONObject) = Emote(
             name = o.optString("name", ""),
-            image = o.optString("image", ""),
+            // Some channels save emotes as protocol-relative ("//host/x.gif")
+            // or root-relative ("/x.gif") URLs — valid in a browser's <img>,
+            // meaningless to Coil/OkHttp on their own. See resolveMediaUrl.
+            image = resolveMediaUrl(o.optString("image", "")),
             source = o.optString("source", "")
         )
 

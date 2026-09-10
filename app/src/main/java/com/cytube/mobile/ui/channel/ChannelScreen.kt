@@ -1,8 +1,6 @@
 package com.cytube.mobile.ui.channel
 
 import android.app.Activity
-import android.app.UiModeManager
-import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
@@ -13,16 +11,23 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -52,36 +57,26 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.data.CompatMode
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import kotlinx.coroutines.delay
 
 private enum class Panel { PLAYLIST, USERS, POLL }
 
 /**
- * Android TV / Fire TV — the actual runtime signal, not just "no touchscreen"
- * (a Chromebook or a phone in a desktop dock can be touchscreen-less too).
- * `UiModeManager.currentModeType` is what Android itself uses to decide this,
- * and it's what an Android TV/Fire TV emulator or device reports correctly.
+ * What the hosting Activity needs to drive Picture-in-Picture for whatever
+ * ChannelScreen currently has on screen. Reported fresh on every
+ * recomposition via [onPlaybackHostChange], and cleared (null) when the
+ * screen leaves composition entirely.
  *
- * This is what decides whether ChannelScreen shows the phone-style chrome
- * (title bar, bottom playlist/users/poll bar) at all. Both assume a
- * touchscreen and a thumb — there is no way to reach them well with a D-pad
- * and a remote, and the README already calls out that this app has no
- * dedicated 10-foot UI yet. Until it does, a TV gets straight-to-fullscreen
- * video instead of a phone layout it can't really drive.
- */
-private fun isTvDevice(context: Context): Boolean {
-    val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
-    return uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
-}
-
-/**
- * What the hosting Activity needs to drive Picture-in-Picture and
- * background/foreground playback for whatever ChannelScreen currently has on
- * screen. Reported fresh on every recomposition via [onPlaybackHostChange],
- * and cleared (null) when the screen leaves composition entirely.
+ * Used to also carry onPauseForBackground/onResumeForForeground so the
+ * Activity could pause playback on Home/Recents — removed along with that
+ * behavior: leaving the app without entering PiP now simply lets playback
+ * keep running in the background (see MainActivity's onStop/onStart, which
+ * no longer do anything to it), same as PiP's own floating window already
+ * did, instead of the screen going dark and silent every time you check
+ * another app.
  */
 data class PlaybackHost(
     val pipEnabled: Boolean,
@@ -89,9 +84,7 @@ data class PlaybackHost(
      *  (a whole web page, not a video) or no media loaded yet. */
     val canPip: Boolean,
     val isPlaying: Boolean,
-    val onTogglePlayPause: () -> Unit,
-    val onPauseForBackground: () -> Unit,
-    val onResumeForForeground: () -> Unit
+    val onTogglePlayPause: () -> Unit
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -169,7 +162,11 @@ fun ChannelScreen(
             PlayerSurface(
                 media = state.media,
                 player = state.player,
-                showControls = !fullscreen && !pipModeState.value,
+                // TV never shows Media3's own touch scrubber/controller —
+                // there's no touchscreen to drive it with, and it would
+                // otherwise sit on screen fighting the D-pad Down/Up view
+                // transition (video <-> chat) added for TV below.
+                showControls = !fullscreen && !pipModeState.value && !isTv,
                 onHandle = onAttachPlayer,
                 onFailed = vm::reportPlaybackFailure,
                 epoch = state.playerEpoch,
@@ -183,8 +180,6 @@ fun ChannelScreen(
     // (play vs. pause, whether PiP is even applicable right now) stays
     // current, and cleared when this screen goes away.
     val onTogglePlayPause = remember(vm) { vm::togglePlaybackFromPip }
-    val onPauseForBackground = remember(vm) { vm::pauseForBackground }
-    val onResumeForForeground = remember(vm) { vm::resumeForForeground }
     SideEffect {
         onPlaybackHostChange(
             PlaybackHost(
@@ -197,9 +192,7 @@ fun ChannelScreen(
                     state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED &&
                     state.media != null,
                 isPlaying = state.playing,
-                onTogglePlayPause = onTogglePlayPause,
-                onPauseForBackground = onPauseForBackground,
-                onResumeForForeground = onResumeForForeground
+                onTogglePlayPause = onTogglePlayPause
             )
         )
     }
@@ -400,14 +393,29 @@ fun ChannelScreen(
 
     // Fire TV / Android TV: no title bar, no bottom playlist/users/poll bar —
     // straight to full-bleed video the moment the channel opens, immersive
-    // (system bars hidden) the same way the phone's own fullscreen is. The
-    // system Back button (which a Fire TV remote's Back button dispatches
-    // the same as anywhere else) leaves the channel entirely rather than
-    // dropping into the phone layout underneath, since that layout is never
-    // shown on TV in the first place — there's nothing to "exit fullscreen"
-    // back into here.
+    // (system bars hidden) the same way the phone's own fullscreen is.
+    // Down/Up move between fullscreen video and chat as a real view
+    // transition (chat becomes the visible screen, not just focus while
+    // video stays on top) — see tvShowingChat below. Back backs out of chat
+    // first if it's open, then leaves the channel, same as the phone's
+    // fullscreen Back handling backs out of fullscreen first.
     if (isTv) {
-        BackHandler { onBack() }
+        // Whether chat is the visible view right now. playerContent() below
+        // is still called unconditionally either way — see the
+        // movableContentOf note on its declaration above for why it can
+        // only ever be called from exactly one place in the composition —
+        // so this can only ever be "draw chat as a sibling on top of the
+        // always-mounted video Box", never a branch that swaps the video
+        // composable out entirely. That's also exactly what keeps playback
+        // (position, sync, connection, rate) completely undisturbed by
+        // moving between the two: the video is never torn down or rebuilt,
+        // only what's drawn over it changes.
+        var tvShowingChat by remember { mutableStateOf(false) }
+        val videoFocusRequester = remember { FocusRequester() }
+
+        BackHandler {
+            if (tvShowingChat) tvShowingChat = false else onBack()
+        }
         LaunchedEffect(Unit) {
             onFullscreenChange(true)
             runCatching {
@@ -419,26 +427,95 @@ fun ChannelScreen(
                 }
             }
         }
+        // Re-focus the video surface every time chat closes, so a plain
+        // Down press works again immediately without first navigating back
+        // to it — there's nothing else on the video screen to focus instead.
+        LaunchedEffect(tvShowingChat) {
+            if (!tvShowingChat) runCatching { videoFocusRequester.requestFocus() }
+        }
+
+        // CyTubeChannelTheme wraps this the same way it wraps the windowed
+        // Scaffold below — without it, TvChatView's ChatPanel and its Nico
+        // toggle square inherit whatever the ambient app theme happens to be
+        // instead of the channel's own always-readable-on-dark palette, and
+        // (worse) nothing here uses a Surface the way Scaffold does for the
+        // windowed layout, so LocalContentColor never gets set at all and
+        // falls back to its plain Compose default of black — black chat text
+        // and a black on/off square on a near-black screen. TvChatView's own
+        // Surface (below) is what actually fixes the content color; this is
+        // what makes MaterialTheme.colorScheme resolve to the right palette
+        // for it to use.
+        CyTubeChannelTheme {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
-            if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
-                WebCompatView(
-                    baseUrl = Graph.BASE_URL,
-                    channel = channel,
-                    authCookie = Graph.auth(context).savedSession()?.authCookie,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                playerContent()
-            }
-            // No Column to slot this into on TV like the phone layout has —
-            // an overlay is the only way a disconnect ever becomes visible
-            // here at all. Without it a dropped connection on TV was just a
-            // frozen black screen with no explanation and no way to retry.
-            state.kicked?.let { reason ->
-                Box(Modifier.align(Alignment.BottomCenter).padding(32.dp)) {
-                    DisconnectedNotice(reason = reason, onRetry = vm::retry, onBack = onBack)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .focusRequester(videoFocusRequester)
+                    .focusable()
+                    .onPreviewKeyEvent { event ->
+                        if (!tvShowingChat &&
+                            event.type == KeyEventType.KeyUp &&
+                            event.key == Key.DirectionDown
+                        ) {
+                            tvShowingChat = true
+                            true
+                        } else {
+                            false
+                        }
+                    }
+            ) {
+                if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
+                    WebCompatView(
+                        baseUrl = Graph.BASE_URL,
+                        channel = channel,
+                        authCookie = Graph.auth(context).savedSession()?.authCookie,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    playerContent()
+                }
+
+                // Exactly the same overlay the phone's fullscreen player
+                // uses — reused as-is, not a separate TV implementation.
+                // Independent of tvShowingChat on purpose: turning this on
+                // from the TV chat view below and then pressing Up must
+                // show it still active over the video, and moving back and
+                // forth between video and chat must never turn it off by
+                // itself — only the explicit toggle in TvChatView does.
+                if (chatOverlayOn) {
+                    NekoChatOverlay(
+                        messages = state.messages,
+                        showEmotes = state.showEmotes,
+                        emotes = state.emotes,
+                        state = nekoState
+                    )
+                }
+
+                // No Column to slot this into on TV like the phone layout has —
+                // an overlay is the only way a disconnect ever becomes visible
+                // here at all. Without it a dropped connection on TV was just a
+                // frozen black screen with no explanation and no way to retry.
+                state.kicked?.let { reason ->
+                    Box(Modifier.align(Alignment.BottomCenter).padding(32.dp)) {
+                        DisconnectedNotice(reason = reason, onRetry = vm::retry, onBack = onBack)
+                    }
                 }
             }
+
+            // Drawn as a sibling ON TOP of the video Box, filling the whole
+            // screen — chat genuinely becomes the visible view, not a panel
+            // squeezed in alongside a still-showing video.
+            if (tvShowingChat) {
+                TvChatView(
+                    state = state,
+                    onSendChat = onSendChat,
+                    chatOverlayOn = chatOverlayOn,
+                    onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
+                    onExit = { tvShowingChat = false },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
         }
 
         // See PlaybackDialogs' own doc comment: without this, a
@@ -473,8 +550,32 @@ fun ChannelScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(channel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    // Tapping the channel name reconciles with the server —
+                    // playlist, player and leader/sync state — the same
+                    // thing pull-to-refresh used to do. Pull-to-refresh is
+                    // gone: it lived right on top of the video/chat content,
+                    // one swipe away from anyone scrolling chat, and there
+                    // was nothing stopping it from being fired over and over
+                    // as fast as a finger could swipe. This is the same
+                    // action moved somewhere deliberate to reach, backed by
+                    // ChannelViewModel.refresh()'s own cooldown (see there)
+                    // so repeated taps can't be turned into a request flood
+                    // against the channel server.
+                    Column(
+                        Modifier
+                            .clickable(onClick = vm::refresh)
+                            .semantics { contentDescription = "Refresh channel" }
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(channel, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (state.refreshing) {
+                                Spacer(Modifier.width(8.dp))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            }
+                        }
                         ConnectionLine(state)
                     }
                 },
@@ -484,6 +585,24 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
+                    // Dedicated mute toggle, immediately left of the Nico
+                    // square. Backed by PlayerHandle.setVolume (already
+                    // implemented by every native/NewPipe/GDrive handle) via
+                    // ChannelViewModel.toggleMute — purely an audio flag, so
+                    // toggling it never pauses, seeks, or otherwise disrupts
+                    // playback. EMBED/WEB have no PlayerHandle to mute (see
+                    // PlayerSurface), so the button is hidden rather than
+                    // shown greyed-out doing nothing.
+                    if (state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
+                        state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
+                    ) {
+                        IconButton(onClick = vm::toggleMute) {
+                            Icon(
+                                if (state.muted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                contentDescription = if (state.muted) "Unmute" else "Mute"
+                            )
+                        }
+                    }
                     // The sole on/off switch for the Niconico overlay — see
                     // chatOverlayOn's declaration above. Same idea as the
                     // favourite star right next to it — filled when on,
@@ -535,20 +654,13 @@ fun ChannelScreen(
             )
         }
     ) { padding ->
-        // Always the same PullToRefreshBox — swapping in and out of a plain Box
-        // when a panel opened used to tear down and rebuild everything below
-        // (the player, its ExoPlayer instance, sync state) because Compose saw
-        // it as a structurally different subtree. That was the cause of Users
+        // Always the same Column — swapping in and out of a plain Box when a
+        // panel opened used to tear down and rebuild everything below (the
+        // player, its ExoPlayer instance, sync state) because Compose saw it
+        // as a structurally different subtree. That was the cause of Users
         // and Playlist appearing to "reset" the video: opening either panel
-        // silently killed and restarted the player underneath. The bottom
-        // sheet's own scrim already blocks the pull-to-refresh gesture while a
-        // panel is open, so there is nothing else to gate here.
-        PullToRefreshBox(
-            isRefreshing = state.refreshing,
-            onRefresh = vm::refresh,
-            modifier = Modifier.fillMaxSize().padding(padding)
-        ) {
-        Column(Modifier.fillMaxSize()) {
+        // silently killed and restarted the player underneath.
+        Column(Modifier.fillMaxSize().padding(padding)) {
 
             val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
 
@@ -694,7 +806,6 @@ fun ChannelScreen(
                 onSend = onSendChat,
                 modifier = Modifier.weight(1f)
             )
-        }
         }
     }
 
@@ -1077,6 +1188,133 @@ private fun backendNote(state: ChannelUiState): String {
             "$label needs Compatibility View. Chat and playlist come from the page."
         com.cytube.mobile.net.MediaTypes.Player.UNAVAILABLE ->
             "$label can't play natively. Choose Web mode below to load it."
+    }
+}
+
+/**
+ * TV's chat view, reached from fullscreen video with D-pad Down and left
+ * with Up or Back (see the `isTv` branch above). This is deliberately NOT a
+ * separate or simplified TV chat implementation — it wraps the exact same
+ * ChatPanel the phone app uses for its own chat, with only the D-pad
+ * plumbing added on top: filling the screen (a real view transition, not a
+ * panel next to a still-visible video), treating Up as "back to fullscreen
+ * video" from anywhere inside it via onPreviewKeyEvent, and a focusable,
+ * D-pad-reachable stand-in for the phone's touch-only Nico square button in
+ * its TopAppBar — same on/off visual, same behavior (toggles the shared
+ * chatOverlayOn state hoisted in ChannelScreen), just reachable without a
+ * touchscreen.
+ */
+@Composable
+private fun TvChatView(
+    state: ChannelUiState,
+    onSendChat: (String) -> Unit,
+    chatOverlayOn: Boolean,
+    onToggleChatOverlay: () -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val nicoFocusRequester = remember { FocusRequester() }
+    var nicoFocused by remember { mutableStateOf(false) }
+    // Focus the Nico toggle on entry so there's an immediate, visible focus
+    // target — without this the chat view opened with nothing focused at
+    // all, leaving the remote's first press to go nowhere.
+    LaunchedEffect(Unit) { runCatching { nicoFocusRequester.requestFocus() } }
+
+    // Surface, not a plain .background() modifier — this is what actually
+    // sets LocalContentColor to a color that reads against this background
+    // (contentColorFor(background), i.e. the channel theme's light
+    // onBackground). A raw background() modifier only paints a color, it
+    // doesn't touch LocalContentColor, which otherwise stays at Compose's
+    // default of plain black — the cause of the chat text and the Nico
+    // square both rendering dark-on-dark here.
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
+    ) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && event.key == Key.DirectionUp) {
+                    onExit()
+                    true
+                } else {
+                    false
+                }
+            }
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                state.channel,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            // Explicit, not LocalContentColor — this square being legible in
+            // both its on/off states is the whole point of it, so it doesn't
+            // depend on ambient content color resolving correctly.
+            val squareColor = MaterialTheme.colorScheme.onBackground
+            Box(
+                Modifier
+                    .focusRequester(nicoFocusRequester)
+                    .onFocusChanged { nicoFocused = it.isFocused }
+                    .focusable()
+                    .onKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp &&
+                            (event.key == Key.Enter || event.key == Key.DirectionCenter || event.key == Key.NumPadEnter)
+                        ) {
+                            onToggleChatOverlay()
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    .border(
+                        2.dp,
+                        if (nicoFocused) MaterialTheme.colorScheme.primary else Color.Transparent
+                    )
+                    .padding(6.dp)
+                    .semantics {
+                        contentDescription = if (chatOverlayOn) {
+                            "Turn off Niconico chat overlay"
+                        } else {
+                            "Turn on Niconico chat overlay"
+                        }
+                    }
+            ) {
+                Box(
+                    Modifier
+                        .size(20.dp)
+                        .then(
+                            if (chatOverlayOn) {
+                                Modifier.background(squareColor)
+                            } else {
+                                Modifier.border(2.dp, squareColor)
+                            }
+                        )
+                )
+            }
+        }
+
+        // Same ChatPanel the phone layout uses (message list, input, send,
+        // emote picker) — no Polls/User List/Playlist content in it at all,
+        // so there's nothing TV-specific to hide here and no separate
+        // implementation to keep in sync with the phone one.
+        ChatPanel(
+            messages = state.messages,
+            canSend = state.connection == ConnectionState.CONNECTED,
+            showEmotes = state.showEmotes,
+            emotes = state.emotes,
+            onSend = onSendChat,
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        )
+    }
     }
 }
 

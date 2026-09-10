@@ -3,6 +3,7 @@ package com.cytube.mobile.ui.home
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
@@ -32,7 +33,7 @@ data class HomeUiState(
     val directEntryName: String?
         get() = query.trim().takeIf { q ->
             q.isNotBlank() &&
-                q.matches(Regex("^[A-Za-z0-9_-]+$")) &&
+                CHANNEL_NAME_REGEX.matches(q) &&
                 filtered.none { it.name.equals(q, true) }
         }
 }

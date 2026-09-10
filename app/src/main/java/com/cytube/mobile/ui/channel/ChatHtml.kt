@@ -6,6 +6,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import com.cytube.mobile.net.EmoteSet
+import com.cytube.mobile.net.resolveMediaUrl
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -39,6 +40,19 @@ object ChatHtml {
      *  Beyond this it falls back to normal inline size; a wall of a dozen
      *  giant custom images is a worse read than a wall of small ones. */
     private const val MAX_SOLO_EMOTES = 4
+
+    /** A single message never renders more than this many emotes — beyond it,
+     *  additional emote codes are left out entirely (not even as alt text).
+     *  Caps the cost of a deliberately emote-spammed line and keeps chat rows
+     *  from growing unbounded; ordinary messages never come close to this. */
+    private const val MAX_EMOTES_PER_MESSAGE = 3
+
+    /** Threaded through [walk]/[styled] for the lifetime of a single
+     *  [render] call so the cap applies per-message, not globally. */
+    private class EmoteBudget(var remaining: Int = MAX_EMOTES_PER_MESSAGE) {
+        /** True (and consumes one) iff an emote is still allowed here. */
+        fun take(): Boolean = if (remaining > 0) { remaining--; true } else false
+    }
 
     data class Rendered(
         val text: AnnotatedString,
@@ -89,10 +103,11 @@ object ChatHtml {
 
         val images = mutableListOf<String>()
         val body = Jsoup.parseBodyFragment(html).body()
+        val budget = EmoteBudget()
 
         val annotated = buildAnnotatedString {
             if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
-            walk(body, this, images, linkColor, showImages, dropImages)
+            walk(body, this, images, linkColor, showImages, dropImages, budget)
             if (greentext) pop()
         }
         return Rendered(annotated, images, soloEmoteCount(annotated, images))
@@ -117,7 +132,8 @@ object ChatHtml {
         images: MutableList<String>,
         linkColor: Color,
         showImages: Boolean,
-        dropImages: Boolean = false
+        dropImages: Boolean = false,
+        budget: EmoteBudget
     ) {
         for (child in node.childNodes()) {
             when (child) {
@@ -132,11 +148,24 @@ object ChatHtml {
                     "script", "style" -> Unit
 
                     "img" -> {
-                        val src = child.attr("src")
+                        // resolveMediaUrl covers plain chat/MOTD <img> tags
+                        // that never went through the Emote model at all
+                        // (e.g. admin-authored MOTD HTML) — emote-sourced
+                        // ones are already absolute by the time they get
+                        // here (see Emote.from), so this is a no-op for those.
+                        val src = resolveMediaUrl(child.attr("src"))
                         val alt = child.attr("alt").ifBlank { child.attr("title") }
                         when {
                             dropImages -> Unit
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
+                            // Cap applies to real emote images (a src is
+                            // present) whether or not they're drawn as
+                            // pictures — a message with images off but 40
+                            // emote codes in it is exactly the spam this
+                            // guards against too. Once the budget is spent,
+                            // the rest are left out entirely per spec (no
+                            // alt-text placeholder either).
+                            !budget.take() -> Unit
                             showImages -> {
                                 images.add(src)
                                 val code = alt.ifBlank { "[emote]" }
@@ -158,15 +187,15 @@ object ChatHtml {
                         builder.pushStyle(
                             SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
                         )
-                        walk(child, builder, images, linkColor, showImages, dropImages)
+                        walk(child, builder, images, linkColor, showImages, dropImages, budget)
                         builder.pop(); builder.pop()
                     }
 
-                    "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, images, linkColor, showImages, dropImages)
-                    "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, images, linkColor, showImages, dropImages)
-                    "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, images, linkColor, showImages, dropImages)
-                    "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, images, linkColor, showImages, dropImages)
-                    "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, images, linkColor, showImages, dropImages)
+                    "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, images, linkColor, showImages, dropImages, budget)
+                    "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, images, linkColor, showImages, dropImages, budget)
+                    "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, images, linkColor, showImages, dropImages, budget)
+                    "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, images, linkColor, showImages, dropImages, budget)
+                    "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, images, linkColor, showImages, dropImages, budget)
 
                     "span", "div", "p" -> {
                         val cls = child.className()
@@ -176,13 +205,13 @@ object ChatHtml {
                             else -> null
                         }
                         if (style != null) {
-                            styled(style, child, builder, images, linkColor, showImages, dropImages)
+                            styled(style, child, builder, images, linkColor, showImages, dropImages, budget)
                         } else {
-                            walk(child, builder, images, linkColor, showImages, dropImages)
+                            walk(child, builder, images, linkColor, showImages, dropImages, budget)
                         }
                     }
 
-                    else -> walk(child, builder, images, linkColor, showImages, dropImages)
+                    else -> walk(child, builder, images, linkColor, showImages, dropImages, budget)
                 }
             }
         }
@@ -195,10 +224,11 @@ object ChatHtml {
         images: MutableList<String>,
         linkColor: Color,
         showImages: Boolean,
-        dropImages: Boolean = false
+        dropImages: Boolean = false,
+        budget: EmoteBudget
     ) {
         builder.pushStyle(style)
-        walk(child, builder, images, linkColor, showImages, dropImages)
+        walk(child, builder, images, linkColor, showImages, dropImages, budget)
         builder.pop()
     }
 

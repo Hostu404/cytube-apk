@@ -15,6 +15,7 @@ import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.ui.channel.openInBrowser
+import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -25,6 +26,11 @@ fun SettingsScreen(onBack: () -> Unit) {
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
     var settings by remember { mutableStateOf(Settings()) }
+    // Every other setting works the same on TV as on phone; these two are
+    // the sole, explicit exceptions (Ambient glow is never rendered on TV —
+    // see ChannelScreen — and PiP has no meaning without a home-screen
+    // window to float into), so they're the only rows hidden here.
+    val isTv = remember { isTvDevice(context) }
 
     LaunchedEffect(Unit) { store.settings.collect { settings = it } }
 
@@ -68,19 +74,21 @@ fun SettingsScreen(onBack: () -> Unit) {
                 )
             }
 
-            SwitchRow(
-                title = "Picture-in-picture (Experimental)",
-                subtitle = "Keep the video playing when you leave the app. Still " +
-                    "rough — expanding back out of it can misbehave or crash. " +
-                    "Off by default until that's solid.",
-                checked = settings.pipEnabled
-            ) { scope.launch { store.setPip(it) } }
+            if (!isTv) {
+                SwitchRow(
+                    title = "Picture-in-picture (Experimental)",
+                    subtitle = "Keep the video playing when you leave the app. Still " +
+                        "rough — expanding back out of it can misbehave or crash. " +
+                        "Off by default until that's solid.",
+                    checked = settings.pipEnabled
+                ) { scope.launch { store.setPip(it) } }
 
-            SwitchRow(
-                title = "Ambient glow",
-                subtitle = "A soft glow behind the video, colored to match what's playing.",
-                checked = settings.ambientGlowEnabled
-            ) { scope.launch { store.setAmbientGlow(it) } }
+                SwitchRow(
+                    title = "Ambient glow",
+                    subtitle = "A soft glow behind the video, colored to match what's playing.",
+                    checked = settings.ambientGlowEnabled
+                ) { scope.launch { store.setAmbientGlow(it) } }
+            }
 
             SectionTitle("Compatibility")
 

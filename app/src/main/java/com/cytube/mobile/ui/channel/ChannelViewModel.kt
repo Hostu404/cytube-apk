@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
+import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
@@ -41,6 +42,10 @@ data class ChannelUiState(
     /** Mirrors the Settings toggle for the ambient glow behind the windowed
      *  player (see ChannelScreen's ambient-color capture). */
     val ambientGlowEnabled: Boolean = true,
+    /** User-toggled audio mute, independent of play/pause. Applied to the
+     *  active PlayerHandle whenever one is attached (see attachPlayer) so a
+     *  media switch never silently un-mutes. */
+    val muted: Boolean = false,
     val leader: String? = null,
     val localUser: String? = null,
     val localRank: Double = 0.0,
@@ -101,11 +106,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var chatSeq = 0L
     private var guestRetries = 0
 
-    /** Set only when [pauseForBackground] paused playback on the user's
-     *  behalf, so [resumeForForeground] never un-pauses a video the user
-     *  paused themselves right before backgrounding the app. */
-    private var autoPaused = false
-
     fun start(channel: String) {
         if (joined) return
         // The channel name reaches here from user typing (Home's direct-entry
@@ -116,7 +116,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // so an unvalidated name could path-traverse within cytu.be's own
         // routes. Reject anything outside CyTube's own channel-name charset
         // before it reaches a single network call.
-        if (!CHANNEL_NAME.matches(channel)) {
+        if (!CHANNEL_NAME_REGEX.matches(channel)) {
             _state.value = _state.value.copy(
                 connection = ConnectionState.FAILED,
                 statusMessage = "\"$channel\" isn't a valid channel name"
@@ -375,39 +375,41 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * A newly-attached backend (fresh media, or a player-type switch) starts
+     * unmuted at the ExoPlayer/NewPipe level regardless of what the user had
+     * chosen before — PlayerHandle has no memory of it. Re-apply the current
+     * mute state here so switching items, or falling back to a different
+     * player, never silently un-mutes audio the user turned off.
+     */
     fun attachPlayer(handle: PlayerHandle?) {
         if (handle != null && handle !== player) playerAttachedAtMs = android.os.SystemClock.elapsedRealtime()
         player = handle
-        if (handle != null) client.signalPlayerReady()
+        if (handle != null) {
+            handle.setVolume(if (_state.value.muted) 0f else 1f)
+            client.signalPlayerReady()
+        }
     }
 
-    // ---- background / PiP playback control ----
+    // ---- audio / PiP playback control ----
 
     /**
-     * The activity calls this when it actually leaves the foreground without
-     * entering PiP — feature disabled, not eligible, or the OS declined.
-     * Without this, playback (and its audio) silently kept running while the
-     * screen showed nothing at all, which is the "hear it, can't see it" bug
-     * PiP was meant to fix. Never overrides a pause the user made themselves.
+     * Background playback (Home/Recents) is intentionally NOT paused here —
+     * see MainActivity: leaving the foreground without entering PiP now just
+     * lets ExoPlayer/NewPipe keep running, the same as PiP already did, so
+     * audio (and video, once the user returns) continues rather than being
+     * artificially stopped. This toggle is purely the user's own mute
+     * preference, independent of that.
      */
-    fun pauseForBackground() {
-        val p = player ?: return
-        if (p.isPaused) return
-        autoPaused = true
-        p.pause()
-    }
-
-    /** Only resumes what [pauseForBackground] itself paused. */
-    fun resumeForForeground() {
-        if (!autoPaused) return
-        autoPaused = false
-        player?.takeIf { it.isPaused }?.play()
+    fun toggleMute() {
+        val next = !_state.value.muted
+        update { it.copy(muted = next) }
+        player?.setVolume(if (next) 0f else 1f)
     }
 
     /** Wired to the PiP window's own play/pause action. */
     fun togglePlaybackFromPip() {
         val p = player ?: return
-        autoPaused = false
         if (p.isPaused) p.play() else p.pause()
     }
 
@@ -471,6 +473,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * WebView on our own — the user is asked, because a silent jump to a
      * different player is exactly the kind of thing that makes the app feel
      * like it is fighting you.
+     *
+     * Google Drive is not special-cased here — it goes through the same
+     * playbackOffer dialog as every other backend that started and failed
+     * (see the comment on [compatOfferReason]). It used to be excluded from
+     * this entirely and just got a status-line note instead — that note rode
+     * on `statusMessage`, the same field the TopAppBar's connection subtitle
+     * uses for "N connected" (see ConnectionLine), and nothing ever cleared
+     * it afterward, so it sat there permanently, on connect, LOOKING like a
+     * channel-set title rather than a one-off failure notice. Letting it
+     * offer the fallback like everything else fixes both: it's the standard
+     * dialog instead of a hijacked status line, and it actually goes away
+     * once handled.
      */
     fun reportPlaybackFailure(reason: String) {
         val m = _state.value.media
@@ -496,20 +510,38 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     fun declineCompatOffer() = update { it.copy(compatOffer = null) }
 
+    /** elapsedRealtime() of the last [refresh] that actually ran — see its
+     *  cooldown check below. */
+    private var lastRefreshAtMs = 0L
+
     /**
-     * Pull-to-refresh: reconcile with the server rather than tearing the
-     * connection down. Only re-resolves the socket if we are actually
-     * adrift, and never touches the player — requestPlaylist/
-     * signalPlayerReady alone re-syncs playlist and leader state over the
-     * existing connection. This used to also bump playerEpoch, which tears
-     * the whole ExoPlayer instance down and rebuilds it from scratch (see
-     * PlayerSurface's ExoSurface: `remember(epoch) { ExoPlayer.Builder(...)
-     * .build() }`) — that meant every pull-to-refresh silently restarted
-     * whatever was already playing fine, even when nothing was actually
-     * wrong with playback.
+     * Reconcile with the server rather than tearing the connection down.
+     * Only re-resolves the socket if we are actually adrift, and never
+     * touches the player — requestPlaylist/signalPlayerReady alone re-syncs
+     * playlist and leader state over the existing connection. This used to
+     * also bump playerEpoch, which tears the whole ExoPlayer instance down
+     * and rebuilds it from scratch (see PlayerSurface's ExoSurface:
+     * `remember(epoch) { ExoPlayer.Builder(...).build() }`) — that meant
+     * every refresh silently restarted whatever was already playing fine,
+     * even when nothing was actually wrong with playback.
+     *
+     * Reached by tapping the channel name in the TopAppBar (see
+     * ChannelScreen) rather than a pull gesture now — same action, moved
+     * somewhere deliberate rather than one swipe away from scrolling chat.
+     * `refreshing` alone only blocks overlap with a call already in flight,
+     * not a second tap the moment it clears — someone tapping as fast as
+     * they can would still fire a `requestPlaylist`/`signalPlayerReady`
+     * pair (or, worse, a full `disconnect()` + reconnect when not
+     * currently connected) roughly every 600ms. [REFRESH_COOLDOWN_MS] below
+     * is the actual rate limit: a tap inside the cooldown window is just
+     * silently ignored rather than queued or shown an error, so it can't be
+     * turned into a way to flood the channel server with requests.
      */
     fun refresh() {
         if (_state.value.refreshing) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastRefreshAtMs < REFRESH_COOLDOWN_MS) return
+        lastRefreshAtMs = now
         update { it.copy(refreshing = true) }
         viewModelScope.launch {
             if (_state.value.connection == ConnectionState.CONNECTED) {
@@ -644,15 +676,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         const val MAX_GUEST_RETRIES = 3
         const val TAG = "CyTubeChannel"
 
+        /** Minimum time between actual [refresh] runs — the anti-spam gate
+         *  on tapping the channel name. Comfortably longer than the 600ms
+         *  the in-flight `refreshing` flag itself is held for, so a tap
+         *  right as the previous refresh clears is still rejected, not just
+         *  a tap that lands mid-refresh. */
+        const val REFRESH_COOLDOWN_MS = 4_000L
+
         /** How long after a new player attaches SyncEngine holds off on
          *  position correction — see SyncEngine.apply's withinGracePeriod
          *  doc. Long enough to cover a slow NewPipe resolve + the CDN's own
          *  cold-start latency; short enough that a channel that's genuinely
          *  out of sync still gets corrected quickly. */
         const val SYNC_GRACE_MS = 6_000L
-
-        // CyTube's own channel names: letters, digits, underscore, hyphen.
-        // Same charset HomeViewModel's direct-entry box already enforces.
-        val CHANNEL_NAME = Regex("^[A-Za-z0-9_-]{1,100}$")
     }
 }
