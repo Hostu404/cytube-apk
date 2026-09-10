@@ -119,10 +119,7 @@ CyTube supports a large variety of media sources, and compatibility can vary bet
 Known limitations include:
 
 * Some video sources may not play correctly.
-* Some playback synchronisation edge cases remain.
-* Picture-in-picture support is still being improved.
 * Certain media providers have their own restrictions.
-* TV-specific behaviour and compatibility are still being refined.
 
 The application is actively being developed, so behaviour may change between releases.
 
