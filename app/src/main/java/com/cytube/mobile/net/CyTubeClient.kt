@@ -269,6 +269,28 @@ class CyTubeClient(
         })
     }
 
+    /**
+     * Called from ChannelViewModel.onAppBackgroundChanged (itself driven by
+     * MainActivity's onStop/onStart) so a dropped connection doesn't retry
+     * as eagerly while nobody's watching. `reconnectionAttempts` is left
+     * uncapped either way — giving up after N tries would mean a channel
+     * left open overnight never reconnects on its own even once the user is
+     * back, which is worse than a slower retry cadence — only the delay
+     * between attempts changes. Foregrounding restores the snappy default
+     * immediately. No-op if nothing is connected yet; the next connect()
+     * picks up whichever policy is current via the same io()/Manager.
+     */
+    fun setBackgrounded(backgrounded: Boolean) {
+        val manager = socket?.io() ?: return
+        if (backgrounded) {
+            manager.reconnectionDelay(5_000)
+            manager.reconnectionDelayMax(60_000)
+        } else {
+            manager.reconnectionDelay(1_000)
+            manager.reconnectionDelayMax(15_000)
+        }
+    }
+
     fun disconnect() {
         socket?.let {
             it.off()

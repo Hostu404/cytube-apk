@@ -110,6 +110,13 @@ fun ChannelScreen(
     onBack: () -> Unit,
     onFullscreenChange: (Boolean) -> Unit,
     isInPictureInPicture: Boolean = false,
+    /** True while MainActivity is stopped (Home/Recents/screen off), from its
+     *  onStop/onStart. Drives two battery-saving effects below: dropping the
+     *  ExoPlayer video track (audioOnly) and backing off the socket's
+     *  reconnect cadence (vm.onAppBackgroundChanged) — neither needs a new
+     *  permission, unlike a real foreground service would. Always false in
+     *  PiP, even while backgrounded: PiP's whole point is a visible video. */
+    isAppInBackground: Boolean = false,
     onPlaybackHostChange: (PlaybackHost?) -> Unit = {},
     vm: ChannelViewModel = viewModel()
 ) {
@@ -137,6 +144,11 @@ fun ChannelScreen(
 
     LaunchedEffect(channel) { vm.start(channel) }
 
+    // Lets the reconnect backoff back off while nobody's watching — see
+    // CyTubeClient.setBackgrounded. Cheap to call on every flip; it's just a
+    // couple of field writes on the socket.io Manager.
+    LaunchedEffect(isAppInBackground) { vm.onAppBackgroundChanged(isAppInBackground) }
+
     // Standard keep-screen-on: the view holds the flag while something is
     // actually playing and drops it the moment playback stops or this screen
     // leaves composition. No timers, nothing to leak.
@@ -161,6 +173,14 @@ fun ChannelScreen(
     // entering/exiting fullscreen. movableContentOf instead moves the same
     // already-playing instance to wherever it's called from.
     val pipModeState = rememberUpdatedState(isInPictureInPicture)
+
+    // Same rememberUpdatedState pattern as pipModeState just above, for the
+    // same reason: playerContent below is captured once by remember{}, so a
+    // plain read of a changing parameter inside it would freeze at whatever
+    // value was current on the very first composition. Never true while in
+    // PiP — floating video with no video track would just show a blank
+    // window, defeating the point of PiP.
+    val audioOnlyState = rememberUpdatedState(isAppInBackground && !isInPictureInPicture)
 
     // Dominant color behind the windowed player (see WindowedAmbientGlow
     // below) — a single stable holder for the whole life of this screen, not
@@ -207,7 +227,8 @@ fun ChannelScreen(
                 onFrameSnapshot = { bitmap ->
                     val sample = averageColor(bitmap)
                     ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
-                }
+                },
+                audioOnly = audioOnlyState.value
             )
         }
     }
@@ -525,7 +546,8 @@ fun ChannelScreen(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
                         authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        paused = audioOnlyState.value
                     )
                 } else {
                     playerContent()
@@ -837,7 +859,8 @@ fun ChannelScreen(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
                         authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        paused = audioOnlyState.value
                     )
                 } else {
                     playerContent()
@@ -1429,6 +1452,9 @@ private fun TvChatView(
             // is its own separate focus surface this screen isn't built to
             // host — see ChatPanel's doc comment on the parameter.
             showEmotePickerButton = false
+            // Spoiler reveal is handled inside ChatRow itself, keyed off
+            // messagesFocusable (false here) — see its own comment. No
+            // separate flag needed at this level.
         )
     }
     }

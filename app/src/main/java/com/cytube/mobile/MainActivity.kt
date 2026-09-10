@@ -50,6 +50,14 @@ class MainActivity : ComponentActivity() {
     private var inPip by mutableStateOf(false)
     private var playbackHost by mutableStateOf<PlaybackHost?>(null)
 
+    /** True between onStop and onStart — Home/Recents/screen-off, but NOT
+     *  PiP (PiP keeps the Activity started, so onStop never fires for it;
+     *  see the class doc on onStop/onStart below). Read by ChannelScreen to
+     *  drop the ExoPlayer video track and back off the socket reconnect
+     *  cadence while nothing's on screen — see ChannelScreen's
+     *  isAppInBackground param and CyTubeClient.setBackgrounded. */
+    private var appInBackground by mutableStateOf(false)
+
     /** Last isPlaying value refreshPipParams() actually applied, so
      *  onPlaybackHostChange (which fires on every recomposition — every
      *  chat message on a busy channel) only calls into
@@ -138,6 +146,7 @@ class MainActivity : ComponentActivity() {
                             onBack = { nav.popBackStack() },
                             onFullscreenChange = { fullscreen = it },
                             isInPictureInPicture = inPip,
+                            isAppInBackground = appInBackground,
                             onPlaybackHostChange = { host ->
                                 playbackHost = host
                                 if (inPip && host != null && host.isPlaying != lastPipIsPlaying) {
@@ -177,11 +186,35 @@ class MainActivity : ComponentActivity() {
      * Home/Recents should let video and audio keep playing in the
      * background using ExoPlayer/NewPipe's own normal lifecycle, the same
      * way PiP's floating window already does — not something this Activity
-     * has to drive. onStop()/onStart() intentionally do nothing to playback.
+     * has to drive. onStop()/onStart() below intentionally do nothing to
+     * *playback itself* (still no pause-on-background) — they only flip
+     * appInBackground, which trims what's decoded/how eagerly we reconnect
+     * while backgrounded. See its own doc comment.
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         maybeEnterPip()
+    }
+
+    /**
+     * Home/Recents/screen-off — but NOT PiP: entering PiP keeps this
+     * Activity in the started state (that's what lets its video keep
+     * rendering into the floating window), so onStop() never fires while
+     * PiP is active, only once the user dismisses the PiP window too. No
+     * new permission needed for any of this — it's plain Activity
+     * lifecycle plus an ExoPlayer track selection flip and a couple of
+     * socket.io Manager field writes, not a real foreground service (which
+     * would need FOREGROUND_SERVICE / FOREGROUND_SERVICE_MEDIA_PLAYBACK /
+     * POST_NOTIFICATIONS and wouldn't fit that constraint).
+     */
+    override fun onStop() {
+        super.onStop()
+        appInBackground = true
+    }
+
+    override fun onStart() {
+        super.onStart()
+        appInBackground = false
     }
 
     override fun onDestroy() {

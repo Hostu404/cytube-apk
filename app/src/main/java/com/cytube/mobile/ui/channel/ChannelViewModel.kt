@@ -413,15 +413,30 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (p.isPaused) p.play() else p.pause()
     }
 
+    /** Wired to MainActivity's onStop/onStart via ChannelScreen's
+     *  isAppInBackground param. Only touches the socket's reconnect cadence
+     *  (see CyTubeClient.setBackgrounded) — the video-track/audio-only
+     *  switch is handled entirely in ChannelScreen/PlayerSurface, since this
+     *  ViewModel has no reference to the ExoPlayer instance itself. */
+    fun onAppBackgroundChanged(background: Boolean) {
+        client.setBackgrounded(background)
+    }
+
     /**
      * Leader mode inverts the protocol: we become the clock and push upward.
+     * Every 5s, not 1s — that matches CyTube's own broadcast cadence (see
+     * Frames.kt's TimeUpdate doc comment and CyTubeClient.signalPlayerReady's
+     * "~5s broadcast interval"), which every other CyTube client, native or
+     * web, already builds its own drift tolerance around. Firing 5x more
+     * often than that bought no tighter sync for anyone in the room, just
+     * 5x the socket emits (and radio wake-ups) while leading.
      */
     private fun retuneLeaderTicker() {
         leaderTicker?.cancel()
         if (!_state.value.isLeader) return
         leaderTicker = viewModelScope.launch {
             while (true) {
-                delay(1_000)
+                delay(5_000)
                 val p = player ?: continue
                 client.sendMediaUpdate(p.currentTimeSeconds(), p.isPaused)
             }
