@@ -50,6 +50,8 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -268,7 +270,14 @@ fun ChatPanel(
                     // than trying to keep it clickable-but-unfocusable) is
                     // also just correct: there's no touch to tap a name with
                     // on TV in the first place.
-                    usernameClickable = messagesFocusable
+                    usernameClickable = messagesFocusable,
+                    // TV: same reasoning as usernameClickable just above —
+                    // no tap to reveal a spoiler with on TV, and a D-pad has
+                    // no real equivalent of one, so spoilers there just show
+                    // as normal text instead of hidden-until-tapped. Reuses
+                    // messagesFocusable rather than a separate isTv flag
+                    // since the two have always meant the same thing here.
+                    revealSpoilers = !messagesFocusable
                 )
             }
         }
@@ -377,6 +386,14 @@ class NekoOverlayState {
      *  without limit — under that extreme the OLDEST queued message is the
      *  one given up on, never one already animating or a brand-new arrival. */
     val pending = ArrayDeque<ChatMessage>()
+
+    /** Wakes the drain loop in [NekoChatOverlay] the instant something is
+     *  enqueued, instead of it polling on a fixed timer forever while the
+     *  overlay is on. CONFLATED because the loop only ever cares "is there
+     *  something to check again" — any number of enqueues before it next
+     *  receives collapse into one wake, and a send that lands while nobody's
+     *  receiving isn't lost (unlike a rendezvous channel). */
+    val wakeSignal = Channel<Unit>(Channel.CONFLATED)
 }
 
 /**
@@ -463,6 +480,7 @@ fun NekoChatOverlay(
                     // spawn — queue it instead of dropping it; the drain
                     // loop below picks it up the moment a lane opens.
                     state.pending.addLast(msg)
+                    state.wakeSignal.trySend(Unit)
                 }
                 delay(350)
             }
@@ -482,29 +500,44 @@ fun NekoChatOverlay(
                 if (state.pending.size >= NEKO_MAX_PENDING) state.pending.removeFirstOrNull()
                 state.pending.addLast(msg)
             }
+            if (fresh.isNotEmpty()) state.wakeSignal.trySend(Unit)
             if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
         }
 
         // Drains the queue as lanes free up, for as long as the overlay is
-        // on. A short, fixed poll interval rather than reacting to lane
-        // expiry directly — simple, and cheap enough (a HashMap scan over
-        // at most NEKO_MAX_LANES entries) that it costs nothing noticeable
-        // against the video it's drawn over.
+        // on. Event-driven rather than a fixed-interval poll: with nothing
+        // queued it suspends on state.wakeSignal instead of waking up
+        // several times a second to check an empty deque (the common case —
+        // most of a session is quiet chat, not a flood). With something
+        // queued but every lane still busy, it sleeps exactly until the
+        // soonest lane is due to free (from laneFreeAtMs) rather than
+        // polling — a short timeout still bounds that wait so a claim is
+        // never overslept by more than a beat, and a fresh enqueue in the
+        // meantime (wakeSignal) can cut it short too.
         LaunchedEffect(state) {
             while (true) {
-                if (state.pending.isNotEmpty()) {
-                    val now = System.currentTimeMillis()
-                    val lane = claimFreeLane(now)
-                    if (lane != null) {
-                        val msg = state.pending.removeFirst()
-                        val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
-                        state.laneFreeAtMs[lane] = now + durationMs
-                        state.active.add(
-                            FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
-                        )
-                    }
+                if (state.pending.isEmpty()) {
+                    state.wakeSignal.receive()
+                    continue
                 }
-                delay(150)
+                val now = System.currentTimeMillis()
+                val lane = claimFreeLane(now)
+                if (lane != null) {
+                    val msg = state.pending.removeFirst()
+                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
+                    state.laneFreeAtMs[lane] = now + durationMs
+                    state.active.add(
+                        FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
+                    )
+                    // Loop straight back around in case another lane is
+                    // also free right now (e.g. several expired at once) —
+                    // no wait needed, claimFreeLane below will just say no
+                    // once none are left.
+                } else {
+                    val nextFreeAt = state.laneFreeAtMs.values.minOrNull() ?: (now + 150L)
+                    val waitMs = (nextFreeAt - now).coerceIn(16L, 1_000L)
+                    withTimeoutOrNull(waitMs) { state.wakeSignal.receive() }
+                }
             }
         }
 
@@ -816,11 +849,25 @@ private fun ChatRow(
     onUsernameClick: (String) -> Unit,
     onLinkClick: (String) -> Unit,
     onEmoteClick: (String) -> Unit,
-    usernameClickable: Boolean = true
+    usernameClickable: Boolean = true,
+    /** True on TV — see the call site's own comment. Forces every spoiler in
+     *  this row to render as plain, already-visible text; [revealedSpoilers]
+     *  below is only ever consulted when this is false. */
+    revealSpoilers: Boolean = false
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
-    val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes) {
-        ChatHtml.render(msg.html, msg.addClass == "greentext", linkColor, showEmotes, emotes)
+    // Which of THIS message's own spoilers (by index — see ChatHtml.SPOILER_TAG)
+    // have been tapped open. Keyed on msg.seq (a stable per-message id, unlike
+    // the row's own recomposition) so scrolling a spoiler off-screen and back
+    // doesn't forget it was revealed, but a genuinely different message next
+    // in the same row slot starts fresh rather than inheriting the previous
+    // message's reveal state.
+    var revealedSpoilers by remember(msg.seq) { mutableStateOf(emptySet<Int>()) }
+    val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes, revealSpoilers, revealedSpoilers) {
+        ChatHtml.render(
+            msg.html, msg.addClass == "greentext", linkColor, showEmotes, emotes,
+            revealSpoilers = revealSpoilers, revealedSpoilers = revealedSpoilers
+        )
     }
     // A message that's nothing but emotes gets to actually be seen; one
     // sitting mid-sentence stays at the compact inline size so it doesn't
@@ -906,8 +953,22 @@ private fun ChatRow(
                                 pos.y in (box.top - tolerancePx)..(box.bottom + tolerancePx)
                         }?.item
                     }
-                    if (emote != null) onEmoteClick(emote)
-                    else ChatHtml.linkAt(rendered.text, offset)?.let(onLinkClick)
+                    // Checked ahead of links deliberately: a spoiler can wrap
+                    // a link (or anything else) inside it, and revealing it
+                    // is the only thing a tap on still-hidden text should
+                    // do — a second tap, now that it reads normally, is what
+                    // reaches whatever's underneath. Skipped outright when
+                    // revealSpoilers is on (TV) — nothing is ever hidden
+                    // there, so a tap should behave as if this branch didn't
+                    // exist rather than eating one for no visible effect.
+                    val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(rendered.text, offset) else null
+                    when {
+                        emote != null -> onEmoteClick(emote)
+                        spoilerIndex != null -> revealedSpoilers =
+                            if (spoilerIndex in revealedSpoilers) revealedSpoilers - spoilerIndex
+                            else revealedSpoilers + spoilerIndex
+                        else -> ChatHtml.linkAt(rendered.text, offset)?.let(onLinkClick)
+                    }
                 }
             }
         )

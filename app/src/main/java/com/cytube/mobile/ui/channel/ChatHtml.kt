@@ -31,6 +31,10 @@ object ChatHtml {
     /** Tags the span of an inline emote with the shortcode to insert on tap —
      *  e.g. ":smile:", not the image URL appendInlineContent keys on. */
     const val EMOTE_TAG = "EMOTE"
+    /** Tags the span of a spoiler (CyTube's own `<span class="spoiler">`)
+     *  with its 0-based index among this message's spoilers, in document
+     *  order — see [render]'s revealedSpoilers and ChatRow's tap handling. */
+    const val SPOILER_TAG = "SPOILER"
 
     private val GREENTEXT = Color(0xFF789922)
     private val SPOILER = Color(0xFF444444)
@@ -54,6 +58,25 @@ object ChatHtml {
         fun take(): Boolean = if (remaining > 0) { remaining--; true } else false
     }
 
+    /** Everything [walk]/[styled]/[spoiler] need for the lifetime of a single
+     *  [render] call, bundled up so adding a new option (like the spoiler
+     *  support below) doesn't mean growing every function's parameter list
+     *  one more time. */
+    private class RenderCtx(
+        val linkColor: Color,
+        val showImages: Boolean,
+        val dropImages: Boolean,
+        val images: MutableList<String>,
+        val budget: EmoteBudget,
+        val revealSpoilers: Boolean,
+        val revealedSpoilers: Set<Int>
+    ) {
+        /** Assigns each spoiler span encountered its index, in document
+         *  order; also doubles as the final spoiler count once walking
+         *  finishes (see [render]'s Rendered.spoilerCount). */
+        var spoilerIndex = 0
+    }
+
     data class Rendered(
         val text: AnnotatedString,
         val imageUrls: List<String>,
@@ -65,7 +88,11 @@ object ChatHtml {
          * the case where making them bigger doesn't cost anything (there's
          * no surrounding text for a taller row to crowd).
          */
-        val soloEmoteCount: Int = 0
+        val soloEmoteCount: Int = 0,
+        /** How many distinct `[spoiler]` spans this message has. 0 for the
+         *  overwhelming majority of messages — lets ChatRow skip allocating
+         *  any per-message reveal state for those. */
+        val spoilerCount: Int = 0
     )
 
     fun render(
@@ -81,7 +108,24 @@ object ChatHtml {
          * entirely instead of showing them or falling back to alt text. True
          * junk removal, not just "don't load images".
          */
-        dropImages: Boolean = false
+        dropImages: Boolean = false,
+        /**
+         * Real CyTube hides a `[spoiler]` span by matching its text color to
+         * the background and reveals it on :hover — there's no hover on a
+         * touchscreen, so ChatRow implements tap-to-reveal instead (see
+         * SPOILER_TAG below). On TV there's no tap either, and a D-pad has
+         * no real equivalent of it, so this bypasses all of that and renders
+         * spoilers as plain, already-visible text — same as CyTube's own
+         * behavior on a platform with no hover/tap at all. Takes priority
+         * over [revealedSpoilers].
+         */
+        revealSpoilers: Boolean = false,
+        /**
+         * Indices (0-based, document order) of this message's spoiler spans
+         * the user has already tapped open — see ChatRow's per-message
+         * reveal state. Ignored when [revealSpoilers] is true.
+         */
+        revealedSpoilers: Set<Int> = emptySet()
     ): Rendered {
         // Emote substitution happens here, exactly as the official client does
         // it on receipt (util.js:1508). Needed whenever emotes will be shown OR
@@ -91,7 +135,8 @@ object ChatHtml {
 
         // Fast path. The large majority of chat lines are plain text with no
         // markup and no entities; running those through a full HTML parse is
-        // pure overhead on the hottest path in the app.
+        // pure overhead on the hottest path in the app. A spoiler always
+        // arrives as a <span>, so plain text here can never contain one.
         if (html.indexOf('<') < 0 && html.indexOf('&') < 0) {
             val plain = buildAnnotatedString {
                 if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
@@ -103,14 +148,16 @@ object ChatHtml {
 
         val images = mutableListOf<String>()
         val body = Jsoup.parseBodyFragment(html).body()
-        val budget = EmoteBudget()
+        val ctx = RenderCtx(
+            linkColor, showImages, dropImages, images, EmoteBudget(), revealSpoilers, revealedSpoilers
+        )
 
         val annotated = buildAnnotatedString {
             if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
-            walk(body, this, images, linkColor, showImages, dropImages, budget)
+            walk(body, this, ctx)
             if (greentext) pop()
         }
-        return Rendered(annotated, images, soloEmoteCount(annotated, images))
+        return Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.spoilerIndex)
     }
 
     /** See [Rendered.soloEmoteCount]: nonzero only when every bit of visible
@@ -126,18 +173,10 @@ object ChatHtml {
         return if (hasOtherText) 0 else spans.size
     }
 
-    private fun walk(
-        node: Node,
-        builder: AnnotatedString.Builder,
-        images: MutableList<String>,
-        linkColor: Color,
-        showImages: Boolean,
-        dropImages: Boolean = false,
-        budget: EmoteBudget
-    ) {
+    private fun walk(node: Node, builder: AnnotatedString.Builder, ctx: RenderCtx) {
         for (child in node.childNodes()) {
             when (child) {
-                is TextNode -> builder.appendLinkified(child.text(), linkColor)
+                is TextNode -> builder.appendLinkified(child.text(), ctx.linkColor)
                 is Element -> when (child.tagName().lowercase()) {
                     "br" -> builder.append("\n")
 
@@ -156,7 +195,7 @@ object ChatHtml {
                         val src = resolveMediaUrl(child.attr("src"))
                         val alt = child.attr("alt").ifBlank { child.attr("title") }
                         when {
-                            dropImages -> Unit
+                            ctx.dropImages -> Unit
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
                             // Cap applies to real emote images (a src is
                             // present) whether or not they're drawn as
@@ -165,9 +204,9 @@ object ChatHtml {
                             // guards against too. Once the budget is spent,
                             // the rest are left out entirely per spec (no
                             // alt-text placeholder either).
-                            !budget.take() -> Unit
-                            showImages -> {
-                                images.add(src)
+                            !ctx.budget.take() -> Unit
+                            ctx.showImages -> {
+                                ctx.images.add(src)
                                 val code = alt.ifBlank { "[emote]" }
                                 // The id IS the url, so ChatRow can build the
                                 // content map straight from imageUrls. EMOTE_TAG
@@ -185,50 +224,53 @@ object ChatHtml {
                     "a" -> {
                         builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
                         builder.pushStyle(
-                            SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline)
+                            SpanStyle(color = ctx.linkColor, textDecoration = TextDecoration.Underline)
                         )
-                        walk(child, builder, images, linkColor, showImages, dropImages, budget)
+                        walk(child, builder, ctx)
                         builder.pop(); builder.pop()
                     }
 
-                    "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, images, linkColor, showImages, dropImages, budget)
-                    "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, images, linkColor, showImages, dropImages, budget)
-                    "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, images, linkColor, showImages, dropImages, budget)
-                    "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, images, linkColor, showImages, dropImages, budget)
-                    "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, images, linkColor, showImages, dropImages, budget)
+                    "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, ctx)
+                    "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, ctx)
+                    "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, ctx)
+                    "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, ctx)
+                    "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, ctx)
 
                     "span", "div", "p" -> {
                         val cls = child.className()
-                        val style = when {
-                            cls.contains("greentext") -> SpanStyle(color = GREENTEXT)
-                            cls.contains("spoiler") -> SpanStyle(background = SPOILER, color = SPOILER)
-                            else -> null
-                        }
-                        if (style != null) {
-                            styled(style, child, builder, images, linkColor, showImages, dropImages, budget)
-                        } else {
-                            walk(child, builder, images, linkColor, showImages, dropImages, budget)
+                        when {
+                            cls.contains("greentext") -> styled(SpanStyle(color = GREENTEXT), child, builder, ctx)
+                            cls.contains("spoiler") -> spoiler(child, builder, ctx)
+                            else -> walk(child, builder, ctx)
                         }
                     }
 
-                    else -> walk(child, builder, images, linkColor, showImages, dropImages, budget)
+                    else -> walk(child, builder, ctx)
                 }
             }
         }
     }
 
-    private fun styled(
-        style: SpanStyle,
-        child: Element,
-        builder: AnnotatedString.Builder,
-        images: MutableList<String>,
-        linkColor: Color,
-        showImages: Boolean,
-        dropImages: Boolean = false,
-        budget: EmoteBudget
-    ) {
+    /**
+     * A `[spoiler]`/`<span class="spoiler">` span. Always gets a SPOILER_TAG
+     * annotation carrying its own index, whether hidden or not, so ChatRow
+     * can find "which spoiler is under this tap" even for one that's already
+     * revealed (tapping it again re-hides it — see ChatRow). Only the style
+     * changes: color-matched-to-background (indistinguishable from a solid
+     * blank run) while hidden, no special style at all once revealed.
+     */
+    private fun spoiler(child: Element, builder: AnnotatedString.Builder, ctx: RenderCtx) {
+        val index = ctx.spoilerIndex++
+        val hidden = !ctx.revealSpoilers && index !in ctx.revealedSpoilers
+        builder.pushStringAnnotation(SPOILER_TAG, index.toString())
+        builder.pushStyle(if (hidden) SpanStyle(background = SPOILER, color = SPOILER) else SpanStyle())
+        walk(child, builder, ctx)
+        builder.pop(); builder.pop()
+    }
+
+    private fun styled(style: SpanStyle, child: Element, builder: AnnotatedString.Builder, ctx: RenderCtx) {
         builder.pushStyle(style)
-        walk(child, builder, images, linkColor, showImages, dropImages, budget)
+        walk(child, builder, ctx)
         builder.pop()
     }
 
@@ -237,6 +279,13 @@ object ChatHtml {
 
     fun emoteAt(text: AnnotatedString, offset: Int): String? =
         text.getStringAnnotations(EMOTE_TAG, offset, offset).firstOrNull()?.item
+
+    /** The tapped spoiler's own index (see SPOILER_TAG), or null if the tap
+     *  didn't land on one — ChatRow flips that index in or out of its
+     *  per-message revealed set, which re-renders this same message with
+     *  that one spoiler shown or hidden again. */
+    fun spoilerAt(text: AnnotatedString, offset: Int): Int? =
+        text.getStringAnnotations(SPOILER_TAG, offset, offset).firstOrNull()?.item?.toIntOrNull()
 
     /**
      * Only bare http/https runs become links. Text CyTube already wrapped in an

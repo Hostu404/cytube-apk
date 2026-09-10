@@ -10,6 +10,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -43,7 +44,14 @@ fun WebCompatView(
     baseUrl: String,
     channel: String,
     authCookie: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** True while the app is backgrounded and not in PiP — see PlayerSurface's
+     *  audioOnly/EmbedSurface's paused, which this mirrors. This is the whole
+     *  CyTube page, not just a player surface, so pausing it while nothing is
+     *  on screen is an even bigger win than for a single embed: whatever the
+     *  page itself is doing (its own player, chat polling, any animation)
+     *  all stops too, same as any other backgrounded WebView-hosted tab. */
+    paused: Boolean = false
 ) {
     val webViewRef = remember { mutableStateOf<WebView?>(null) }
     val context = LocalContext.current
@@ -116,6 +124,15 @@ fun WebCompatView(
             }
         }
     )
+
+    // onPause()/onResume() rather than AndroidView's own update= lambda
+    // (which only runs on recomposition, tied to Compose inputs) — webViewRef
+    // is set inside factory, which the very first composition already runs
+    // before this LaunchedEffect's initial launch, so there's no ordering
+    // gap where paused could be read before the WebView exists.
+    LaunchedEffect(paused) {
+        webViewRef.value?.let { if (paused) it.onPause() else it.onResume() }
+    }
 
     DisposableEffect(Unit) {
         onDispose {

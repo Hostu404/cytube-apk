@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -65,20 +66,32 @@ fun PlayerSurface(
      *  color the ambient glow behind the windowed player, which crossfades
      *  between whatever colors arrive here rather than snapping; null for
      *  EMBED/WEB, which have no ExoPlayer to snapshot. */
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    /** True while the app is backgrounded and not floating in PiP — i.e.
+     *  there's definitely no video actually on screen right now. ExoSurface
+     *  uses this to disable the video track and keep decoding audio only,
+     *  which is real GPU/decoder work saved rather than a cosmetic switch
+     *  (see ExoSurface's own comment). Has no effect on EMBED/WEB, which
+     *  don't own an ExoPlayer to begin with. */
+    audioOnly: Boolean = false
 ) {
     val embedSrc = media?.embedSrc
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         when {
             media == null -> Message("Nothing is playing")
             player == MediaTypes.Player.NATIVE ->
-                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
+                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
             player == MediaTypes.Player.NEWPIPE ->
-                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
+                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
             player == MediaTypes.Player.GDRIVE ->
-                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot)
+                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
-                EmbedSurface(embedSrc)
+                // Reuses the same backgrounded signal ExoSurface uses for
+                // audioOnly, but a WebView has no "drop video, keep audio"
+                // switch the way ExoPlayer's track selection does — see
+                // EmbedSurface's own comment on why this means a real pause,
+                // audio included, rather than video-only.
+                EmbedSurface(embedSrc, paused = audioOnly)
             // WEB is handled by the channel screen, which swaps in the whole
             // CyTube page rather than a player.
             else -> Message("${MediaTypes.label(media.type)} needs Compatibility View.")
@@ -100,12 +113,25 @@ fun PlayerSurface(
  * for WEB. The embed manages its own playback pace.
  */
 @Composable
-private fun EmbedSurface(embedSrc: String) {
+private fun EmbedSurface(
+    embedSrc: String,
+    /** True while backgrounded-and-not-PiP (see PlayerSurface's own doc on
+     *  this param). Unlike ExoSurface's audioOnly, there is no way to tell
+     *  an arbitrary provider's embedded page to stop decoding video while
+     *  leaving its audio running — that would mean reaching into whatever
+     *  player JS the embed itself runs, which varies per provider and isn't
+     *  something this WebView controls. WebView.onPause()/onResume() is the
+     *  closest available lever, and it stops everything, audio included —
+     *  an embed genuinely goes silent while the app is backgrounded, unlike
+     *  a native/NewPipe/GDrive item playing alongside it would. */
+    paused: Boolean = false
+) {
     val context = LocalContext.current
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
+        update = { view -> if (paused) view.onPause() else view.onResume() },
         factory = { ctx ->
             WebView(ctx).apply {
                 // The default WebView canvas is white, and it paints that
@@ -179,7 +205,8 @@ private fun NewPipeSurface(
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
     epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    audioOnly: Boolean = false
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<YouTubeResolver.Resolved?>(null)
@@ -203,7 +230,7 @@ private fun NewPipeSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly
         )
     }
 }
@@ -231,7 +258,8 @@ private fun GDriveSurface(
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
     epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    audioOnly: Boolean = false
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<GoogleDriveResolver.Resolved?>(null)
@@ -256,7 +284,7 @@ private fun GDriveSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly
         )
     }
 }
@@ -283,11 +311,27 @@ private fun ExoSurface(
     onHandle: (PlayerHandle?) -> Unit,
     onFailed: (String) -> Unit,
     epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    audioOnly: Boolean = false
 ) {
     val context = LocalContext.current
     val exo = remember(epoch) { ExoPlayer.Builder(context).build() }
     val handle = remember(exo) { NativePlayerHandle(exo) }
+
+    // Backgrounded-but-not-PiP: nothing is actually on screen, so decoding
+    // and rendering video frames the user can't see is pure waste — this
+    // disables just the video track and lets ExoPlayer keep decoding audio
+    // only, same idea as a music app playing with the screen off. Re-enabled
+    // the moment audioOnly goes false (foregrounded again, or PiP started —
+    // see ChannelScreen, which never passes audioOnly=true while in PiP).
+    // trackSelectionParameters is cheap to rebuild and safe to set mid-playback;
+    // ExoPlayer just reselects tracks on the next internal cycle.
+    LaunchedEffect(exo, audioOnly) {
+        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
+            .build()
+    }
+
     // Exposes this ExoPlayer to the system: a Fire TV remote's dedicated
     // media keys, Alexa's "pause"/"resume" voice commands, and any system
     // Now Playing surface all reach whichever app currently holds the
@@ -295,9 +339,10 @@ private fun ExoSurface(
     // metadata in sync with `exo` on its own, so there is nothing else to
     // wire up here beyond creating and releasing it alongside the player.
     // Scoped to the player's own lifetime (same as the error/frame listener
-    // below), not a standalone service — this app already pauses playback
-    // when backgrounded outside of PiP, so there is no "still playing but
-    // the session's gone" gap to cover.
+    // below), not a standalone service — playback keeps running via
+    // ExoPlayer's own lifecycle when backgrounded outside of PiP (only the
+    // video track gets dropped, see audioOnly above), so there is no "still
+    // playing but the session's gone" gap to cover.
     //
     // The id MUST be unique across every session live in the process at
     // once, not just "one per ExoSurface" — Compose creates the new

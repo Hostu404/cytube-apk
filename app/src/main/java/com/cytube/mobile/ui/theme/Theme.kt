@@ -13,13 +13,21 @@ import androidx.compose.ui.unit.sp
 
 private val AccentDark = Color(0xFF8AA8FF)
 
+// True black background/surface rather than the earlier dark-grey pair —
+// on an OLED/AMOLED panel (most current phones) a black pixel draws
+// meaningfully less power than a dark-grey one, and this screen sits on
+// screen for as long as the app is open. surfaceContainer/surfaceContainerHigh
+// stay barely lifted off black (not pure black themselves) purely so cards
+// and sheets remain visually distinguishable from the background behind
+// them — CyTubeChannelScheme below is untouched, it deliberately matches
+// CyTube's own (non-black) web skin rather than chasing this.
 private val DarkScheme = darkColorScheme(
     primary = AccentDark,
     onPrimary = Color(0xFF00204D),
-    surface = Color(0xFF121316),
-    surfaceContainer = Color(0xFF1B1D21),
-    surfaceContainerHigh = Color(0xFF232529),
-    background = Color(0xFF0C0D0F),
+    surface = Color(0xFF000000),
+    surfaceContainer = Color(0xFF0A0A0C),
+    surfaceContainerHigh = Color(0xFF141417),
+    background = Color(0xFF000000),
     onBackground = Color(0xFFE4E5E8)
 )
 
