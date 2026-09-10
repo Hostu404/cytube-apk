@@ -49,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
+import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
@@ -156,7 +157,7 @@ private fun inlineEmotes(
 
 @Composable
 fun ChatPanel(
-    messages: List<ChatMessage>,
+    messages: ImmutableList<ChatMessage>,
     canSend: Boolean,
     showEmotes: Boolean,
     emotes: EmoteSet,
@@ -348,6 +349,15 @@ private fun TextFieldValue.insertAtCursor(fragment: String): TextFieldValue {
  * ChannelScreen.kt) can send its links to the browser the same way chat does.
  */
 internal fun openInBrowser(context: Context, url: String) {
+    // url is untrusted here — it can come straight from another member's
+    // chat message or a channel's MOTD. Only ever hand the system a plain
+    // web link; anything else (a scheme registered by some other installed
+    // app, tel:, sms:, market:, etc.) gets dropped rather than launched.
+    val scheme = Uri.parse(url).scheme?.lowercase()
+    if (scheme != "http" && scheme != "https") {
+        Log.w("CyTube", "Refusing to open link with untrusted scheme: $scheme")
+        return
+    }
     runCatching {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -412,7 +422,7 @@ class NekoOverlayState {
  */
 @Composable
 fun NekoChatOverlay(
-    messages: List<ChatMessage>,
+    messages: ImmutableList<ChatMessage>,
     showEmotes: Boolean,
     emotes: EmoteSet,
     state: NekoOverlayState,
@@ -422,9 +432,13 @@ fun NekoChatOverlay(
         val density = LocalDensity.current
         val screenWidthPx = with(density) { maxWidth.toPx() }
         val laneHeightPx = remember(density) { with(density) { NEKO_LANE_HEIGHT.roundToPx() } }
-        val laneCount = remember(maxHeight) {
-            (maxHeight / NEKO_LANE_HEIGHT).toInt().coerceIn(1, NEKO_MAX_LANES)
+        // How many lanes the screen can physically fit, independent of
+        // NEKO_MAX_LANES — used below to keep the backlog lane bonus from
+        // ever placing a lane off the bottom of a short window.
+        val maxLanesByHeight = remember(maxHeight) {
+            (maxHeight / NEKO_LANE_HEIGHT).toInt().coerceAtLeast(1)
         }
+        val laneCount = remember(maxLanesByHeight) { maxLanesByHeight.coerceAtMost(NEKO_MAX_LANES) }
 
         // Real Niconico thins comments under load rather than letting them
         // pile up — this is that, in miniature. Each lane records when its
@@ -435,8 +449,22 @@ fun NekoChatOverlay(
         // is already capped — instead of a chat flood spawning one more
         // blurred, independently-animating line per message with no limit,
         // which is what was eating frames on the video underneath.
+        //
+        // effectiveLaneCount() adds a small, bounded, temporary bonus on top
+        // of that while state.pending is genuinely deep — a flood needs more
+        // throughput than a quiet channel, and a couple of extra lanes for
+        // as long as the backlog is real drains it faster without the "just
+        // keep adding lanes" trap: it's capped by both NEKO_MAX_LANES (via
+        // laneCount) and the screen's real height (maxLanesByHeight), and it
+        // reverts to plain laneCount the moment the backlog clears.
+        fun effectiveLaneCount(): Int {
+            if (state.pending.size < NEKO_BACKLOG_BONUS_LANES_THRESHOLD) return laneCount
+            return (laneCount + NEKO_BACKLOG_BONUS_LANES).coerceAtMost(maxLanesByHeight)
+        }
+
         fun claimFreeLane(now: Long): Int? {
-            for (lane in 0 until laneCount) {
+            val count = effectiveLaneCount()
+            for (lane in 0 until count) {
                 if (now >= (state.laneFreeAtMs[lane] ?: 0L)) return lane
             }
             return null
@@ -470,10 +498,17 @@ fun NekoChatOverlay(
                 val now = System.currentTimeMillis()
                 val lane = claimFreeLane(now)
                 if (lane != null) {
-                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
+                    val pendingSize = state.pending.size
+                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx, pendingSize)
                     state.laneFreeAtMs[lane] = now + durationMs
                     state.active.add(
-                        FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
+                        FlyingComment(
+                            id = state.nextId++,
+                            msg = msg,
+                            lane = lane,
+                            durationMs = durationMs,
+                            spawnPendingSize = pendingSize
+                        )
                     )
                 } else {
                     // Every lane already busy the instant this one wanted to
@@ -495,7 +530,25 @@ fun NekoChatOverlay(
         // some typed messages look like they "didn't go through" on the
         // overlay even though they were always in the real chat panel.
         LaunchedEffect(messages) {
-            val fresh = messages.filter { !it.isServerMessage && it.seq > state.lastSpawnedSeq }
+            // Walk backward from the tail instead of filtering the WHOLE
+            // message buffer (up to MAX_CHAT_MESSAGES) on every single
+            // arrival — that full-list scan, repeated once per incoming
+            // message, is exactly what made a burst of posts (a bunch of
+            // emotes landing in quick succession, say) feel like the overlay
+            // was working through the entire chat history instead of just
+            // the new lines: on a channel that already has hundreds of
+            // messages buffered, every new one paid for re-scanning all of
+            // them just to find itself. Stopping the instant a seq we've
+            // already spawned is reached costs exactly as much as there are
+            // NEW messages this time — 1 in the common case, however many
+            // arrived in a flood, never the size of the whole buffer.
+            val fresh = ArrayList<ChatMessage>()
+            for (i in messages.indices.reversed()) {
+                val m = messages[i]
+                if (m.seq <= state.lastSpawnedSeq) break
+                if (!m.isServerMessage) fresh.add(m)
+            }
+            fresh.reverse()
             for (msg in fresh) {
                 if (state.pending.size >= NEKO_MAX_PENDING) state.pending.removeFirstOrNull()
                 state.pending.addLast(msg)
@@ -523,11 +576,24 @@ fun NekoChatOverlay(
                 val now = System.currentTimeMillis()
                 val lane = claimFreeLane(now)
                 if (lane != null) {
+                    // Captured before removeFirst() so it reflects the real
+                    // backlog depth this message spawned out of (including
+                    // itself) — the same figure both the lane-booking
+                    // estimate below and FlyingCommentItem's real-duration
+                    // recompute key off, so a lane never frees at a
+                    // different moment than the comment it's timing.
+                    val pendingSize = state.pending.size
                     val msg = state.pending.removeFirst()
-                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx)
+                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx, pendingSize)
                     state.laneFreeAtMs[lane] = now + durationMs
                     state.active.add(
-                        FlyingComment(id = state.nextId++, msg = msg, lane = lane, durationMs = durationMs)
+                        FlyingComment(
+                            id = state.nextId++,
+                            msg = msg,
+                            lane = lane,
+                            durationMs = durationMs,
+                            spawnPendingSize = pendingSize
+                        )
                     )
                     // Loop straight back around in case another lane is
                     // also free right now (e.g. several expired at once) —
@@ -568,7 +634,15 @@ data class FlyingComment(
      *  and as the very first frame's animation target before that.
      *  FlyingCommentItem recomputes the real value from the real measured
      *  width via the same [nekoDurationMs] formula once it has one. */
-    val durationMs: Int
+    val durationMs: Int,
+    /** How deep [NekoOverlayState.pending] was at the moment this comment
+     *  claimed its lane — frozen here rather than re-read live so the real
+     *  duration FlyingCommentItem recomputes from the measured width uses
+     *  the exact same backlog-speed factor as the estimate that already
+     *  booked the lane. Re-reading a live, still-changing pending size at
+     *  measurement time would let the two durations disagree and free the
+     *  lane before or after the comment actually finishes crossing. */
+    val spawnPendingSize: Int = 0
 )
 
 /**
@@ -614,6 +688,44 @@ private const val NEKO_MAX_SPEED_PX_PER_MS = 0.72f
  *  comes close to this. */
 private const val NEKO_MAX_DURATION_MS = 15_000
 
+/**
+ * Floor a comment's duration can be scaled down to while [NekoOverlayState]'s
+ * pending queue is deep — see [backlogSpeedFactor]/[nekoDurationMs]. This is
+ * the OTHER lever against flood stalls, alongside claimFreeLane's bonus
+ * lanes: more lanes raises how many comments can be in flight at once, and
+ * this raises how fast the queue actually drains once they are. Chosen well
+ * above zero — legibility still matters under a flood, it just matters less
+ * than not falling further behind.
+ */
+private const val NEKO_MIN_DURATION_MS = 2_500
+
+/** [NekoOverlayState.pending] depth at which comments start speeding up
+ *  toward [NEKO_MIN_DURATION_MS]. Below this, an ordinary handful of queued
+ *  messages plays at the normal traditional-nico pace — only once the queue
+ *  is genuinely backing up does trading a little legibility for throughput
+ *  start to pay off. */
+private const val NEKO_BACKLOG_SPEEDUP_START = 5
+
+/** [NekoOverlayState.pending] depth at which the speed-up above is already
+ *  maxed out (every comment spawning at [NEKO_MIN_DURATION_MS]-scaled pace).
+ *  Well under [NEKO_MAX_PENDING], so the queue is never left to grow toward
+ *  its hard cap before throughput is already at its fastest. */
+private const val NEKO_BACKLOG_SPEEDUP_MAX = 40
+
+/** Extra lanes [NekoChatOverlay]'s effectiveLaneCount() grants on top of the
+ *  screen-fit [NEKO_MAX_LANES]-capped baseline while backlog is deep — see
+ *  [NEKO_BACKLOG_BONUS_LANES_THRESHOLD]. Small and temporary by design: more
+ *  in-flight lanes plus faster-draining comments (see [NEKO_MIN_DURATION_MS])
+ *  clears a flood quickly without permanently crowding the screen the rest
+ *  of the time a channel is merely a little chatty. */
+private const val NEKO_BACKLOG_BONUS_LANES = 2
+
+/** [NekoOverlayState.pending] depth at which the bonus lanes above kick in.
+ *  Set above [NEKO_MAX_LANES] itself — bonus lanes are for when the queue is
+ *  backing up faster than even a full set of lanes can drain it, not for the
+ *  ordinary case of a few lanes being briefly busy. */
+private const val NEKO_BACKLOG_BONUS_LANES_THRESHOLD = 15
+
 /** Rough px-per-character (deliberately a bit generous for NEKO_TEXT_STYLE's
  *  20sp bold) used only to ESTIMATE a not-yet-measured message's width at
  *  spawn time, so [NekoOverlayState.laneFreeAtMs] is booked for roughly the
@@ -624,16 +736,40 @@ private const val NEKO_MAX_DURATION_MS = 15_000
  *  provisionally held. */
 private const val NEKO_ESTIMATED_PX_PER_CHAR = 16f
 
+/** 0f = no backlog speed-up at all, 1f = fully scaled to [NEKO_MIN_DURATION_MS].
+ *  Linear ramp between [NEKO_BACKLOG_SPEEDUP_START] and
+ *  [NEKO_BACKLOG_SPEEDUP_MAX] rather than a hard cutover, so throughput
+ *  climbs smoothly as a flood builds instead of visibly lurching from one
+ *  pace to another mid-message. */
+private fun backlogSpeedFactor(pendingSize: Int): Float {
+    if (pendingSize <= NEKO_BACKLOG_SPEEDUP_START) return 0f
+    if (pendingSize >= NEKO_BACKLOG_SPEEDUP_MAX) return 1f
+    val span = (NEKO_BACKLOG_SPEEDUP_MAX - NEKO_BACKLOG_SPEEDUP_START).toFloat()
+    return (pendingSize - NEKO_BACKLOG_SPEEDUP_START) / span
+}
+
 /** The actual traditional-nico duration formula: fixed baseline duration,
  *  stretched out only once the message is long enough that holding the
- *  speed ceiling would otherwise require less than that baseline. */
-private fun nekoDurationMs(distancePx: Float): Int =
-    (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
+ *  speed ceiling would otherwise require less than that baseline.
+ *
+ *  [pendingSize] additionally scales the whole result down toward
+ *  [NEKO_MIN_DURATION_MS] as [NekoOverlayState.pending] backs up (see
+ *  [backlogSpeedFactor]) — a long message under a flood still crosses
+ *  proportionally slower than a short one, it just does so faster overall
+ *  than it would in ordinary, unhurried chat. Defaults to 0 (no speed-up)
+ *  for call sites that don't have a backlog figure to hand. */
+private fun nekoDurationMs(distancePx: Float, pendingSize: Int = 0): Int {
+    val base = (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
         .coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
+    val factor = backlogSpeedFactor(pendingSize)
+    if (factor <= 0f) return base
+    val scaled = base - ((base - NEKO_MIN_DURATION_MS) * factor).roundToInt()
+    return scaled.coerceAtLeast(NEKO_MIN_DURATION_MS)
+}
 
-private fun estimateNekoDurationMs(rawHtml: String, screenWidthPx: Float): Int {
+private fun estimateNekoDurationMs(rawHtml: String, screenWidthPx: Float, pendingSize: Int = 0): Int {
     val estimatedWidthPx = rawHtml.length * NEKO_ESTIMATED_PX_PER_CHAR
-    return nekoDurationMs(screenWidthPx + estimatedWidthPx)
+    return nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
 }
 
 /** Vertical space each flying line gets — tall enough for NEKO_TEXT_STYLE's
@@ -711,7 +847,7 @@ private fun FlyingCommentItem(
         // frees the lane at or after this real duration finishes, never
         // before.
         val distance = screenWidthPx + textWidthPx
-        val durationMs = nekoDurationMs(distance)
+        val durationMs = nekoDurationMs(distance, comment.spawnPendingSize)
         x.animateTo(
             targetValue = -distance,
             animationSpec = tween(durationMillis = durationMs, easing = LinearEasing)
@@ -977,7 +1113,7 @@ private fun ChatRow(
 
 @Composable
 fun PlaylistPanel(
-    items: List<PlaylistItem>,
+    items: ImmutableList<PlaylistItem>,
     currentUid: Int,
     canControl: Boolean,
     onJumpTo: (Int) -> Unit,
@@ -1117,7 +1253,7 @@ fun PollPanel(
 }
 
 @Composable
-fun UsersPanel(users: List<ChannelUser>, modifier: Modifier = Modifier) {
+fun UsersPanel(users: ImmutableList<ChannelUser>, modifier: Modifier = Modifier) {
     if (users.isEmpty()) {
         EmptyPanel("No users listed.", modifier)
         return

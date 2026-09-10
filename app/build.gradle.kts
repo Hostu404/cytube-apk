@@ -91,6 +91,12 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
+    // Stable collection types Compose's compiler can actually recognize as
+    // immutable (a plain List/Map param forces every composable that takes
+    // one to be non-skippable — see ChannelViewModel.ChannelUiState). Also
+    // gives the chat/playlist/user-list state real structural-sharing
+    // add/remove instead of copying the whole list per update.
+    implementation(libs.kotlinx.collections.immutable)
     debugImplementation(libs.androidx.ui.tooling)
 
     implementation(libs.androidx.navigation.compose)

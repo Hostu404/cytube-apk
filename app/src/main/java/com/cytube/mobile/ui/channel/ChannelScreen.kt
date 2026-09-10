@@ -422,6 +422,7 @@ fun ChannelScreen(
     // whole time PiP is up.
     val configuration = LocalConfiguration.current
     var lastOrientation by remember { mutableStateOf(configuration.orientation) }
+
     LaunchedEffect(configuration.orientation, isInPictureInPicture) {
         if (isTv) return@LaunchedEffect
         if (isInPictureInPicture) return@LaunchedEffect
@@ -444,6 +445,8 @@ fun ChannelScreen(
         }
     }
 
+    // Fullscreen (and any open panel) intercepts back first, closing itself
+    // instead of leaving the channel.
     BackHandler(enabled = fullscreen || openPanel != null) {
         when {
             fullscreen -> fullscreen = false
@@ -461,6 +464,23 @@ fun ChannelScreen(
     // `settlingFromPip` keeps this exact branch (and therefore the exact
     // same host for playerContent()) active for a short window after PiP
     // actually ends too — see the comment above where it's set for why.
+    // This has to stay UNCONDITIONAL (not gated on `fullscreen` or anything
+    // else): the whole point of the settle window is to hold playerContent()
+    // on this exact host for a fixed stretch after PiP exits, because the
+    // system's own PiP-exit resize (and often a coincident rotation change)
+    // is still animating the window during that stretch. Backing out of
+    // fullscreen during that window used to fall straight through to the
+    // compact Scaffold immediately, which meant Compose reparented the
+    // `movableContentOf`-hoisted playerContent() into a different host
+    // while that system transition was still in flight — confirmed via a
+    // crash log: `IllegalStateException: Cannot insert LayoutNode ...
+    // because it already has a parent`, thrown from inside Scaffold's
+    // SubcomposeLayout pass, concurrent with a system CHANGE/rotation
+    // transition right after the PiP-exit CLOSE transition. The fix is to
+    // just let the settle timer run out on its own — the back press still
+    // sets `fullscreen = false` immediately (see BackHandler above), it
+    // just doesn't visually leave this box until settlingFromPip clears,
+    // which is a brief black-box flicker rather than a crash.
     if (isInPictureInPicture || settlingFromPip) {
         Box(Modifier.fillMaxSize().background(Color.Black)) {
             playerContent()
@@ -542,12 +562,14 @@ fun ChannelScreen(
                     }
             ) {
                 if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
+                    // Not wired to audioOnlyState — see WebCompatView's own
+                    // doc comment on why backgrounding deliberately leaves
+                    // it running rather than pausing it.
                     WebCompatView(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
                         authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        modifier = Modifier.fillMaxSize(),
-                        paused = audioOnlyState.value
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else {
                     playerContent()
@@ -855,12 +877,14 @@ fun ChannelScreen(
                 if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
                     // Compatibility View is the whole CyTube page again, not a
                     // player surface. It owns the channel entirely while it is up.
+                    // Not wired to audioOnlyState — see WebCompatView's own
+                    // doc comment on why backgrounding deliberately leaves
+                    // it running rather than pausing it.
                     WebCompatView(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
                         authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        modifier = Modifier.fillMaxSize(),
-                        paused = audioOnlyState.value
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else {
                     playerContent()

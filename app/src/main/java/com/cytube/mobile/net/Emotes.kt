@@ -1,5 +1,7 @@
 package com.cytube.mobile.net
 
+import androidx.compose.runtime.Immutable
+
 /**
  * Emote substitution, ported from the official client.
  *
@@ -24,6 +26,15 @@ package com.cytube.mobile.net
  * Tokens that match nothing are left alone, which is what makes unknown emotes
  * fall through as ordinary text.
  */
+// Every property here is a val set once in the private constructor, and every
+// "mutation" (withUpdated/withRenamed/withRemoved) returns a brand-new
+// instance rather than touching this one — genuinely immutable, just not
+// provably so to the compiler on its own, since `all`/`hashed`/`spaced` are
+// List/Map (interfaces a MutableList/MutableMap could hide behind). Without
+// this, every composable taking an EmoteSet parameter (ChatPanel, ChatRow,
+// NekoChatOverlay, the emote picker) is forced non-skippable, same issue as
+// ChannelUiState's own List fields — see their PersistentList doc comment.
+@Immutable
 class EmoteSet private constructor(
     val all: List<Emote>,
     private val hashed: Map<String, Emote>,
