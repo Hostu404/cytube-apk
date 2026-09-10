@@ -120,6 +120,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var joined = false
     private var chatSeq = 0L
     private var guestRetries = 0
+    /** Fingerprints of recently-appended chat messages — see the dedupe check
+     *  in the CyTubeEvent.Chat branch below. Bounded to MAX_CHAT_MESSAGES so
+     *  a long session can't grow this without limit. */
+    private val seenChatFingerprints = LinkedHashSet<String>()
 
     fun start(channel: String) {
         if (joined) return
@@ -283,11 +287,30 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
                 }
 
-                is CyTubeEvent.Chat -> update { s ->
-                    // Shadow-muted messages are only meant for moderators; the
-                    // server already filters delivery, but drop them defensively.
-                    if (event.message.shadow && s.localRank < 2) s
-                    else s.copy(messages = appendChat(s.messages, event.message))
+                is CyTubeEvent.Chat -> {
+                    // CyTube resends the channel's recent chat backlog on
+                    // every joinChannel — CyTubeClient.replaySession runs on
+                    // every socket reconnect, not just the first one — so an
+                    // ordinary mobile-network hiccup on an otherwise-quiet
+                    // channel was replaying the same old messages back in as
+                    // if they'd just been said: duplicating them in the chat
+                    // panel, and making NekoChatOverlay fly them across the
+                    // screen again, since each replay gets a fresh, higher
+                    // seq than anything Neko has already spawned. Dedupe on
+                    // the fields CyTube preserves verbatim on replay (not
+                    // anything this client assigns itself) before any of
+                    // that has a chance to happen.
+                    if (seenChatFingerprints.add(event.message.fingerprint())) {
+                        if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
+                            seenChatFingerprints.remove(seenChatFingerprints.first())
+                        }
+                        update { s ->
+                            // Shadow-muted messages are only meant for moderators; the
+                            // server already filters delivery, but drop them defensively.
+                            if (event.message.shadow && s.localRank < 2) s
+                            else s.copy(messages = appendChat(s.messages, event.message))
+                        }
+                    }
                 }
                 is CyTubeEvent.ChatCleared -> update { it.copy(messages = persistentListOf()) }
 
@@ -673,6 +696,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             connect(_state.value.channel)
         }
     }
+
+    /** Identity for chat-replay dedup — the fields CyTube's server sends back
+     *  unchanged when it resends a message (original username/text/time),
+     *  never anything this client assigns itself like [ChatMessage.seq]. */
+    private fun ChatMessage.fingerprint(): String = "$username $timestamp $isPm $html"
 
     /**
      * Appends one message and trims the buffer. Previously an ArrayList(current
