@@ -16,9 +16,14 @@ import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -26,11 +31,16 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
+import com.cytube.mobile.data.Settings
+import com.cytube.mobile.data.SettingsStore
+import com.cytube.mobile.data.ThemeMode
 import com.cytube.mobile.ui.channel.ChannelScreen
 import com.cytube.mobile.ui.channel.PlaybackHost
 import com.cytube.mobile.ui.home.HomeScreen
+import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.login.LoginScreen
 import com.cytube.mobile.ui.settings.SettingsScreen
+import com.cytube.mobile.ui.theme.CyTubeSettingsTheme
 import com.cytube.mobile.ui.theme.CyTubeTheme
 
 class MainActivity : ComponentActivity() {
@@ -70,6 +80,20 @@ class MainActivity : ComponentActivity() {
             CyTubeTheme {
                 val nav = rememberNavController()
 
+                // Single source of truth for the home/settings ThemeMode
+                // preference (Settings > Appearance), read once here and
+                // handed down to both destinations below so a change in
+                // Settings is reflected on both immediately, without either
+                // screen re-reading SettingsStore on its own.
+                val appContext = LocalContext.current
+                val settingsStore = remember { SettingsStore(appContext) }
+                val settings by settingsStore.settings.collectAsState(initial = Settings())
+                val isDark = when (settings.themeMode) {
+                    ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                    ThemeMode.LIGHT -> false
+                    ThemeMode.DARK -> true
+                }
+
                 // Deep link support: a cytu.be/r/<channel> link (cold start or
                 // while the app is already running, via onNewIntent below)
                 // lands here once the nav graph exists to navigate on.
@@ -83,11 +107,27 @@ class MainActivity : ComponentActivity() {
 
                 NavHost(navController = nav, startDestination = "home") {
                     composable("home") {
-                        HomeScreen(
-                            onOpenChannel = { nav.navigate("channel/$it") },
-                            onOpenLogin = { nav.navigate("login") },
-                            onOpenSettings = { nav.navigate("settings") }
-                        )
+                        // Phone mode: follow the Appearance setting (default:
+                        // system light/dark), same as Settings itself — see
+                        // isDark above. Reverted from an earlier version that
+                        // forced the channel screen's always-dark palette
+                        // here instead, per user request. TV keeps the
+                        // generic DarkScheme — its layout/contrast was tuned
+                        // separately and isn't part of this.
+                        val context = LocalContext.current
+                        val isTv = remember { isTvDevice(context) }
+                        val homeContent: @Composable () -> Unit = {
+                            HomeScreen(
+                                onOpenChannel = { nav.navigate("channel/$it") },
+                                onOpenLogin = { nav.navigate("login") },
+                                onOpenSettings = { nav.navigate("settings") }
+                            )
+                        }
+                        if (isTv) {
+                            homeContent()
+                        } else {
+                            CyTubeSettingsTheme(darkTheme = isDark) { homeContent() }
+                        }
                     }
                     composable(
                         "channel/{name}",
@@ -108,7 +148,16 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     composable("login") { LoginScreen(onBack = { nav.popBackStack() }) }
-                    composable("settings") { SettingsScreen(onBack = { nav.popBackStack() }) }
+                    composable("settings") {
+                        // Follows the Appearance setting (default: system
+                        // light/dark), unlike the rest of the app — per user
+                        // request, since this is a plain preferences screen
+                        // with no CyTube look to protect. See isDark above
+                        // and CyTubeSettingsTheme's doc comment.
+                        CyTubeSettingsTheme(darkTheme = isDark) {
+                            SettingsScreen(onBack = { nav.popBackStack() })
+                        }
+                    }
                 }
             }
         }
