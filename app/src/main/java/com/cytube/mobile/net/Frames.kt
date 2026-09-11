@@ -38,6 +38,34 @@ data class MediaFrame(
     /** Best available source, honouring the quality order in sortSources(). */
     val bestSource: DirectSource? get() = direct.firstOrNull()
 
+    /** The URL this item's own single-video WebView surface should load — see
+     *  MediaTypes.Player.EMBED. Three sources, in order:
+     *
+     *  1. meta.embed.src — a provider's pre-built embeddable link (e.g. an
+     *     "?embedded=True" view link), when CyTube's server supplied one.
+     *  2. scuri — CyTube's record of the original URL the item was added
+     *     from. Never a dedicated embed link, but for a page that's mostly-
+     *     just-a-video-player anyway it does the same job.
+     *  3. MediaTypes.knownEmbedUrl(type, id) — a handful of providers CyTube
+     *     resolves with no embeddable link in meta AT ALL (Dailymotion,
+     *     Niconico, Streamable, PeerTube — checked directly against
+     *     CyTube's own get-info.js/mediaquery source, not assumed), where
+     *     the provider itself still has a stable, publicly documented,
+     *     no-API-key embed page. This is what makes Dailymotion (etc.) not
+     *     fall straight to the whole-page WEB offer.
+     *
+     *  Google Drive is deliberately excluded from all three: it already gets
+     *  its own native resolution (GoogleDriveResolver — see
+     *  MediaTypes.playerFor) and a raw Drive link opened in a stripped-down
+     *  WebView lands on Google's own sign-in/UI chrome, not a clean video —
+     *  see the README's known Google Drive limitation. Its failures fall
+     *  straight through to null here, so they still go to the full
+     *  Compatibility View offer, same as before this existed. */
+    val embedPlayableSrc: String? get() = if (type == "gd") null else
+        embedSrc?.takeIf { it.isNotBlank() }
+            ?: scuri
+            ?: MediaTypes.knownEmbedUrl(type, id)
+
     companion object {
         fun from(o: JSONObject): MediaFrame {
             val meta = o.optJSONObject("meta") ?: JSONObject()

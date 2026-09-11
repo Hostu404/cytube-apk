@@ -73,7 +73,9 @@ data class ChannelUiState(
     val isFavourite: Boolean = false,
     val kicked: String? = null,
     /** Non-null when a mounted player backend failed and we're asking whether
-     *  to fall back to WebView. */
+     *  to fall back to WebView. Only reached when there's no single-video
+     *  fallback to try instead — see ChannelViewModel.reportPlaybackFailure,
+     *  which switches straight to EMBED with no prompt when one exists. */
     val playbackOffer: String? = null,
     /** Non-null when a freshly-selected item cannot be played natively at all
      *  (e.g. Google Drive without the userscript metadata) and we're asking
@@ -115,6 +117,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  onTimeUpdate can tell SyncEngine "give this one a moment" right after
      *  a media switch — see SyncEngine.apply's withinGracePeriod doc. */
     private var playerAttachedAtMs: Long = 0L
+    /** Anchor for embedSyntheticTimeSeconds() — see its own doc comment. Set
+     *  wherever state.player becomes EMBED (onMediaChanged, setMode,
+     *  reportPlaybackFailure's silent fallback); meaningless otherwise. */
+    private var embedClockAnchorAtMs: Long = 0L
+    private var embedClockAnchorSeconds: Double = 0.0
     private var settings: Settings = Settings()
     private var leaderTicker: Job? = null
     private var joined = false
@@ -389,6 +396,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val (chosen, offer) = choosePlayerAndOffer(media)
         Log.i(TAG, "changeMedia type=${media.type} player=$chosen " +
             "seconds=${media.seconds} sources=${media.direct.size} id=${media.id}")
+        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(media.currentTime)
         // Player selection is re-run on every changeMedia, so a playlist moving
         // from YouTube to a film and back switches players by itself.
         update {
@@ -486,10 +494,59 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         leaderTicker = viewModelScope.launch {
             while (true) {
                 delay(5_000)
-                val p = player ?: continue
-                client.sendMediaUpdate(p.currentTimeSeconds(), p.isPaused)
+                val p = player
+                when {
+                    p != null -> client.sendMediaUpdate(p.currentTimeSeconds(), p.isPaused)
+                    // No PlayerHandle, but EMBED is still a real, watched
+                    // item, not a torn-down player — see
+                    // embedSyntheticTimeSeconds's own doc comment for why
+                    // broadcasting an extrapolated position beats leaving
+                    // the whole room's authoritative currentTime frozen for
+                    // as long as this item plays.
+                    _state.value.player == MediaTypes.Player.EMBED ->
+                        client.sendMediaUpdate(embedSyntheticTimeSeconds(), false)
+                    // Otherwise (WEB, or genuinely between items) there is
+                    // nothing meaningful to broadcast — same as before.
+                }
             }
         }
+    }
+
+    /** Sets the (wall-clock, position) anchor embedSyntheticTimeSeconds()
+     *  extrapolates from. Call whenever state.player is about to become
+     *  EMBED, with the best position already known for that item. */
+    private fun anchorEmbedClock(startSeconds: Double) {
+        embedClockAnchorAtMs = android.os.SystemClock.elapsedRealtime()
+        embedClockAnchorSeconds = startSeconds.coerceAtLeast(0.0)
+    }
+
+    /**
+     * EMBED has no PlayerHandle — no ExoPlayer, no currentTimeSeconds() to
+     * read, since the video is inside a WebView running a provider's own JS
+     * player (YouTube's, Dailymotion's, Vimeo's, or, for a custom cu/bc/bn
+     * embed, whatever arbitrary page a channel operator pasted, with no
+     * consistent API at all). Building a real per-provider JS bridge to read
+     * true position back out isn't something one implementation could cover
+     * for all of them.
+     *
+     * What this does instead, only for the room LEADER's own broadcast (see
+     * retuneLeaderTicker): extrapolate forward from wall-clock time elapsed
+     * since the item's own known starting position (embedClockAnchorSeconds
+     * as of embedClockAnchorAtMs — see anchorEmbedClock), assuming ordinary
+     * 1x playback. That's the common case; the one thing this can't detect
+     * is the far rarer case of the viewer manually pausing the embed by
+     * hand, which is also why retuneLeaderTicker always reports paused=false
+     * here rather than guessing. Anyone actually watching natively already
+     * corrects against small drift via the normal accuracySeconds tolerance
+     * (see SyncEngine), so this costs nothing that slow network/buffering
+     * wasn't already costing elsewhere — the alternative was the room's
+     * authoritative currentTime simply freezing for as long as the leader's
+     * item stayed on EMBED, which is worse for everyone in the channel, not
+     * just the leader.
+     */
+    private fun embedSyntheticTimeSeconds(): Double {
+        val elapsedSeconds = (android.os.SystemClock.elapsedRealtime() - embedClockAnchorAtMs) / 1000.0
+        return embedClockAnchorSeconds + elapsedSeconds
     }
 
     /**
@@ -502,7 +559,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun resolvePlayer(media: MediaFrame): MediaTypes.Player =
         when (_state.value.effectiveMode) {
             CompatMode.WEB -> MediaTypes.Player.WEB
-            else -> MediaTypes.playerFor(media.type, media.hasDirect, media.embedSrc)
+            else -> MediaTypes.playerFor(media.type, media.hasDirect, media.embedPlayableSrc, media.isLivestream)
         }
 
     /**
@@ -549,12 +606,48 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * offer the fallback like everything else fixes both: it's the standard
      * dialog instead of a hijacked status line, and it actually goes away
      * once handled.
+     *
+     * When the failed item also has a URL its own single-video WebView
+     * surface could load (media.embedPlayableSrc — null for Google Drive,
+     * which has no clean "just the video" page to fall back to), that swap
+     * happens immediately, with no dialog. That's deliberately different
+     * from the WebView case above: EMBED isn't "a different player" from the
+     * user's seat — chat, playlist, sync, tilt-triggered fullscreen and the
+     * Nico overlay all keep working exactly as they did a moment ago, only
+     * the decoder behind the video itself changed, the same way switching
+     * between NATIVE/NEWPIPE/GDRIVE already happens without asking. WebView
+     * mode is the one that actually costs something (it drops the socket
+     * entirely), so that's the one still worth a prompt. Guarded against the
+     * backend that just failed *being* EMBED itself, so a broken
+     * single-video URL can't silently re-select itself in a loop — that
+     * case falls through to the WebView offer like it always did.
      */
     fun reportPlaybackFailure(reason: String) {
         val m = _state.value.media
         Log.w(TAG, "playback failed backend=${_state.value.player} " +
             "type=${m?.type} id=${m?.id}: $reason")
         if (_state.value.effectiveMode == CompatMode.WEB) return
+        val embeddable = m?.embedPlayableSrc
+        if (embeddable != null && _state.value.player != MediaTypes.Player.EMBED) {
+            Log.d(TAG, "playback fallback: switching to single-video view at $embeddable")
+            // Best-effort: the failed backend's own handle is still readable
+            // right up to this call in the common case, so anchor the
+            // synthetic clock (see embedSyntheticTimeSeconds) from wherever
+            // it actually got to rather than from the item's original,
+            // possibly long-stale, load-time position. currentTimeSeconds()
+            // is suspend, so the handle is captured synchronously now (before
+            // the backend actually switches away under it) and read inside a
+            // coroutine.
+            val failedHandle = player
+            val fallbackSeconds = m?.currentTime ?: 0.0
+            viewModelScope.launch {
+                val bestKnownSeconds = runCatching { failedHandle?.currentTimeSeconds() }.getOrNull()
+                    ?: fallbackSeconds
+                anchorEmbedClock(bestKnownSeconds)
+                update { it.copy(player = MediaTypes.Player.EMBED) }
+            }
+            return
+        }
         update { it.copy(playbackOffer = reason) }
     }
 
@@ -652,6 +745,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.connection != ConnectionState.CONNECTED) connect(_state.value.channel)
                 _state.value.media?.let { m ->
                     val (chosen, offer) = choosePlayerAndOffer(m)
+                    if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(m.currentTime)
                     update { it.copy(player = chosen, compatOffer = offer) }
                 }
             }
@@ -700,7 +794,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** Identity for chat-replay dedup — the fields CyTube's server sends back
      *  unchanged when it resends a message (original username/text/time),
      *  never anything this client assigns itself like [ChatMessage.seq]. */
-    private fun ChatMessage.fingerprint(): String = "$username $timestamp $isPm $html"
+    private fun ChatMessage.fingerprint(): String = "$username $timestamp $isPm $html"
 
     /**
      * Appends one message and trims the buffer. Previously an ArrayList(current
