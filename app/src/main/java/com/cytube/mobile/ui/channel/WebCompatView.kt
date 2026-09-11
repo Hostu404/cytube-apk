@@ -66,7 +66,19 @@ fun WebCompatView(
         factory = { ctx ->
             CookieManager.getInstance().apply {
                 setAcceptCookie(true)
-                authCookie?.let { setCookie(baseUrl, "auth=$it; Path=/") }
+                // Secure: baseUrl is always https (network_security_config
+                // blocks cleartext app-wide anyway, but this keeps the
+                // cookie itself from ever being eligible to leave over a
+                // plaintext connection, belt and suspenders). HttpOnly: this
+                // cookie only needs to be sent back to the server on
+                // requests — CyTube's own page JS has no legitimate reason
+                // to read it — so keeping it out of `document.cookie`
+                // narrows what a bug in the real CyTube page (out of this
+                // app's control) or a same-process third-party embed could
+                // get at. SameSite=Lax: normal top-level navigation within
+                // this WebView still sends it; it's just not attached to
+                // cross-site requests a page here didn't initiate itself.
+                authCookie?.let { setCookie(baseUrl, "auth=$it; Path=/; Secure; HttpOnly; SameSite=Lax") }
             }
 
             WebView(ctx).apply {

@@ -39,6 +39,19 @@ object GoogleDriveResolver {
     // not tied to any account. Same one yt-dlp's extractor uses.
     private const val API_KEY = "AIzaSyDVQw45DwoYh632gvsP5vPDqEKvb-Ywnb8"
 
+    // fileId is CyTube's media.id for a "gd" item — untrusted data from the
+    // room's playlist/server, not something the user typed. It's spliced
+    // directly into a URL path segment below, so it needs the same shape
+    // check every other provider id in this app gets (see
+    // PlayerSurface.kt's SAFE_EMBED_ID_REGEX) before it ever reaches
+    // Request.Builder: real Drive file ids are URL-safe base64-ish
+    // (letters/digits/-/_), so anything outside that charset — a "/", "..",
+    // "?", "#", etc. — can only be an attempt to smuggle extra path segments
+    // or query parameters into this request, not a legitimate id. Length is
+    // capped generously (real ids run 25-100 chars) rather than tied to an
+    // exact figure, since Google hasn't published one.
+    private val SAFE_FILE_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,128}$")
+
     data class Resolved(val url: String, val mimeType: String?, val label: String)
 
     // Same reasoning as YouTubeResolver's cache: these URLs are signed and
@@ -47,6 +60,10 @@ object GoogleDriveResolver {
     private const val CACHE_MS = 5 * 60 * 1000L
 
     suspend fun resolve(http: OkHttpClient, fileId: String): Result<Resolved> = withContext(Dispatchers.IO) {
+        if (!SAFE_FILE_ID_REGEX.matches(fileId)) {
+            Log.w(TAG, "rejected malformed Google Drive file id (len=${fileId.length})")
+            return@withContext Result.failure(IllegalArgumentException("Invalid Google Drive file id"))
+        }
         cache[fileId]?.let { (at, r) ->
             if (System.currentTimeMillis() - at < CACHE_MS) return@withContext Result.success(r)
         }

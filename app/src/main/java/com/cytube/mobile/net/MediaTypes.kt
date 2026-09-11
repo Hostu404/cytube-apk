@@ -160,6 +160,37 @@ object MediaTypes {
      * refused to add new sc items at all since 2022, so there is nothing to
      * fall back for).
      */
+    /** A bare DNS hostname — letters/digits/hyphens per label, labels joined
+     *  by dots, no scheme/userinfo/port/path/query. This is deliberately
+     *  strict: peertube.js's "domain" half of a pt id is meant to be exactly
+     *  this, and knownEmbedUrl below splices it directly into a URL string
+     *  that gets loaded in a WebView, so anything that isn't unambiguously a
+     *  hostname (an "@" that would smuggle in userinfo, a "/" that would
+     *  smuggle in a path, a scheme, etc.) must be rejected outright rather
+     *  than passed through. */
+    private val HOSTNAME_REGEX =
+        Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+    /** PeerTube's own short-UUID charset (base58-ish, no separators) — see
+     *  peertube.js. Deliberately narrow for the same reason as HOSTNAME_REGEX. */
+    private val PEERTUBE_SHORT_ID_REGEX = Regex("^[A-Za-z0-9]{1,64}$")
+
+    /**
+     * All server-supplied — a channel's own media id, straight off a
+     * changeMedia/playlist frame — so every branch below is untrusted input
+     * being spliced into a URL a WebView will load, not a trusted constant.
+     * Only the "pt" branch actually needs validating: every other id here is
+     * used as an opaque path segment on a fixed, hardcoded host that the id
+     * itself has no control over, so there is nothing for a doctored id to
+     * redirect — at worst it 404s on the real provider. "pt" is different:
+     * peertube.js packs the instance's own hostname INTO the id
+     * ("domain;shortUUID"), and that hostname becomes part of the URL's
+     * authority itself — an unvalidated id there would let a malicious or
+     * compromised channel point this WebView at an arbitrary attacker
+     * domain merely by shaping the id string (e.g. embedding "@" to smuggle
+     * in a different host, or "/" to smuggle in a path), rather than an
+     * actual PeerTube instance.
+     */
     fun knownEmbedUrl(type: String, id: String): String? = when (type) {
         "yt" -> "https://www.youtube.com/embed/$id"
         "vi" -> "https://player.vimeo.com/video/$id"
@@ -168,7 +199,13 @@ object MediaTypes {
         "sb" -> "https://streamable.com/e/$id"
         "pt" -> {
             val parts = id.split(";", limit = 2)
-            if (parts.size == 2) "https://${parts[0]}/videos/embed/${parts[1]}" else null
+            val domain = parts.getOrNull(0)
+            val shortId = parts.getOrNull(1)
+            if (parts.size == 2 && domain != null && shortId != null &&
+                HOSTNAME_REGEX.matches(domain) && PEERTUBE_SHORT_ID_REGEX.matches(shortId)
+            ) {
+                "https://$domain/videos/embed/$shortId"
+            } else null
         }
         else -> null
     }
