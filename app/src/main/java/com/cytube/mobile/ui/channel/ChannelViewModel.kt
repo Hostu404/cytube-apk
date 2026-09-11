@@ -98,7 +98,25 @@ data class ChannelUiState(
     /** Which option the local user tapped this session. The server has no
      *  "your vote" field (see CyTube's own client, which tracks this the same
      *  way — button state only), so this is reset whenever the poll changes. */
-    val myPollVote: Int? = null
+    val myPollVote: Int? = null,
+    /** Mirrors the Settings "stay in sync" toggle (Prefs.syncEnabled). Off is
+     *  what PlaylistPanel uses to switch a tap from the moderator-only
+     *  jumpTo to personal picking — see ChannelViewModel.pickPersonal. */
+    val syncEnabled: Boolean = true,
+    /** True while [media] is something the LOCAL user personally picked from
+     *  the playlist (see pickPersonal) rather than the channel's own current
+     *  item — only ever true while [syncEnabled] is false. [channelCurrentMedia]
+     *  keeps tracking the real thing under it the whole time, so turning sync
+     *  back on (or manually clearing the pick) can snap straight back. */
+    val personalPickActive: Boolean = false,
+    /** The playlist uid personal picking currently has loaded, or -1 when
+     *  none — separate from [currentUid], which is always the channel's own
+     *  real current item regardless of what's personally picked. */
+    val personalPickUid: Int = -1,
+    /** The channel's own real current item, kept up to date by every
+     *  changeMedia even while [personalPickActive] is true and [media] is
+     *  showing something else entirely — see onMediaChanged/stopPersonalPick. */
+    val channelCurrentMedia: MediaFrame? = null
 ) {
     val isLeader: Boolean get() = leader != null && leader == localUser
 }
@@ -160,23 +178,34 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 showEmotes = settings.showEmotes,
                 pipEnabled = settings.pipEnabled,
                 ambientGlowEnabled = settings.ambientGlowEnabled,
+                syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
             settingsStore.noteVisit(channel)
 
             launch {
                 settingsStore.settings.collect {
+                    val wasSyncEnabled = settings.syncEnabled
                     settings = it
                     update { s ->
                         if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled &&
-                            it.ambientGlowEnabled == s.ambientGlowEnabled
+                            it.ambientGlowEnabled == s.ambientGlowEnabled &&
+                            it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
                             showEmotes = it.showEmotes,
                             pipEnabled = it.pipEnabled,
-                            ambientGlowEnabled = it.ambientGlowEnabled
+                            ambientGlowEnabled = it.ambientGlowEnabled,
+                            syncEnabled = it.syncEnabled
                         )
                     }
+                    // Sync flipped back on while personally browsing: snap
+                    // straight back to the channel's real current item, same
+                    // as if the user had cleared the pick themselves — see
+                    // stopPersonalPick. A personal pick left dangling here
+                    // would keep showing a video the rest of the channel
+                    // was never watching, now with sync silently back on.
+                    if (it.syncEnabled && !wasSyncEnabled) stopPersonalPick()
                 }
             }
             launch { observeEvents() }
@@ -277,7 +306,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.MediaChanged -> onMediaChanged(event.media)
                 is CyTubeEvent.MediaTimeUpdate -> {
-                    if (event.update.paused == _state.value.playing) {
+                    // Both of these describe the CHANNEL's own current item —
+                    // meaningless while a personal pick (see pickPersonal) is
+                    // what's actually on screen, and applying either would
+                    // show/hide the wrong play state or fight the personal
+                    // player's own position. onTimeUpdate has its own,
+                    // separate personalPickActive guard for the same reason.
+                    if (!_state.value.personalPickActive && event.update.paused == _state.value.playing) {
                         update { it.copy(playing = !event.update.paused) }
                     }
                     onTimeUpdate(event.update)
@@ -386,10 +421,26 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // popped the "Try WebView?" dialog again, for no reason. Only treat
         // this as a genuinely new item — and only then re-run player
         // selection and reset the offer dialogs — when the id or type
-        // actually differs from what's already loaded.
-        val current = _state.value.media
+        // actually differs from what's already loaded. Compared against
+        // channelCurrentMedia rather than state.media: while a personal pick
+        // (see pickPersonal) is active those two diverge on purpose, and it's
+        // the channel's own item this dedupe check (and channelCurrentMedia
+        // itself) cares about, not whatever's personally on screen.
+        val current = _state.value.channelCurrentMedia
         if (current != null && current.id == media.id && current.type == media.type) {
-            update { it.copy(media = media, playing = !media.paused) }
+            update {
+                if (it.personalPickActive) it.copy(channelCurrentMedia = media)
+                else it.copy(media = media, channelCurrentMedia = media, playing = !media.paused)
+            }
+            return
+        }
+
+        // Personally browsing: the channel's real item genuinely changed
+        // underneath us, but nothing about what's on screen should move —
+        // just keep channelCurrentMedia current so stopPersonalPick (a
+        // manual clear, or sync flipping back on) lands on the right thing.
+        if (_state.value.personalPickActive) {
+            update { it.copy(channelCurrentMedia = media) }
             return
         }
 
@@ -402,6 +453,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update {
             it.copy(
                 media = media,
+                channelCurrentMedia = media,
                 player = chosen,
                 playing = !media.paused,
                 playbackOffer = null,
@@ -416,6 +468,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val p = player ?: return
         val s = _state.value
         if (s.effectiveMode == CompatMode.WEB) return   // the web page syncs itself
+        // A personal pick (see pickPersonal) is playing something the
+        // server's own currentTime/lead-in/pause broadcasts know nothing
+        // about — SyncEngine.apply assumes `update` describes whatever
+        // `player` currently holds, which isn't true here. Its `waiting`
+        // (lead-in) branch in particular runs unconditionally, even with
+        // sync off, so applying this anyway risked a completely unrelated
+        // channel-item lead-in pausing/resetting a video nobody else in the
+        // room was ever watching.
+        if (s.personalPickActive) return
         val withinGrace = android.os.SystemClock.elapsedRealtime() - playerAttachedAtMs < SYNC_GRACE_MS
         viewModelScope.launch {
             runCatching {
@@ -494,6 +555,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         leaderTicker = viewModelScope.launch {
             while (true) {
                 delay(5_000)
+                // Being the room's leader means BEING its clock — but a
+                // personal pick (see pickPersonal) has this client playing
+                // something else entirely, with no handle on the channel's
+                // real current item to read a position from at all (it was
+                // torn down when the pick was made). Broadcasting the
+                // personal player's position as the channel's own currentTime
+                // would corrupt sync for everyone else in the room, so this
+                // just sits out each tick instead — same as the existing
+                // "nothing meaningful to broadcast" case below, and no worse
+                // than any other leader going briefly idle between items.
+                if (_state.value.personalPickActive) continue
                 val p = player
                 when {
                     p != null -> client.sendMediaUpdate(p.currentTimeSeconds(), p.isPaused)
@@ -765,6 +837,106 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     fun voteSkip() = client.voteSkip()
     fun jumpTo(uid: Int) = client.jumpTo(uid)
     fun deleteItem(uid: Int) = client.deleteItem(uid)
+
+    // ---- personal/unsynced playback ----
+    //
+    // Turning "stay in sync" off is more than just disabling SyncEngine's
+    // corrective seeking (that part already existed) — it also lets the
+    // user open the playlist and pick any (resolvable — see
+    // MediaTypes.canResolveIndependently) item to watch on their own,
+    // completely independent of whatever the channel's real current item
+    // is, with the same personal choice auto-advancing to the next
+    // resolvable item once it finishes. Nothing here ever emits anything to
+    // the server (contrast client.jumpTo, a moderator action that changes
+    // the item for EVERYONE) — it only ever touches this client's own
+    // media/player state. See onMediaChanged/onTimeUpdate/retuneLeaderTicker
+    // for the guards that keep the channel's real, still-arriving updates
+    // from fighting a personal pick while one is active.
+
+    /**
+     * Loads [item] just for this client. Only reachable while sync is off
+     * (PlaylistPanel disables the tap entirely otherwise) and only for an
+     * item [MediaTypes.canResolveIndependently] allows — both are checked
+     * defensively here too, in case a stale composition or the auto-advance
+     * path below ever calls this with something it shouldn't. Reuses
+     * exactly the same player-selection/offer-dialog machinery a real
+     * changeMedia goes through (choosePlayerAndOffer, anchorEmbedClock) so
+     * a personal pick behaves identically to the channel's own current item
+     * in every way except who it's visible to and what drives it forward.
+     */
+    fun pickPersonal(item: PlaylistItem) {
+        if (_state.value.syncEnabled) return
+        if (!MediaTypes.canResolveIndependently(item.type)) return
+        val frame = MediaFrame.fromPlaylistItem(item)
+        val (chosen, offer) = choosePlayerAndOffer(frame)
+        Log.i(TAG, "personal pick type=${frame.type} player=$chosen id=${frame.id} uid=${item.uid}")
+        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(frame.currentTime)
+        update {
+            it.copy(
+                media = frame,
+                player = chosen,
+                playing = !frame.paused,
+                playbackOffer = null,
+                compatOffer = offer,
+                personalPickActive = true,
+                personalPickUid = item.uid
+            )
+        }
+    }
+
+    /**
+     * Clears a personal pick and snaps back to whatever the channel's real
+     * current item actually is (kept up to date the whole time by
+     * onMediaChanged, even while it wasn't what was on screen). Called both
+     * from an explicit user action (e.g. a "back to channel" control) and
+     * automatically when sync is switched back on (see the settings
+     * collector in start()).
+     */
+    fun stopPersonalPick() {
+        if (!_state.value.personalPickActive) return
+        val channelMedia = _state.value.channelCurrentMedia
+        if (channelMedia == null) {
+            update { it.copy(personalPickActive = false, personalPickUid = -1) }
+            return
+        }
+        val (chosen, offer) = choosePlayerAndOffer(channelMedia)
+        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(channelMedia.currentTime)
+        update {
+            it.copy(
+                media = channelMedia,
+                player = chosen,
+                playing = !channelMedia.paused,
+                playbackOffer = null,
+                compatOffer = offer,
+                personalPickActive = false,
+                personalPickUid = -1
+            )
+        }
+    }
+
+    /**
+     * Wired to PlayerSurface's onEnded unconditionally (see ChannelScreen) —
+     * fires whenever ANY item finishes on its own, synced or not. Ignored
+     * outright unless a personal pick is actually active: normal synced
+     * playback is the server's job to advance, and this also has to cover a
+     * stray onEnded firing from a player instance that was mid-teardown
+     * right as sync got switched back on.
+     * Walks forward from the current pick's playlist position to the next
+     * item canResolveIndependently allows — same rule PlaylistPanel greys
+     * rows out with — so auto-advance can never land on something that
+     * would need server meta a personal pick doesn't have. If nothing
+     * further down the list qualifies, playback just stops there rather
+     * than looping back to the top or falling back to the channel's own item.
+     */
+    fun onPlaybackEnded() {
+        val s = _state.value
+        if (!s.personalPickActive) return
+        val idx = s.playlist.indexOfFirst { it.uid == s.personalPickUid }
+        val startIdx = if (idx >= 0) idx + 1 else 0
+        val next = s.playlist.asSequence().drop(startIdx)
+            .firstOrNull { MediaTypes.canResolveIndependently(it.type) }
+        if (next != null) pickPersonal(next) else update { it.copy(playing = false) }
+    }
 
     /**
      * Optimistic like the site's own poll UI: highlight the tapped option

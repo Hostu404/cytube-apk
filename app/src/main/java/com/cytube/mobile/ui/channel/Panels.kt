@@ -26,11 +26,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Mood
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -1118,56 +1120,124 @@ fun PlaylistPanel(
     canControl: Boolean,
     onJumpTo: (Int) -> Unit,
     onDelete: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Mirrors the "stay in sync" setting (Prefs.syncEnabled). True is the
+     *  ordinary channel-wide behavior below, unchanged. False is what
+     *  unlocks personal picking instead — see [onPersonalPick]'s own doc
+     *  comment for why it takes over the tap gesture entirely, even for a
+     *  moderator who could otherwise jumpTo. */
+    syncEnabled: Boolean = true,
+    /** The uid personal picking has loaded right now (see
+     *  ChannelViewModel.pickPersonal) — independent of [currentUid], which
+     *  keeps tracking the channel's own real current item the whole time a
+     *  personal pick is active, so switching sync back on can snap straight
+     *  back to it. -1 while nothing is personally picked. */
+    personalPickUid: Int = -1,
+    /** Fires instead of [onJumpTo] when the user taps a row while sync is
+     *  off. jumpTo is a moderator action that changes the item for
+     *  EVERYONE on the channel — the whole point of turning sync off is to
+     *  browse without affecting anyone else, so while it's off a tap always
+     *  means "just for me", even for a moderator who could otherwise
+     *  jumpTo. Never called for a row [MediaTypes.canResolveIndependently]
+     *  rejects (see the disabled/greyed treatment below) — those items only
+     *  ever get real playable data (direct sources, an embed URL) when
+     *  they're the channel's actual current item, which a personal pick by
+     *  definition isn't. */
+    onPersonalPick: (PlaylistItem) -> Unit = {}
 ) {
     if (items.isEmpty()) {
         EmptyPanel("The playlist is empty, or you do not have permission to see it.", modifier)
         return
     }
 
-    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
-        items(items, key = { it.uid }) { item ->
-            val isCurrent = item.uid == currentUid
-            Row(
-                Modifier.fillMaxWidth()
-                    .background(
-                        if (isCurrent) MaterialTheme.colorScheme.surfaceContainerHigh
-                        else Color.Transparent
-                    )
-                    .clickable(enabled = canControl) { onJumpTo(item.uid) }
-                    .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
+    // Phone counterpart to TvPlaylistView's own search field — same
+    // title-substring filter, just without the D-pad focus plumbing that
+    // view needs and this one, being touch-driven, doesn't.
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(items, query) {
+        if (query.isBlank()) items
+        else items.filter { it.title.contains(query, ignoreCase = true) }
+    }
+
+    Column(modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            placeholder = { Text("Search playlist") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+
+        if (filtered.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(
+                    "No matches for \"$query\".",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                if (isCurrent) {
-                    Icon(
-                        Icons.Default.PlayArrow, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        item.title,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        buildString {
-                            append(item.duration)
-                            append(" · ")
-                            append(MediaTypes.label(item.type))
-                            if (item.queueby.isNotBlank()) { append(" · "); append(item.queueby) }
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (canControl) {
-                    IconButton(onClick = { onDelete(item.uid) }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Remove",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                items(filtered, key = { it.uid }) { item ->
+                    val personallyResolvable = MediaTypes.canResolveIndependently(item.type)
+                    val isCurrent = if (syncEnabled) item.uid == currentUid else item.uid == personalPickUid
+                    val rowEnabled = if (syncEnabled) canControl else personallyResolvable
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .background(
+                                if (isCurrent) MaterialTheme.colorScheme.surfaceContainerHigh
+                                else Color.Transparent
+                            )
+                            // Greyed out, not hidden or error-on-tap — items that
+                            // can't be resolved from playlist data alone (custom
+                            // embeds like an 8chan/kinoplex stream, any "direct
+                            // source" item) simply aren't tappable while sync is
+                            // off, same as a row a non-moderator can't jumpTo today.
+                            .alpha(if (rowEnabled) 1f else 0.4f)
+                            .clickable(enabled = rowEnabled) {
+                                if (syncEnabled) onJumpTo(item.uid) else onPersonalPick(item)
+                            }
+                            .padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isCurrent) {
+                            Icon(
+                                Icons.Default.PlayArrow, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                item.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                buildString {
+                                    append(item.duration)
+                                    append(" · ")
+                                    append(MediaTypes.label(item.type))
+                                    if (item.queueby.isNotBlank()) { append(" · "); append(item.queueby) }
+                                    if (!syncEnabled && !personallyResolvable) { append(" · unavailable unsynced") }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (canControl) {
+                            IconButton(onClick = { onDelete(item.uid) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Remove",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
                 }
             }

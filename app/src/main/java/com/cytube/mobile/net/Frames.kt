@@ -84,6 +84,49 @@ data class MediaFrame(
                 thumbnail = meta.optString("thumbnail").ifBlank { null }
             )
         }
+
+        /**
+         * Builds a playable frame straight from a playlist listing, for
+         * personal/unsynced picking (see ChannelViewModel.pickPersonal) — the
+         * server only ever sends the richer meta (direct sources, embed.src)
+         * alongside the channel's actual current item via changeMedia, so a
+         * personally-picked item that ISN'T the current one has to make do
+         * with exactly what PlaylistItem carries: type + id. That's the same
+         * constraint MediaTypes.canResolveIndependently checks before this is
+         * ever called — direct is always empty and embedSrc/scuri are always
+         * null here, leaving embedPlayableSrc to fall through to
+         * MediaTypes.knownEmbedUrl(type, id), same as playerFor expects.
+         *
+         * seconds comes from a best-effort parse of the playlist's formatted
+         * duration string (PlaylistItem never carries a raw seconds count).
+         * Anything that doesn't parse cleanly — including CyTube's own
+         * "??:??" placeholder for streams with no fixed length — becomes 0,
+         * which is exactly MediaFrame.isLivestream's existing sentinel, so an
+         * unparseable duration degrades to "treat as live" rather than a
+         * crash or a wrong fixed length.
+         */
+        fun fromPlaylistItem(item: PlaylistItem): MediaFrame = MediaFrame(
+            id = item.mediaId,
+            title = item.title,
+            seconds = parseDurationSeconds(item.duration),
+            duration = item.duration,
+            type = item.type,
+            currentTime = 0.0,
+            paused = false,
+            direct = emptyList(),
+            embedSrc = null,
+            scuri = null,
+            thumbnail = null
+        )
+
+        /** Parses "H:MM:SS" or "MM:SS" (CyTube's formatTime output) back into
+         *  a whole seconds count; anything else (blank, "??:??", garbage) is 0. */
+        private fun parseDurationSeconds(duration: String): Int {
+            val parts = duration.trim().split(":")
+            if (parts.isEmpty() || parts.size > 3) return 0
+            val nums = parts.map { it.toIntOrNull() ?: return 0 }
+            return nums.fold(0) { acc, n -> acc * 60 + n }
+        }
     }
 }
 

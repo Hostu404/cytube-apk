@@ -172,4 +172,24 @@ object MediaTypes {
         }
         else -> null
     }
+
+    /**
+     * True when [type] alone (plus whatever id a PlaylistItem carries) is
+     * enough to resolve playback — no server-pushed meta (direct sources,
+     * embed.src) required. A PlaylistItem (see Frames.kt) only ever gives us
+     * uid/title/duration/type/mediaId — never meta — so this is exactly what
+     * decides which playlist rows can be picked for personal/unsynced
+     * browsing (see ChannelViewModel.pickPersonal / PlaylistPanel) versus
+     * which ones only ever get real playable data when they're the
+     * channel's actual current item (cm needs meta.direct; cu/bc/bn need
+     * meta.embed.src and have no knownEmbedUrl fallback; tw/tv/tc/li/sc are
+     * excluded above for the reasons documented on knownEmbedUrl).
+     *
+     * id is irrelevant to every branch here (PLAYABLE_ID/yt/gd resolve from
+     * type alone; knownEmbedUrl's only id-shaped branch, pt, only inspects
+     * id's structure, never rejects a well-formed one) so a placeholder is
+     * fine to probe with.
+     */
+    fun canResolveIndependently(type: String): Boolean =
+        type in PLAYABLE_ID || type == "yt" || type == "gd" || knownEmbedUrl(type, "x") != null
 }
