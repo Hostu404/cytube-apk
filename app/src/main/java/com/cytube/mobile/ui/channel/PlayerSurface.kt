@@ -73,6 +73,16 @@ import kotlinx.coroutines.delay
  */
 private const val EMBED_PAGE_ORIGIN = "https://example.com"
 
+/** Logged verbatim (console.log, nothing else on the line) by
+ *  youtubeIframeApiHtml/dailymotionSdkHtml the instant their own player
+ *  fires an "ended" event — see EmbedSurface's onConsoleMessage override,
+ *  which is the only thing that ever reads it. Exists because a WebView
+ *  page has no other channel back to this app's onEnded callback; a
+ *  literal sentinel string is simpler and harder to false-trigger than
+ *  trying to parse the DIAG poll lines already flowing through the same
+ *  console hook. */
+private const val EMBED_ENDED_SENTINEL = "__CYTUBE_EMBED_ENDED__"
+
 /** Ceiling ExoPlayer will buffer toward under good network — see ExoSurface's
  *  LoadControl. Media3's own default (DefaultLoadControl.DEFAULT_MAX_BUFFER_MS)
  *  is 50s; raised here to give a large, high-bitrate file more runway to
@@ -130,7 +140,17 @@ fun PlayerSurface(
      *  caller can use to drive play/pause/seek from outside it — see
      *  [EmbedPlayerController]'s own doc comment for why this exists at all.
      *  Never fires for any other player type. */
-    onEmbedController: ((EmbedPlayerController) -> Unit)? = null
+    onEmbedController: ((EmbedPlayerController) -> Unit)? = null,
+    /** Fires once, the moment this item finishes playing on its own (not a
+     *  seek, not a manual stop) — NATIVE/NEWPIPE/GDRIVE via ExoPlayer's own
+     *  STATE_ENDED, EMBED via a sentinel console message the yt/dm pages log
+     *  from their own "ended" event (see youtubeIframeApiHtml/
+     *  dailymotionSdkHtml). Used to drive personal/unsynced playlist
+     *  auto-advance — see ChannelViewModel.onPlaybackEnded — which is the
+     *  only reason this exists; normal synced playback ignores it entirely
+     *  (the server drives advancement for everyone in that mode). Never
+     *  fires for WEB, which has no player here to watch. */
+    onEnded: (() -> Unit)? = null
 ) {
     // embedSrc/scuri fallback logic lives in MediaFrame.embedPlayableSrc —
     // see its own comment for what this covers now beyond cu/bc/bn.
@@ -139,16 +159,16 @@ fun PlayerSurface(
         when {
             media == null -> Message("Nothing is playing")
             player == MediaTypes.Player.NATIVE ->
-                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
+                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.NEWPIPE ->
-                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
+                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.GDRIVE ->
-                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly)
+                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
                 // Deliberately NOT wired to the backgrounded signal
                 // ExoSurface uses for audioOnly — see EmbedSurface's own
                 // comment on why there's no safe way to reuse it here.
-                EmbedSurface(media.type, media.id, embedSrc, onEmbedController)
+                EmbedSurface(media.type, media.id, embedSrc, onEmbedController, onEnded)
             // WEB is handled by the channel screen, which swaps in the whole
             // CyTube page rather than a player.
             else -> Message("${MediaTypes.label(media.type)} needs Compatibility View.")
@@ -242,7 +262,8 @@ private fun EmbedSurface(
     type: String,
     id: String,
     embedSrc: String,
-    onController: ((EmbedPlayerController) -> Unit)? = null
+    onController: ((EmbedPlayerController) -> Unit)? = null,
+    onEnded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
@@ -485,6 +506,22 @@ private fun EmbedSurface(
                                 "${consoleMessage.message()} " +
                                 "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
                         )
+                        // Both youtubeIframeApiHtml and dailymotionSdkHtml log
+                        // this exact string (see EMBED_ENDED_SENTINEL) the
+                        // moment their own page thinks this item finished —
+                        // there is no other channel out of an arbitrary
+                        // provider's WebView page back to Kotlin here, so
+                        // piggybacking on the same console hook DIAG logging
+                        // already uses is the cheapest way to get a real
+                        // signal out. The dm side of this is unverified by
+                        // live testing (see dailymotionSdkHtml's own comment)
+                        // — kept deliberately simple (a literal string match,
+                        // not a prefix/parse) so a page that never sends it
+                        // just never auto-advances, rather than risking a
+                        // false match on something else.
+                        if (consoleMessage.message() == EMBED_ENDED_SENTINEL) {
+                            onEnded?.invoke()
+                        }
                         return true
                     }
                 }
@@ -709,6 +746,22 @@ private fun dailymotionSdkHtml(id: String): String {
                 player.seek(Math.max(0, t));
               }
             };
+            // Best-effort: unlike the yt IFrame API (whose onStateChange
+            // ENDED=0 is documented and has been live-tested — see
+            // youtubeIframeApiHtml), this dm path has never actually been
+            // exercised live this whole session (see EmbedSurface's onEnded
+            // doc comment). The Dailymotion Player SDK's own event
+            // vocabulary documents both 'video_end' (this specific video
+            // finished) and 'end' (the player session ended) as distinct
+            // events — listening for both rather than picking one blind,
+            // since firing the sentinel twice for one real end is harmless
+            // (ChannelViewModel.onPlaybackEnded only acts on it while a
+            // personal pick is still active) but missing it entirely would
+            // silently break auto-advance for every Dailymotion item.
+            if (player && player.on) {
+              player.on('video_end', function() { console.log('$EMBED_ENDED_SENTINEL'); });
+              player.on('end', function() { console.log('$EMBED_ENDED_SENTINEL'); });
+            }
           };
         </script>
         <script src="https://api.dmcdn.net/all.js"></script>
@@ -897,6 +950,17 @@ private fun youtubeIframeApiHtml(id: String): String {
                     console.log('DIAG state reached PLAYING, calling unMute()');
                     e.target.unMute();
                   }
+                  // ENDED (0) is the IFrame API's own documented state for
+                  // "this video finished" — confirmed present in the same
+                  // stateName() mapping already live-tested against real
+                  // onStateChange events above (UNSTARTED/PLAYING/etc all
+                  // showed up correctly during the error-152 debugging).
+                  // See EMBED_ENDED_SENTINEL's own comment for why this is a
+                  // plain console.log rather than any richer channel back to
+                  // Kotlin.
+                  if (e.data === 0) {
+                    console.log('$EMBED_ENDED_SENTINEL');
+                  }
                 },
                 onError: function(e) {
                   console.log('DIAG onError ' + errorName(e.data));
@@ -971,7 +1035,8 @@ private fun NewPipeSurface(
     onFailed: (String) -> Unit,
     epoch: Int,
     onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false
+    audioOnly: Boolean = false,
+    onEnded: (() -> Unit)? = null
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<YouTubeResolver.Resolved?>(null)
@@ -995,7 +1060,7 @@ private fun NewPipeSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
 }
@@ -1024,7 +1089,8 @@ private fun GDriveSurface(
     onFailed: (String) -> Unit,
     epoch: Int,
     onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false
+    audioOnly: Boolean = false,
+    onEnded: (() -> Unit)? = null
 ) {
     var resolved by remember(media.id, epoch) {
         mutableStateOf<GoogleDriveResolver.Resolved?>(null)
@@ -1049,7 +1115,7 @@ private fun GDriveSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             media, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
 }
@@ -1077,7 +1143,8 @@ private fun ExoSurface(
     onFailed: (String) -> Unit,
     epoch: Int,
     onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false
+    audioOnly: Boolean = false,
+    onEnded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val exo = remember(epoch) {
@@ -1201,6 +1268,18 @@ private fun ExoSurface(
                 Log.w("CyTubePlayer", "Media3 error type=${media.type} code=$detail id=${media.id} " +
                     "responseHeaderNames=${http?.headerFields?.keys}")
                 onFailed(detail)
+            }
+
+            // STATE_ENDED is ExoPlayer's own terminal state for "ran off the
+            // end of the media on its own" — distinct from a seek (which
+            // never leaves STATE_READY) or a manual stop/release (which
+            // tears the listener down via onDispose below before this could
+            // fire). Drives personal/unsynced playlist auto-advance — see
+            // PlayerSurface's onEnded doc comment and
+            // ChannelViewModel.onPlaybackEnded, the only place that acts on
+            // it; normal synced playback never reads it at all.
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
             }
         }
         exo.addListener(listener)

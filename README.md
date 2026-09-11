@@ -37,9 +37,10 @@ This is a **native Android application**, not simply the CyTube website wrapped 
 * Favourites
 * Recently joined channels
 * Guest access
-* Native video playback (YouTube, direct files, HLS, Google Drive and more)
+* Native video playback (YouTube — including live streams, direct files, HLS, Google Drive and more)
 * Automatic fallback to Compatibility View for sources native playback can't handle
 * Playback stays in sync with the room, with an adjustable sync tolerance
+* Turn off "stay in sync" to browse the playlist and watch your own picks independently — the app auto-advances to your next pick when one finishes, without affecting anyone else in the room
 * Custom CyTube emotes
 * NicoNico Chat - Enable by tapping the square.
 * Quick tap to reply/repost emotes
@@ -59,8 +60,14 @@ Designed to work on:
 * Android TV
 * Amazon Fire TV
 * TV remotes and D-pad navigation
-* A dedicated full-screen chat view, reachable with the D-pad
 * Large-screen displays
+
+**Accessing chat and the playlist on TV:** from the video, press **Down** on the D-pad.
+
+* If "stay in sync" is **on** (Settings), Down opens a dedicated full-screen chat view.
+* If "stay in sync" is **off**, Down opens a full-screen playlist view instead, with a search bar for quickly filtering items and the same personal-pick behaviour as on phone — chat isn't reachable while in this mode.
+
+Press **Up** or **Back** to return to the video from either view.
 
 The same APK can be sideloaded onto supported Android TV and Fire TV devices.
 
@@ -119,7 +126,10 @@ CyTube supports a large variety of media sources, and compatibility can vary bet
 Known limitations include:
 
 * Some video sources may not play correctly.
+* Some playback synchronisation edge cases remain.
+* Picture-in-picture support is still being improved.
 * Certain media providers have their own restrictions.
+* TV-specific behaviour and compatibility are still being refined.
 
 The application is actively being developed, so behaviour may change between releases.
 

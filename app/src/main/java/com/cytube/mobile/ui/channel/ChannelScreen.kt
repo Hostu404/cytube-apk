@@ -22,6 +22,10 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -34,6 +38,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -181,6 +186,11 @@ fun ChannelScreen(
     val onJumpTo = remember(vm) { vm::jumpTo }
     val onDeleteItem = remember(vm) { vm::deleteItem }
     val onAttachPlayer = remember(vm) { vm::attachPlayer }
+    // Personal/unsynced playlist browsing — see ChannelViewModel's own doc
+    // comment on pickPersonal for why this exists and what it does and does
+    // not touch.
+    val onPersonalPick = remember(vm) { vm::pickPersonal }
+    val onPlaybackEnded = remember(vm) { vm::onPlaybackEnded }
 
     // The single player surface, hoisted so it survives moving between the
     // compact layout, the fullscreen layout and the PiP layout below. Before
@@ -259,7 +269,8 @@ fun ChannelScreen(
                     ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
                 },
                 audioOnly = audioOnlyState.value,
-                onEmbedController = { embedController = it }
+                onEmbedController = { embedController = it },
+                onEnded = onPlaybackEnded
             )
         }
     }
@@ -539,10 +550,19 @@ fun ChannelScreen(
         // moving between the two: the video is never torn down or rebuilt,
         // only what's drawn over it changes.
         var tvShowingChat by remember { mutableStateOf(false) }
+        // Personal/unsynced browsing (see ChannelViewModel.pickPersonal) has
+        // no chat access on TV at all — Down goes straight to the playlist
+        // instead, below, so this and tvShowingChat are mutually exclusive
+        // by construction (only one Down handler ever sets either one).
+        var tvShowingPlaylist by remember { mutableStateOf(false) }
         val videoFocusRequester = remember { FocusRequester() }
 
         BackHandler {
-            if (tvShowingChat) tvShowingChat = false else onBack()
+            when {
+                tvShowingChat -> tvShowingChat = false
+                tvShowingPlaylist -> tvShowingPlaylist = false
+                else -> onBack()
+            }
         }
         LaunchedEffect(Unit) {
             onFullscreenChange(true)
@@ -555,11 +575,12 @@ fun ChannelScreen(
                 }
             }
         }
-        // Re-focus the video surface every time chat closes, so a plain
-        // Down press works again immediately without first navigating back
-        // to it — there's nothing else on the video screen to focus instead.
-        LaunchedEffect(tvShowingChat) {
-            if (!tvShowingChat) runCatching { videoFocusRequester.requestFocus() }
+        // Re-focus the video surface every time chat OR the playlist closes,
+        // so a plain Down press works again immediately without first
+        // navigating back to it — there's nothing else on the video screen
+        // to focus instead.
+        LaunchedEffect(tvShowingChat, tvShowingPlaylist) {
+            if (!tvShowingChat && !tvShowingPlaylist) runCatching { videoFocusRequester.requestFocus() }
         }
 
         // CyTubeChannelTheme wraps this the same way it wraps the windowed
@@ -581,11 +602,16 @@ fun ChannelScreen(
                     .focusRequester(videoFocusRequester)
                     .focusable()
                     .onPreviewKeyEvent { event ->
-                        if (!tvShowingChat &&
+                        if (!tvShowingChat && !tvShowingPlaylist &&
                             event.type == KeyEventType.KeyUp &&
                             event.key == Key.DirectionDown
                         ) {
-                            tvShowingChat = true
+                            // Personally browsing (sync off): straight to the
+                            // playlist, never chat — see tvShowingPlaylist's
+                            // own comment above for why the two never both
+                            // apply. Synced (the ordinary case): unchanged,
+                            // same chat view as always.
+                            if (state.syncEnabled) tvShowingChat = true else tvShowingPlaylist = true
                             true
                         } else {
                             false
@@ -643,6 +669,14 @@ fun ChannelScreen(
                     chatOverlayOn = chatOverlayOn,
                     onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
                     onExit = { tvShowingChat = false },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+            if (tvShowingPlaylist) {
+                TvPlaylistView(
+                    state = state,
+                    onPersonalPick = onPersonalPick,
+                    onExit = { tvShowingPlaylist = false },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -991,6 +1025,9 @@ fun ChannelScreen(
                     canControl = state.localRank >= 2,
                     onJumpTo = onJumpTo,
                     onDelete = onDeleteItem,
+                    syncEnabled = state.syncEnabled,
+                    personalPickUid = state.personalPickUid,
+                    onPersonalPick = onPersonalPick,
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
                 Panel.USERS -> UsersPanel(
@@ -1567,6 +1604,165 @@ private fun TvChatView(
             // messagesFocusable (false here) — see its own comment. No
             // separate flag needed at this level.
         )
+    }
+    }
+}
+
+/**
+ * TV's playlist view — the personal/unsynced-browsing counterpart to
+ * TvChatView just above, reached the same way (D-pad Down from fullscreen
+ * video, left with Up or Back) but ONLY while state.syncEnabled is false
+ * (see the isTv branch's Down handler). Chat has no D-pad path at all in
+ * that mode: turning sync off is a deliberate "I'm browsing on my own"
+ * choice, and a synced channel-wide chat conversation sitting one Down
+ * press away from a personal pick would be a strange mix, not a missing
+ * feature — so this view replaces TvChatView entirely rather than sitting
+ * alongside it. Same structural pattern as TvChatView throughout: a
+ * fillMaxSize Surface (for real LocalContentColor, not just a painted
+ * background), one Up-swallowing onPreviewKeyEvent that jumps focus to the
+ * search field (the top stop) or exits from it, and reuse of what the phone
+ * layout already has for a personal pick (ChannelViewModel.pickPersonal) —
+ * MediaTypes.canResolveIndependently decides which rows are actually
+ * selectable, the same rule PlaylistPanel greys rows out with, for the same
+ * reason (see that function's own doc comment).
+ */
+@Composable
+private fun TvPlaylistView(
+    state: ChannelUiState,
+    onPersonalPick: (com.cytube.mobile.net.PlaylistItem) -> Unit,
+    onExit: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val searchFocusRequester = remember { FocusRequester() }
+    var searchFocused by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) { runCatching { searchFocusRequester.requestFocus() } }
+
+    val filtered = remember(state.playlist, query) {
+        if (query.isBlank()) state.playlist
+        else state.playlist.filter { it.title.contains(query, ignoreCase = true) }
+    }
+
+    Surface(
+        modifier = modifier,
+        color = MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground
+    ) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            // Same one-stop-at-a-time shape as TvChatView's own Up handler
+            // (see its doc comment) — from the search field this exits, from
+            // anywhere in the list below it this jumps straight back UP to
+            // the search field rather than doing a real per-row focus
+            // search, so Up always has one predictable meaning regardless of
+            // how far down the list focus currently is.
+            .onPreviewKeyEvent { event ->
+                if (event.key != Key.DirectionUp) {
+                    false
+                } else {
+                    if (event.type == KeyEventType.KeyUp) {
+                        if (searchFocused) onExit() else runCatching { searchFocusRequester.requestFocus() }
+                    }
+                    true
+                }
+            }
+    ) {
+        Text(
+            "Playlist — browsing unsynced",
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+        )
+
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            placeholder = { Text("Search playlist") },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .focusRequester(searchFocusRequester)
+                .onFocusChanged { searchFocused = it.isFocused }
+        )
+        Spacer(Modifier.height(8.dp))
+
+        if (filtered.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (state.playlist.isEmpty()) "The playlist is empty."
+                    else "No matches for \"$query\".",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        } else {
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 8.dp)
+            ) {
+                items(filtered, key = { it.uid }) { item ->
+                    val personallyResolvable =
+                        com.cytube.mobile.net.MediaTypes.canResolveIndependently(item.type)
+                    val isPick = item.uid == state.personalPickUid
+                    var rowFocused by remember { mutableStateOf(false) }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (isPick) MaterialTheme.colorScheme.surfaceContainerHigh
+                                else Color.Transparent
+                            )
+                            .alpha(if (personallyResolvable) 1f else 0.4f)
+                            // Placed ahead of .clickable() below rather than
+                            // a separate .focusable() — clickable already
+                            // creates its own focus target for D-pad/keyboard
+                            // input, and a second explicit .focusable() here
+                            // would just add a redundant focus stop for the
+                            // same row. onFocusChanged upstream of it still
+                            // observes that same focus node's state.
+                            .onFocusChanged { rowFocused = it.isFocused }
+                            .border(
+                                2.dp,
+                                if (rowFocused) MaterialTheme.colorScheme.primary else Color.Transparent
+                            )
+                            .clickable(enabled = personallyResolvable) { onPersonalPick(item) }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (isPick) {
+                            Icon(
+                                Icons.Default.PlayArrow, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                item.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isPick) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                buildString {
+                                    append(item.duration)
+                                    append(" · ")
+                                    append(com.cytube.mobile.net.MediaTypes.label(item.type))
+                                    if (!personallyResolvable) append(" · unavailable unsynced")
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
     }
 }
