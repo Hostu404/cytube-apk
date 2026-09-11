@@ -30,13 +30,22 @@ object MediaTypes {
         /** Media3 on a URL GoogleDriveResolver resolves first. */
         GDRIVE,
         /**
-         * The provider's own embeddable iframe URL (meta.embed.src), hosted
-         * in a small WebView that's just the video surface — chat, playlist
-         * and sync all stay native around it. This is what AUTOMATIC was
-         * always documented to prefer over WEB (see resolvePlayer's comment)
-         * for cu/bc/bn items, but nothing ever actually routed to it before:
-         * playerFor had no branch for it, so every one of these fell all the
-         * way through to the whole-page WEB fallback instead.
+         * A single-video WebView — just the video surface, with chat,
+         * playlist and sync all staying native around it. This is what
+         * AUTOMATIC was always documented to prefer over WEB (see
+         * resolvePlayer's comment) for cu/bc/bn items, but nothing ever
+         * actually routed to it before: playerFor had no branch for it, so
+         * every one of these fell all the way through to the whole-page WEB
+         * fallback instead.
+         *
+         * The URL it loads (see MediaFrame.embedPlayableSrc) is not always a
+         * dedicated embed link — meta.embed.src when the channel supplied
+         * one, scuri (the item's original source URL) next, and for a
+         * handful of providers CyTube's own resolution gives neither of
+         * those, knownEmbedUrl's hardcoded pattern for that provider — all
+         * of it skipped for Google Drive. That's what lets this cover any
+         * provider whose own page is mostly-just-a-video-player, not only
+         * cu/bc/bn.
          */
         EMBED,
         /** The real CyTube page in a WebView. Last resort. */
@@ -51,30 +60,116 @@ object MediaTypes {
 
     /**
      * `hasDirect` means meta.direct carried real source URLs — either because
-     * the type never needed anything else (cm, vi), or because someone in the
+     * the type never needed anything else (cm), or because someone in the
      * channel is running the old Google Drive userscript and it already
      * populated meta.direct for everyone. If it's there, use it; that's a
      * live channel-provided source and always wins over resolving our own.
+     * (Vimeo does NOT belong on this list despite once being documented here —
+     * mediaquery's vimeo.js only sets meta.direct via lookupAndExtract, but
+     * CyTube's own get-info.js vi handler calls plain lookup/lookupAnonymous
+     * instead, which never touches meta.direct at all. See knownEmbedUrl.)
      *
      * Otherwise Google Drive gets its own app-side resolution (GoogleDriveResolver)
      * rather than falling back to WebView — see that class for why the
      * userscript's own approach (a legacy Google endpoint) isn't used here.
      *
-     * `embedSrc` (meta.embed.src) is what cu/bc/bn carry instead of a direct
-     * source: a URL meant to be dropped straight into an iframe. Routing
-     * those to EMBED rather than WEB is what lets a custom-embed channel
-     * (e.g. one streaming from an 8chan.tv "?embedded=True" view link) play
-     * with native chat/playlist/sync intact, instead of needing the whole
-     * CyTube page loaded in Compatibility View just to show one iframe.
+     * `embedPlayableSrc` (see MediaFrame) is meta.embed.src when the channel
+     * carries one — cu/bc/bn's dedicated "drop straight into an iframe" URL —
+     * or otherwise scuri, the item's original source URL, for anything else
+     * that isn't Google Drive. Routing those to EMBED rather than WEB is what
+     * lets a custom-embed channel (e.g. one streaming from an 8chan.tv
+     * "?embedded=True" view link) — or any other item whose provider page is
+     * mostly-just-a-video-player — play with native chat/playlist/sync
+     * intact, instead of needing the whole CyTube page loaded in
+     * Compatibility View just to show one video.
      */
-    fun playerFor(type: String, hasDirect: Boolean, embedSrc: String? = null): Player = when {
+    fun playerFor(
+        type: String,
+        hasDirect: Boolean,
+        embedPlayableSrc: String? = null,
+        /** MediaFrame.isLivestream — true when the server's own seconds
+         *  field says this item has no fixed duration. Confirmed live: a yt
+         *  item that fails through NEWPIPE with this set is a genuine
+         *  NewPipeExtractor/Media3 limitation, not a fluke — the exact same
+         *  stream played fine both through YouTube's own iframe (what EMBED
+         *  loads for yt — see knownEmbedUrl) and through the whole real
+         *  CyTube page (WEB), both of which hand live playback to YouTube's
+         *  own player instead of resolving a raw manifest themselves. Going
+         *  straight to EMBED for a live yt item skips the doomed NEWPIPE
+         *  attempt (and whatever error it surfaces first) rather than
+         *  reacting to its failure after the fact. */
+        isLive: Boolean = false
+    ): Player = when {
         type in PLAYABLE_ID -> Player.NATIVE
-        hasDirect -> Player.NATIVE          // cm, vi, gd-with-userscript-metadata
+        hasDirect -> Player.NATIVE          // cm, gd-with-userscript-metadata
+        type == "yt" && isLive && !embedPlayableSrc.isNullOrBlank() -> Player.EMBED
         type == "yt" -> Player.NEWPIPE
         type == "gd" -> Player.GDRIVE
-        !embedSrc.isNullOrBlank() -> Player.EMBED
+        !embedPlayableSrc.isNullOrBlank() -> Player.EMBED
         else -> Player.WEB
     }
 
     fun label(type: String): String = LABELS[type] ?: type
+
+    /**
+     * A handful of providers CyTube resolves with no embeddable link
+     * anywhere in meta — no meta.embed, no meta.direct, no scuri — even
+     * though the provider itself has a stable, public, no-API-key embed
+     * page. Checked directly against CyTube's own resolution source
+     * (get-info.js and @cytube/mediaquery's provider modules), not assumed:
+     *
+     *  - yt (YouTube): only ever reaches here after NEWPIPE has already
+     *    started and then failed (playerFor always prefers NEWPIPE outright
+     *    for yt, before this is ever consulted — see reportPlaybackFailure
+     *    for where this branch actually matters). youtube.com/embed/ is
+     *    guaranteed to work for anything that made it into a CyTube
+     *    playlist in the first place: mediaquery's youtube.js rejects
+     *    non-embeddable videos at add-time (video.status.embeddable), so a
+     *    yt item existing at all already proves this URL will play.
+     *  - vi (Vimeo): mediaquery's vimeo.js only fills meta.direct via
+     *    lookupAndExtract, but CyTube's get-info.js vi handler calls plain
+     *    lookup instead, which never touches meta.direct — so despite an
+     *    older comment on hasDirect above claiming otherwise, Vimeo items
+     *    normally arrive with no playable source at all. Same embeddability
+     *    guarantee as yt above: lookup rejects videos with
+     *    embed_privacy !== 'anywhere' before the item can even be added.
+     *    player.vimeo.com/video/ is Vimeo's own stable embed path.
+     *  - dm (Dailymotion): the server's dm handler builds its Media with no
+     *    meta at all. dailymotion.com/embed/video/ is stable and documented.
+     *  - nv (Niconico): mediaquery's nicovideo.js sets only meta.thumbnail.
+     *    embed.nicovideo.jp is Niconico's own dedicated embed subdomain.
+     *  - sb (Streamable): mediaquery's streamable.js sets only
+     *    meta.thumbnail. streamable.com/e/ is Streamable's documented
+     *    embed path.
+     *  - pt (PeerTube): mediaquery's peertube.js DOES set meta.embed, but as
+     *    {tag, domain, uuid, short, onlyLong} — there is no "src" key, so
+     *    MediaFrame.embedPlayableSrc's meta.embed.src check never catches
+     *    it. The item id is itself "domain;shortUUID" (see peertube.js),
+     *    which is exactly what building the URL here needs.
+     *    /videos/embed/ is PeerTube's own standard route on every instance.
+     *
+     * Deliberately NOT attempted for Twitch (tw/tv/tc): Twitch's player
+     * embed requires a "parent" query param matching the actual embedding
+     * page's own domain, which a WebView navigated straight to
+     * player.twitch.tv has no good answer for — getting it wrong fails
+     * outright rather than degrading gracefully, so those stay on the
+     * whole-page WEB offer, where the real CyTube page's own origin is what
+     * makes that embed work correctly in the first place. Also not
+     * attempted for li (Livestream.com, a largely defunct service with no
+     * confirmed embed pattern) or sc (SoundCloud — CyTube's own server has
+     * refused to add new sc items at all since 2022, so there is nothing to
+     * fall back for).
+     */
+    fun knownEmbedUrl(type: String, id: String): String? = when (type) {
+        "yt" -> "https://www.youtube.com/embed/$id"
+        "vi" -> "https://player.vimeo.com/video/$id"
+        "dm" -> "https://www.dailymotion.com/embed/video/$id"
+        "nv" -> "https://embed.nicovideo.jp/watch/$id"
+        "sb" -> "https://streamable.com/e/$id"
+        "pt" -> {
+            val parts = id.split(";", limit = 2)
+            if (parts.size == 2) "https://${parts[0]}/videos/embed/${parts[1]}" else null
+        }
+        else -> null
+    }
 }

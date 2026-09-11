@@ -15,6 +15,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -27,9 +28,12 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -207,6 +211,18 @@ fun ChannelScreen(
     var ambientColor by remember { mutableStateOf<Color?>(null) }
     LaunchedEffect(state.media?.id) { ambientColor = null }
 
+    // EMBED's own on-screen play/pause/seek bar turned out not to be
+    // reliably reachable inside this WebView (confirmed live: tapping the
+    // video does nothing) — see EmbedPlayerController's own doc comment.
+    // Same lifetime rule as ambientColor just above: one holder for the
+    // whole screen, cleared on every media change so a stale controller
+    // from the previous item (whose WebView is gone) never lingers into the
+    // next one before EMBED's factory hands out a fresh one — see
+    // EmbedSurface's own comment on why factory only ever fires once per
+    // item to begin with.
+    var embedController by remember { mutableStateOf<EmbedPlayerController?>(null) }
+    LaunchedEffect(state.media?.id) { embedController = null }
+
     val playerContent = remember {
         movableContentOf {
             PlayerSurface(
@@ -242,7 +258,8 @@ fun ChannelScreen(
                     val sample = averageColor(bitmap)
                     ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
                 },
-                audioOnly = audioOnlyState.value
+                audioOnly = audioOnlyState.value,
+                onEmbedController = { embedController = it }
             )
         }
     }
@@ -654,6 +671,7 @@ fun ChannelScreen(
             onExit = { fullscreen = false },
             chatOverlayOn = chatOverlayOn,
             nekoState = nekoState,
+            embedController = embedController,
             playerContent = playerContent
         )
         return
@@ -924,6 +942,13 @@ fun ChannelScreen(
                         onClick = { fullscreen = true },
                         modifier = Modifier.align(Alignment.TopEnd)
                     )
+                    if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
+                        EmbedControlsRow(
+                            controller = embedController,
+                            visible = windowedControlsVisible,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+                        )
+                    }
                 }
             }
 
@@ -1021,6 +1046,12 @@ private fun PlaybackDialogs(
     onPasswordDraftChange: (String) -> Unit,
     onBack: () -> Unit
 ) {
+    // Only shown when there's no single-video fallback to try instead —
+    // ChannelViewModel.reportPlaybackFailure switches straight to EMBED with
+    // no prompt whenever one exists, since that swap keeps chat, playlist,
+    // sync, fullscreen and the Nico overlay all working exactly as they were
+    // a moment ago. This dialog is for the case that actually costs
+    // something: dropping the native socket for the whole CyTube page.
     state.playbackOffer?.let { reason ->
         AlertDialog(
             onDismissRequest = vm::declinePlaybackOffer,
@@ -1086,6 +1117,48 @@ private fun WindowedFullscreenButton(visible: Boolean, onClick: () -> Unit, modi
     AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
         IconButton(onClick = onClick, modifier = Modifier.padding(8.dp)) {
             Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White)
+        }
+    }
+}
+
+/**
+ * Play/pause + seek ±10s for an EMBED item, driving [EmbedPlayerController]
+ * directly — see that class's own doc comment for why this exists at all
+ * (the embed's own on-screen controls confirmed not reachable by tapping
+ * the video inside this WebView). `controller` is null for the brief window
+ * between an item becoming EMBED and its WebView actually finishing
+ * construction (see EmbedSurface's factory) — the row just doesn't render
+ * yet rather than showing buttons with nothing to call.
+ *
+ * No play/pause icon state: [EmbedPlayerController.togglePlayPause] is a
+ * blind toggle with no way to read back whether the embed is actually
+ * playing (see its own doc comment on why), so a single fixed icon that
+ * means "toggle" is honest about what the button does rather than showing
+ * a Play/Pause glyph that could be wrong half the time.
+ */
+@Composable
+private fun EmbedControlsRow(
+    controller: EmbedPlayerController?,
+    visible: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (controller == null) return
+    AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
+        Row(
+            Modifier
+                .background(Color(0x99000000), shape = RoundedCornerShape(24.dp))
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = { controller.seekBy(-10) }) {
+                Icon(Icons.Default.FastRewind, contentDescription = "Back 10 seconds", tint = Color.White)
+            }
+            IconButton(onClick = controller::togglePlayPause) {
+                Icon(Icons.Default.PlayArrow, contentDescription = "Play or pause", tint = Color.White)
+            }
+            IconButton(onClick = { controller.seekBy(10) }) {
+                Icon(Icons.Default.FastForward, contentDescription = "Forward 10 seconds", tint = Color.White)
+            }
         }
     }
 }
@@ -1506,11 +1579,32 @@ private fun FullscreenPlayer(
     onExit: () -> Unit,
     chatOverlayOn: Boolean,
     nekoState: NekoOverlayState,
+    embedController: EmbedPlayerController?,
     playerContent: @Composable () -> Unit
 ) {
     Box(
         Modifier.fillMaxSize().background(Color.Black)
-            .pointerInput(Unit) { detectTapGestures { onToggleControls() } }
+            .pointerInput(state.player) {
+                if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
+                    // EmbedSurface's WebView handles touch across its whole
+                    // surface for its own scrolling/zoom/link taps, the same
+                    // way PlayerView's controller owns part of its area — see
+                    // the identical fix on the windowed fullscreen button's
+                    // reveal-on-touch listener above. A default-pass
+                    // detectTapGestures here never sees a tap the WebView
+                    // already consumed first, which meant this exit-
+                    // fullscreen control could fade out on an EMBED item and
+                    // then never come back — nothing else would reveal it.
+                    // Initial pass, left unconsumed, observes every touch
+                    // without taking it away from the WebView underneath.
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        onToggleControls()
+                    }
+                } else {
+                    detectTapGestures { onToggleControls() }
+                }
+            }
     ) {
         playerContent()
 
@@ -1551,6 +1645,19 @@ private fun FullscreenPlayer(
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
+                    EmbedControlsRow(
+                        controller = embedController,
+                        // Tied to the same AnimatedVisibility as the rest of
+                        // this overlay already, so a second, separate
+                        // visible= here would just be redundant — always
+                        // true is correct: whenever this whole Box is
+                        // showing at all, this row shows with it.
+                        visible = true,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)
                     )
                 }
             }
