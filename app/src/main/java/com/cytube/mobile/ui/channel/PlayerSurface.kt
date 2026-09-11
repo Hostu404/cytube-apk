@@ -553,6 +553,12 @@ private fun ExoSurface(
             view.apply {
                 this.player = exo
                 useController = showControls
+                // Media3's own default is 3s — shares ChannelScreen's
+                // CONTROLS_AUTO_HIDE_MS instead so this controller's
+                // scrubber/play-pause bar fades on the same schedule as
+                // ChannelScreen's own overlay icons rather than lingering
+                // noticeably longer than everything else on screen.
+                controllerShowTimeoutMs = CONTROLS_AUTO_HIDE_MS.toInt()
                 layoutParams = ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                 )

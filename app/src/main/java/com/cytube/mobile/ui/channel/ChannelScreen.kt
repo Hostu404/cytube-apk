@@ -82,10 +82,17 @@ private const val AMBIENT_SAMPLE_BLEND = 0.22f
 
 /** How long the play/pause/fullscreen overlay controls stay on screen before
  *  fading out, both in fullscreen and windowed playback — reused by both
- *  auto-hide LaunchedEffects below. Was 3s, which read as sluggish on a short
- *  video: the controls were still sitting there well after playback had
- *  already started and there was nothing left to interact with. */
-private const val CONTROLS_AUTO_HIDE_MS = 1_000L
+ *  auto-hide LaunchedEffects below, AND by ExoSurface's own PlayerView
+ *  (see PlayerSurface.kt) so its native scrubber/controller overlay hides on
+ *  the same schedule as this screen's own icons rather than lingering on
+ *  Media3's separate 3s default. Not private, so PlayerSurface.kt (same
+ *  package) can share it directly instead of duplicating the number — the
+ *  two controls looking out of sync with each other is exactly the kind of
+ *  bug that duplicating a magic number invites. Was 3s, which read as
+ *  sluggish on a short video: the controls were still sitting there well
+ *  after playback had already started and there was nothing left to
+ *  interact with. */
+internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
 
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
