@@ -38,7 +38,8 @@ This is a **native Android application**, not simply the CyTube website wrapped 
 * Recently joined channels
 * Guest access
 * Native video playback (YouTube — including live streams, direct files, HLS, Google Drive and more)
-* Automatic fallback to Compatibility View for sources native playback can't handle
+* Embedded playback for Dailymotion and Vimeo — plays inside the app itself (chat, playlist and sync all stay native) rather than dropping straight to Compatibility View
+* Automatic fallback to Compatibility View for sources native and embedded playback can't handle (e.g. Twitch, which needs the real page's own domain to work at all)
 * Playback stays in sync with the room, with an adjustable sync tolerance
 * Turn off "stay in sync" to browse the playlist and watch your own picks independently — the app auto-advances to your next pick when one finishes, without affecting anyone else in the room
 * Custom CyTube emotes
@@ -130,6 +131,7 @@ Known limitations include:
 * Picture-in-picture support is still being improved.
 * Certain media providers have their own restrictions.
 * TV-specific behaviour and compatibility are still being refined.
+* Vimeo's embedded player currently plays with audio but doesn't fill its frame correctly (video renders undersized) — being tracked, use Compatibility View as a workaround in the meantime if it bothers you.
 
 The application is actively being developed, so behaviour may change between releases.
 
