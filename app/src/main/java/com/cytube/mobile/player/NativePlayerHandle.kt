@@ -1,11 +1,14 @@
 package com.cytube.mobile.player
 
+import android.content.Context
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -20,7 +23,12 @@ import kotlinx.coroutines.withContext
  * meta.direct is set.
  */
 @OptIn(UnstableApi::class)
-class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
+class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
+
+    // applicationContext, not the (likely Activity) context passed in — this
+    // outlives any single ExoSurface composition and is only ever used to
+    // reach the process-wide singleton cache (Graph.mediaCache).
+    private val appContext = context.applicationContext
 
     override var mediaId: String? = null; private set
     override var mediaType: String? = null; private set
@@ -28,6 +36,26 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
 
     override val isPaused: Boolean get() = !exo.playWhenReady
     override val isBuffering: Boolean get() = exo.playbackState == Player.STATE_BUFFERING
+
+    /**
+     * Every byte fetched for playback — whether the raw source straight off
+     * CyTube's playlist (load()) or a resolver-supplied URL (loadUrl()) —
+     * goes through this: Graph.mediaHttp instead of the default HTTP stack
+     * (a longer read timeout tuned for large files, see Graph.kt), wrapped
+     * in a disk cache so a SyncEngine hard-seek or a rejoin landing
+     * somewhere already downloaded doesn't re-fetch it over the network.
+     * FLAG_IGNORE_CACHE_ON_ERROR: a cache write failure (e.g. disk pressure)
+     * should fall back to reading straight from upstream, not take playback
+     * down with it.
+     */
+    private fun cachedDataSourceFactory(headers: Map<String, String> = emptyMap()): DataSource.Factory {
+        val upstream = OkHttpDataSource.Factory(Graph.mediaHttp)
+            .apply { if (headers.isNotEmpty()) setDefaultRequestProperties(headers) }
+        return CacheDataSource.Factory()
+            .setCache(Graph.mediaCache(appContext))
+            .setUpstreamDataSourceFactory(upstream)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
 
     /**
      * Play a URL resolved elsewhere (NewPipe, GoogleDriveResolver), keeping the
@@ -39,9 +67,10 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
      * HttpURLConnection) can take a different path than the OkHttpClient the
      * resolvers used to look the URL up in the first place — enough of a
      * mismatch for the CDN to 403 it even though the URL itself is valid. Using
-     * the SAME OkHttpClient (Graph.http) for the actual byte fetch keeps the
-     * path consistent. [headers] carries whatever the resolver says the stream
-     * itself needs (e.g. Referer) on top of that.
+     * an OkHttpClient built off the SAME one (Graph.mediaHttp, layered on
+     * Graph.http — see cachedDataSourceFactory) for the actual byte fetch
+     * keeps the path consistent. [headers] carries whatever the resolver says
+     * the stream itself needs (e.g. Referer) on top of that.
      */
     fun loadUrl(media: MediaFrame, url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
         mediaId = media.id
@@ -56,9 +85,7 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
             // response just has a blank title to show for what's playing.
             .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
             .build()
-        val dataSourceFactory = OkHttpDataSource.Factory(Graph.http)
-            .apply { if (headers.isNotEmpty()) setDefaultRequestProperties(headers) }
-        val mediaSource = DefaultMediaSourceFactory(dataSourceFactory).createMediaSource(item)
+        val mediaSource = DefaultMediaSourceFactory(cachedDataSourceFactory(headers)).createMediaSource(item)
         exo.setPlaybackSpeed(1f)
         // Seed the real starting position instead of always beginning at 0 —
         // see the comment on startPositionMs() below for why this matters.
@@ -98,6 +125,12 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
         Log.i("CyTubePlayer", "native load type=${media.type} " +
             "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()}")
         exo.setPlaybackSpeed(1f)
+        // Routed through the same cached, longer-timeout data source as
+        // loadUrl() below (see cachedDataSourceFactory) rather than
+        // exo.setMediaItem()'s default HTTP stack — this is the main native
+        // playback path (a straight "fi" file off CyTube's own playlist),
+        // exactly where a large file's buffering has to hold up.
+        val mediaSource = DefaultMediaSourceFactory(cachedDataSourceFactory()).createMediaSource(item)
         // Seed the real starting position instead of always beginning at 0 —
         // see the comment on startPositionMs() below for why this matters.
         // Livestreams are excluded: their currentTime is CyTube's own
@@ -106,9 +139,9 @@ class NativePlayerHandle(val exo: ExoPlayer) : PlayerHandle {
         // window entirely. Leaving them on the no-arg overload keeps the
         // prior (correct) behaviour of joining at the live edge.
         if (media.isLivestream) {
-            exo.setMediaItem(item)
+            exo.setMediaSource(mediaSource)
         } else {
-            exo.setMediaItem(item, startPositionMs(media))
+            exo.setMediaSource(mediaSource, startPositionMs(media))
         }
         exo.prepare()
         exo.playWhenReady = true

@@ -24,8 +24,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.4.20"
+        versionCode = 8
+        versionName = "1.5"
     }
 
     signingConfigs {
@@ -107,6 +107,11 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer.rtsp)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.datasource.okhttp)
+    // Backs the on-disk media cache (see Graph.mediaCache / NativePlayerHandle) —
+    // SimpleCache's recommended constructor takes a StandaloneDatabaseProvider
+    // to index cached content in SQLite rather than the slower legacy flat-file
+    // index the deprecated no-database constructor falls back to.
+    implementation(libs.androidx.media3.database)
     // MediaSession: exposes playback to the system — hardware media keys
     // (a Fire TV remote's dedicated play/pause button), Alexa's "pause"/
     // "resume" voice commands, and any system Now Playing UI. All routed to

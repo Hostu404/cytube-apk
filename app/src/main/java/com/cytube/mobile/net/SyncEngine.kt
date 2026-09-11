@@ -3,6 +3,15 @@ package com.cytube.mobile.net
 import com.cytube.mobile.player.PlayerHandle
 import kotlin.math.abs
 
+/** Beyond this many seconds of drift, SyncEngine.apply() hard-seeks instead
+ *  of ramping speed — see the threshold check below. Not private: PlayerSurface's
+ *  ExoSurface derives its post-rebuffer buffer target from this directly,
+ *  rather than duplicating the number, so the two can't silently drift out
+ *  of coordination again the way they did when the buffer target was first
+ *  raised past this threshold — see LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS's
+ *  own comment for what that coupling is protecting against. */
+internal const val SYNC_HARD_SEEK_THRESHOLD_SECONDS = 8.0
+
 /**
  * Direct port of window.handleMediaUpdate from CyTube's player/update.coffee.
  *
@@ -124,12 +133,12 @@ class SyncEngine {
         val diff = if (currentTime - local != 0.0) currentTime - local else 0.0
 
         return when {
-            diff > HARD_SEEK_THRESHOLD -> {
+            diff > SYNC_HARD_SEEK_THRESHOLD_SECONDS -> {
                 // Far behind — a speed ramp would take too long to matter.
                 player.seekTo(currentTime)
                 Result(didSeek = true)
             }
-            diff < -HARD_SEEK_THRESHOLD -> {
+            diff < -SYNC_HARD_SEEK_THRESHOLD_SECONDS -> {
                 // Far ahead. Do not seek all the way back; the +1 absorbs the
                 // buffering that follows the seek.
                 player.seekTo(currentTime + 1.0)
@@ -160,9 +169,6 @@ class SyncEngine {
     fun drift(serverTime: Double, localTime: Double): Double = abs(serverTime - localTime)
 
     private companion object {
-        /** Beyond this many seconds of drift, ramping speed would take too
-         *  long to close the gap — a hard seek is the only sane fix. */
-        const val HARD_SEEK_THRESHOLD = 8.0
         const val SPEED_CATCH_UP = 1.06f
         const val SPEED_SLOW_DOWN = 0.94f
     }
