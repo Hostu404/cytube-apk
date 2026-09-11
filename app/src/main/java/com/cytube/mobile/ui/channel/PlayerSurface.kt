@@ -29,12 +29,14 @@ import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
+import com.cytube.mobile.net.SYNC_HARD_SEEK_THRESHOLD_SECONDS
 import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
@@ -49,6 +51,35 @@ import kotlinx.coroutines.delay
  * same PlayerHandle and therefore the same SyncEngine, so switching between a
  * YouTube item and a film mid-playlist changes the source and nothing else.
  */
+
+/** Ceiling ExoPlayer will buffer toward under good network — see ExoSurface's
+ *  LoadControl. Media3's own default (DefaultLoadControl.DEFAULT_MAX_BUFFER_MS)
+ *  is 50s; raised here to give a large, high-bitrate file more runway to
+ *  absorb a bandwidth dip before it ever has to enter STATE_BUFFERING. */
+private const val LOAD_CONTROL_MAX_BUFFER_MS = 90_000
+
+/** Margin kept between [LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS] and
+ *  SyncEngine's hard-seek threshold — see that constant's own comment for
+ *  why closing this margin to zero (or crossing it) would be a real bug,
+ *  not just a tuning nit. */
+private const val REBUFFER_MARGIN_BELOW_HARD_SEEK_SECONDS = 2.0
+
+/** How much ExoPlayer gathers before resuming playback after an actual
+ *  stall — Media3's default is 5s, which was letting a file that stalled
+ *  once on a slow connection immediately run dry and stall again a moment
+ *  later. Raised so one stall has a real chance to be the last one for a
+ *  while — but deliberately kept BELOW SyncEngine's own
+ *  SYNC_HARD_SEEK_THRESHOLD_SECONDS (8s), not just an arbitrary bigger
+ *  number: a rebuffer wait at or beyond that threshold would mean the
+ *  drift built up by the wait itself is already enough to guarantee a hard
+ *  seek (a visible jump) the instant playback resumes, on every single
+ *  stall, rather than the gentle speed-ramp catch-up SyncEngine otherwise
+ *  prefers. Deriving this from the shared constant (rather than a second
+ *  hardcoded number) means the two can't quietly drift apart again if
+ *  either one changes later. */
+private val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS: Int =
+    ((SYNC_HARD_SEEK_THRESHOLD_SECONDS - REBUFFER_MARGIN_BELOW_HARD_SEEK_SECONDS) * 1000).toInt()
+
 @Composable
 fun PlayerSurface(
     media: MediaFrame?,
@@ -312,8 +343,30 @@ private fun ExoSurface(
     audioOnly: Boolean = false
 ) {
     val context = LocalContext.current
-    val exo = remember(epoch) { ExoPlayer.Builder(context).build() }
-    val handle = remember(exo) { NativePlayerHandle(exo) }
+    val exo = remember(epoch) {
+        ExoPlayer.Builder(context)
+            .setLoadControl(
+                // Steady-state target (min) and startup latency
+                // (bufferForPlayback) are left at Media3's own defaults —
+                // this only raises the ceiling ExoPlayer will build toward
+                // under good network (more runway to absorb a large file's
+                // bandwidth dips before it ever has to stall) and how much
+                // it demands before resuming after an actual stall, so one
+                // stall doesn't immediately repeat. Doesn't change anything
+                // for a short/small file — it finishes buffering long
+                // before either number is reached either way.
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                        LOAD_CONTROL_MAX_BUFFER_MS,
+                        DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                        LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
+                    )
+                    .build()
+            )
+            .build()
+    }
+    val handle = remember(exo) { NativePlayerHandle(exo, context) }
 
     // Backgrounded-but-not-PiP: nothing is actually on screen, so decoding
     // and rendering video frames the user can't see is pure waste — this

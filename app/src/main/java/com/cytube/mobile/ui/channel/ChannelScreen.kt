@@ -80,6 +80,13 @@ private enum class Panel { PLAYLIST, USERS, POLL }
  *  series of visible steps. */
 private const val AMBIENT_SAMPLE_BLEND = 0.22f
 
+/** How long the play/pause/fullscreen overlay controls stay on screen before
+ *  fading out, both in fullscreen and windowed playback — reused by both
+ *  auto-hide LaunchedEffects below. Was 3s, which read as sluggish on a short
+ *  video: the controls were still sitting there well after playback had
+ *  already started and there was nothing left to interact with. */
+private const val CONTROLS_AUTO_HIDE_MS = 1_000L
+
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
  * ChannelScreen currently has on screen. Reported fresh on every
@@ -440,7 +447,7 @@ fun ChannelScreen(
     // Auto-hide overlay controls while fullscreen.
     LaunchedEffect(controlsVisible, fullscreen) {
         if (fullscreen && controlsVisible) {
-            delay(3_000)
+            delay(CONTROLS_AUTO_HIDE_MS)
             controlsVisible = false
         }
     }
@@ -772,7 +779,7 @@ fun ChannelScreen(
             var windowedControlsVisible by remember { mutableStateOf(true) }
             LaunchedEffect(windowedControlsVisible, webMode) {
                 if (windowedControlsVisible && !webMode) {
-                    delay(3_000)
+                    delay(CONTROLS_AUTO_HIDE_MS)
                     windowedControlsVisible = false
                 }
             }
