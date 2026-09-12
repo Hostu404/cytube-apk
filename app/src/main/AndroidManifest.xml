@@ -32,6 +32,17 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.CyTube">
 
+        <!-- windowSoftInputMode is explicit rather than left to the platform
+             default: with enableEdgeToEdge() (MainActivity) the window no
+             longer resizes/pans itself for insets in principle, but leaving
+             this unset still let some OS versions/OEM skins apply their own
+             legacy pan/resize on top of Panels.kt's own imePadding() — the
+             two stacking is what was pushing the chat input way higher than
+             the keyboard actually needs and leaving a dead gap above it.
+             adjustResize with no window-level resize actually happening
+             (edge-to-edge) means Compose's own imePadding()/WindowInsets.ime
+             is the ONLY thing moving anything, so there's exactly one shift,
+             not two. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -40,7 +51,8 @@
             android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|layoutDirection"
             android:banner="@drawable/tv_banner"
-            android:theme="@style/Theme.CyTube">
+            android:theme="@style/Theme.CyTube"
+            android:windowSoftInputMode="adjustResize">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
