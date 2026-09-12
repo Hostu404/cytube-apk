@@ -126,7 +126,7 @@ data class PlaybackHost(
     val onTogglePlayPause: () -> Unit
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChannelScreen(
     channel: String,
@@ -191,6 +191,7 @@ fun ChannelScreen(
     // not touch.
     val onPersonalPick = remember(vm) { vm::pickPersonal }
     val onPlaybackEnded = remember(vm) { vm::onPlaybackEnded }
+    val onPlaybackStall = remember(vm) { vm::onPlaybackStall }
 
     // The single player surface, hoisted so it survives moving between the
     // compact layout, the fullscreen layout and the PiP layout below. Before
@@ -246,6 +247,7 @@ fun ChannelScreen(
                 onHandle = onAttachPlayer,
                 onFailed = vm::reportPlaybackFailure,
                 epoch = state.playerEpoch,
+                qualityIndex = state.nativeQualityIndex,
                 modifier = Modifier.fillMaxSize(),
                 // Each sample here is ONE instant of the video, and on
                 // fast-cutting content (an action scene, a music video) two
@@ -270,7 +272,8 @@ fun ChannelScreen(
                 },
                 audioOnly = audioOnlyState.value,
                 onEmbedController = { embedController = it },
-                onEnded = onPlaybackEnded
+                onEnded = onPlaybackEnded,
+                onStall = onPlaybackStall
             )
         }
     }
@@ -812,13 +815,42 @@ fun ChannelScreen(
             )
         },
         bottomBar = {
-            PanelBar(
-                userCount = state.userCount,
-                playlistCount = state.playlist.size,
-                pollOpen = state.poll != null,
-                onOpen = { openPanel = it }
-            )
-        }
+            // Scaffold reserves this bar's full height in the content padding
+            // (see `) { padding -> ... }` below) at all times — it has no
+            // idea the keyboard is up, so that reservation doesn't go away
+            // just because the keyboard is now physically drawn on top of
+            // this bar and it can't actually be seen or touched. Left alone,
+            // that left ChatPanel's message row imePadding()-ing itself up
+            // ABOVE an already-reserved-but-invisible PanelBar, i.e. a gap
+            // between the input row and the keyboard exactly PanelBar's
+            // height tall. Not drawing it at all while the keyboard is
+            // visible removes the reservation instead of trying to patch
+            // around it — nobody's reaching Playlist/Users/Poll while
+            // actively typing anyway, and it reappears the instant the
+            // keyboard is dismissed.
+            if (!WindowInsets.isImeVisible) {
+                PanelBar(
+                    userCount = state.userCount,
+                    playlistCount = state.playlist.size,
+                    pollOpen = state.poll != null,
+                    onOpen = { openPanel = it }
+                )
+            }
+        },
+        // Scaffold's own default (WindowInsets.systemBars) reserves bottom
+        // navigation-bar space in `padding` below UNCONDITIONALLY — on top of
+        // whatever bottomBar's actual height is, not instead of it. Hiding
+        // PanelBar while the keyboard is up (above) got rid of ITS
+        // reservation, but this default was still separately reserving the
+        // nav bar's own height underneath that, which is exactly what was
+        // left of the gap between the input row and the keyboard. The bottom
+        // edge doesn't need Scaffold's help here at all: PanelBar already
+        // pads itself for the nav bar when it's visible (NavigationBarDefaults.windowInsets,
+        // see PanelBar), and ChatPanel's input row already pads itself for
+        // the keyboard (imePadding, see ChatPanel) — so Scaffold is left with
+        // just the top status bar and any left/right cutouts, which are the
+        // only insets nothing downstream already owns.
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { padding ->
         // Always the same Column — swapping in and out of a plain Box when a
         // panel opened used to tear down and rebuild everything below (the

@@ -104,14 +104,21 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * reported through the Media3 error listener instead, which lets the
      * channel offer Compatibility View rather than crashing.
      */
-    override fun load(media: MediaFrame) {
+    override fun load(media: MediaFrame, qualityIndex: Int) {
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
 
         // For cm/vi the id is a manifest or a page URL; the playable stream comes
         // from meta.direct. Only fi/hl/rt have a directly playable id.
-        val source = media.bestSource
+        //
+        // qualityIndex is ChannelViewModel's own quality auto-adaptation
+        // (0 = its default, matching bestSource exactly) — out of range for
+        // THIS item (a stale index left over from a previous item that had
+        // more quality options) or a media with no [direct] entries at all
+        // both fall back to bestSource, same as if this parameter never
+        // existed.
+        val source = media.direct.getOrNull(qualityIndex) ?: media.bestSource
         val metadata = MediaMetadata.Builder().setTitle(media.title).build()
         val item = if (source != null) {
             MediaItem.Builder()
@@ -123,7 +130,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
         }
         Log.i("CyTubePlayer", "native load type=${media.type} " +
-            "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()}")
+            "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex")
         exo.setPlaybackSpeed(1f)
         // Routed through the same cached, longer-timeout data source as
         // loadUrl() below (see cachedDataSourceFactory) rather than

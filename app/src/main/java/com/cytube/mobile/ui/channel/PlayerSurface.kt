@@ -159,7 +159,22 @@ fun PlayerSurface(
      *  only reason this exists; normal synced playback ignores it entirely
      *  (the server drives advancement for everyone in that mode). Never
      *  fires for WEB, which has no player here to watch. */
-    onEnded: (() -> Unit)? = null
+    onEnded: (() -> Unit)? = null,
+    /** Fires with the wall-clock length of a mid-playback rebuffer — one
+     *  that happened AFTER this item already reached its first STATE_READY,
+     *  never the item's own initial buffer-up (see ExoSurface's own comment
+     *  on why that distinction matters: a large file's cold seek-point
+     *  discovery can itself take several seconds on a fine connection, and
+     *  that is not a bandwidth problem). Only ExoSurface (the NATIVE
+     *  backend) reports this — NEWPIPE/GDRIVE/EMBED never call it. Drives
+     *  ChannelViewModel.onPlaybackStall's quality step-down; see
+     *  [qualityIndex] for the way back up. */
+    onStall: ((Long) -> Unit)? = null,
+    /** Which entry of the current item's MediaFrame.direct the NATIVE
+     *  backend should load — see PlayerHandle.load's own doc. Meaningless
+     *  for every other player type, which never reads CyTube's own quality
+     *  list to begin with. */
+    qualityIndex: Int = 0
 ) {
     // embedSrc/scuri fallback logic lives in MediaFrame.embedPlayableSrc —
     // see its own comment for what this covers now beyond cu/bc/bn.
@@ -168,7 +183,10 @@ fun PlayerSurface(
         when {
             media == null -> Message("Nothing is playing")
             player == MediaTypes.Player.NATIVE ->
-                ExoSurface(media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
+                ExoSurface(
+                    media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded,
+                    onStall = onStall, qualityIndex = qualityIndex
+                )
             player == MediaTypes.Player.NEWPIPE ->
                 NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.GDRIVE ->
@@ -1355,7 +1373,9 @@ private fun ExoSurface(
     epoch: Int,
     onFrameSnapshot: ((Bitmap) -> Unit)? = null,
     audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null
+    onEnded: (() -> Unit)? = null,
+    onStall: ((Long) -> Unit)? = null,
+    qualityIndex: Int = 0
 ) {
     val context = LocalContext.current
     val exo = remember(epoch) {
@@ -1433,6 +1453,12 @@ private fun ExoSurface(
     val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
 
     DisposableEffect(exo) {
+        // Scoped to this exo/listener's own lifetime (a fresh pair per
+        // epoch — see the LaunchedEffect above), so these reset naturally
+        // for every new item AND for every quality-adaptation reload, never
+        // needing an explicit reset of their own.
+        var reachedReadyOnce = false
+        var stallStartedAtMs = 0L
         val listener = object : Player.Listener {
             // The immediate snapshot: taken the moment a new item's first
             // frame actually renders, so the glow doesn't sit on the
@@ -1489,8 +1515,34 @@ private fun ExoSurface(
             // PlayerSurface's onEnded doc comment and
             // ChannelViewModel.onPlaybackEnded, the only place that acts on
             // it; normal synced playback never reads it at all.
+            //
+            // Also tracks mid-playback stalls for onStall, deliberately
+            // excluding the item's own FIRST buffer-up (reachedReadyOnce):
+            // confirmed live that a large, non-faststart file can cost many
+            // real seconds just discovering its own seek/duration index on a
+            // perfectly good connection, before a single byte of the actual
+            // stream downloads — that is not a bandwidth problem and
+            // shouldn't be treated as one. A stall that happens AFTER this
+            // item already played at least one frame is the real signal:
+            // playback that had already started has since run its buffer dry.
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
+                when (playbackState) {
+                    Player.STATE_READY -> {
+                        if (!reachedReadyOnce) {
+                            reachedReadyOnce = true
+                        } else if (stallStartedAtMs != 0L) {
+                            val stalledMs = android.os.SystemClock.elapsedRealtime() - stallStartedAtMs
+                            stallStartedAtMs = 0L
+                            onStall?.invoke(stalledMs)
+                        }
+                    }
+                    Player.STATE_BUFFERING -> {
+                        if (reachedReadyOnce && stallStartedAtMs == 0L) {
+                            stallStartedAtMs = android.os.SystemClock.elapsedRealtime()
+                        }
+                    }
+                }
             }
         }
         exo.addListener(listener)
@@ -1555,11 +1607,19 @@ private fun ExoSurface(
     // the ViewModel never sees this handle, and the server is never told
     // we're ready, until the media source has genuinely been handed to
     // ExoPlayer.
-    LaunchedEffect(media.id, media.type, resolved) {
+    //
+    // epoch is also a key, not just media.id/type/resolved: `exo`/`handle`
+    // above are remember(epoch)'d, so a playerEpoch bump with the same
+    // media.id (ChannelViewModel's own quality-adaptation reload, the only
+    // thing that currently bumps it — see its own doc comment) builds a
+    // brand new ExoPlayer/handle pair, but without epoch as a key here this
+    // effect's coroutine wouldn't restart to ever call load()/loadUrl() on
+    // it — the old effect just keeps running, bound to the disposed handle.
+    LaunchedEffect(media.id, media.type, resolved, epoch) {
         if (resolved != null) {
             handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers)
         } else {
-            handle.load(media)
+            handle.load(media, qualityIndex)
         }
         onHandle(handle)
     }

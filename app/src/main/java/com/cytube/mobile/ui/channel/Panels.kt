@@ -227,6 +227,20 @@ fun ChatPanel(
         }
     }
 
+    // The app calls enableEdgeToEdge() (MainActivity), and nothing else in
+    // the tree ever consumed the IME inset before this — confirmed via a
+    // full search, no other imePadding()/WindowInsets.ime use anywhere — so
+    // without it the keyboard just draws over the message input field below.
+    // The actual .imePadding() call is scoped to just the input row further
+    // down, not this whole Column: it only needs to move that one Row, and
+    // the LazyColumn's own `Modifier.weight(1f)` already gives up room to
+    // whatever that row's total height ends up being, so scoping it there
+    // is equivalent to applying it here — minus the risk of it interacting
+    // with anything else this fillMaxSize() Column doesn't already handle.
+    // (AndroidManifest.xml also now declares windowSoftInputMode="adjustResize"
+    // — with edge-to-edge that triggers no actual window resize, but it stops
+    // some OS versions from ALSO panning the window on top of this, which is
+    // what was pushing the input field far higher than the keyboard needs.)
     Column(modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
@@ -288,7 +302,20 @@ fun ChatPanel(
         HorizontalDivider()
 
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            // The one place this panel actually needs to react to the
+            // keyboard — see this composable's note on imePadding() further
+            // up. Scoped to just this row rather than the whole panel, right
+            // where the padding needs to land: directly between this row and
+            // the keyboard, with nothing else in between. Bottom padding is
+            // wider than top/horizontal (16dp vs 8/12dp) rather than the
+            // plain symmetric 8dp it used to be: sitting perfectly flush
+            // against the keyboard left no room for the text cursor's own
+            // drag handle, which draws a bit below the cursor line and was
+            // getting visually clipped right at the keyboard's top edge the
+            // moment it appeared. 16dp is enough room for that handle
+            // without reading as a gap again.
+            Modifier.fillMaxWidth().imePadding()
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -302,7 +329,16 @@ fun ChatPanel(
                 onValueChange = { draft = it },
                 placeholder = { Text(if (canSend) "Message" else "Log in to chat") },
                 enabled = canSend,
-                singleLine = true,
+                // Grows with the draft instead of staying pinned to one line
+                // and scrolling the typed text sideways out of view — capped
+                // so a genuinely long paste can't take over the screen; still
+                // scrolls internally past that, same as any other multi-line
+                // field. imeAction = Send below still shows the ordinary
+                // "send" key instead of a return/newline glyph and fires
+                // onSend the same as before, so hitting enter still sends
+                // rather than adding a line — this only changes what happens
+                // while there's more text than fits on one line.
+                maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = {
@@ -381,11 +417,36 @@ internal fun openInBrowser(context: Context, url: String) {
  * instance to both call sites (created once, in ChannelScreen, for the whole
  * time the overlay stays switched on) is what makes the swap invisible.
  */
+
+/** One flying comment's motion, tracked per lane only so [claimSharedLane]
+ *  can decide whether a NEW comment may share that lane instead of queuing
+ *  behind it. All three fields come from the same spawn-time ESTIMATE the
+ *  claim sites already compute (never the more precise width
+ *  [FlyingCommentItem] later measures) — deliberately, since that estimate
+ *  is built generous (see [NEKO_ESTIMATED_PX_PER_CHAR]) and an overestimate
+ *  here can only make a shared claim more conservative, never claim a lane
+ *  safe before the real comment has actually cleared it. */
+class LaneOccupant(
+    val spawnAtMs: Long,
+    val speedPxPerMs: Float,
+    val widthPx: Float,
+    val clearAtMs: Long
+)
+
 class NekoOverlayState {
     val active = mutableStateListOf<FlyingComment>()
     var lastSpawnedSeq = -1L
     var nextId = 0L
     val laneFreeAtMs = HashMap<Int, Long>()
+
+    /** Who's currently mid-flight in each lane, for [claimSharedLane]'s
+     *  safety checks only — [laneFreeAtMs] above is untouched and still
+     *  governs the plain, one-at-a-time claim every lane gets first (see
+     *  [claimFreeLane]), so nothing about the existing exclusive-claim path
+     *  changes. Stale entries are pruned lazily, the next time a lane is
+     *  looked up here — a lane nobody's contending for costs nothing to
+     *  leave alone. */
+    val laneOccupants = HashMap<Int, MutableList<LaneOccupant>>()
     var hasCaughtUp = false
 
     /** Messages waiting for a lane to free up — see the drain loop in
@@ -472,6 +533,58 @@ fun NekoChatOverlay(
             return null
         }
 
+        // Second-pass claim, tried only once claimFreeLane above has already
+        // found every lane busy (see both call sites below) — a lane already
+        // holding a comment is still safe to hand to a NEW one if, for every
+        // comment currently in it: (1) it has already cleared its own width,
+        // so the newcomer (which always spawns off the right edge) can't
+        // visually overlap it right this instant, and (2) the newcomer is no
+        // faster than it, so the gap between them can only hold steady or
+        // grow for the rest of both their crossings, never shrink back into
+        // an overlap later on. Both are plain constant-velocity checks using
+        // numbers already known at claim time — no per-frame tracking, and
+        // no cost at all for the common case where every lane is free and
+        // this never even runs. Capped at NEKO_LANE_SHARE_CAP occupants per
+        // lane so this is strictly "a bit more throughput per row while it's
+        // genuinely needed", never unbounded stacking, and gated on
+        // NEKO_LANE_SHARE_MIN_PENDING so a lighter, ordinary backlog never
+        // pays for the extra check.
+        // candidateSpeedPxPerMs is the only thing about the new comment that
+        // matters here — its own width only matters once IT is the occupant
+        // being checked against by whatever tries to claim behind it.
+        fun claimSharedLane(now: Long, candidateSpeedPxPerMs: Float): Int? {
+            if (state.pending.size < NEKO_LANE_SHARE_MIN_PENDING) return null
+            val count = effectiveLaneCount()
+            for (lane in 0 until count) {
+                val occupants = state.laneOccupants[lane] ?: continue
+                occupants.removeAll { now >= it.clearAtMs }
+                if (occupants.isEmpty()) {
+                    state.laneOccupants.remove(lane)
+                    continue
+                }
+                if (occupants.size >= NEKO_LANE_SHARE_CAP) continue
+                val safe = occupants.all { occ ->
+                    candidateSpeedPxPerMs <= occ.speedPxPerMs &&
+                        (now - occ.spawnAtMs) * occ.speedPxPerMs >= occ.widthPx + NEKO_LANE_SHARE_MARGIN_PX
+                }
+                if (safe) return lane
+            }
+            return null
+        }
+
+        // Records a just-claimed lane's new occupant for claimSharedLane
+        // above, and extends laneFreeAtMs to the LATER of its current value
+        // and this occupant's own clear time — never simply overwritten,
+        // since a shared claim must not let claimFreeLane consider the lane
+        // exclusively free again before the earlier occupant it shares with
+        // has actually cleared too.
+        fun recordLaneOccupant(lane: Int, now: Long, speedPxPerMs: Float, widthPx: Float, durationMs: Int) {
+            state.laneFreeAtMs[lane] = maxOf(state.laneFreeAtMs[lane] ?: 0L, now + durationMs)
+            val list = state.laneOccupants.getOrPut(lane) { mutableListOf() }
+            list.removeAll { now >= it.clearAtMs }
+            list.add(LaneOccupant(spawnAtMs = now, speedPxPerMs = speedPxPerMs, widthPx = widthPx, clearAtMs = now + durationMs))
+        }
+
         // Baseline for "what's new" (see the effect below), set exactly once
         // per on-cycle. This runs during composition — strictly before either
         // effect below gets a chance to start — so there is no race between
@@ -498,11 +611,13 @@ fun NekoChatOverlay(
             val catchUp = messages.filterNot { it.isServerMessage }.takeLast(NEKO_CATCHUP_COUNT)
             catchUp.forEach { msg ->
                 val now = System.currentTimeMillis()
-                val lane = claimFreeLane(now)
+                val pendingSize = state.pending.size
+                val estimatedWidthPx = msg.html.length * NEKO_ESTIMATED_PX_PER_CHAR
+                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
+                val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
+                val lane = claimFreeLane(now) ?: claimSharedLane(now, speedPxPerMs)
                 if (lane != null) {
-                    val pendingSize = state.pending.size
-                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx, pendingSize)
-                    state.laneFreeAtMs[lane] = now + durationMs
+                    recordLaneOccupant(lane, now, speedPxPerMs, estimatedWidthPx, durationMs)
                     state.active.add(
                         FlyingComment(
                             id = state.nextId++,
@@ -576,18 +691,22 @@ fun NekoChatOverlay(
                     continue
                 }
                 val now = System.currentTimeMillis()
-                val lane = claimFreeLane(now)
+                // Captured before removeFirst() (peeked below, only actually
+                // removed once a lane is confirmed) so it reflects the real
+                // backlog depth this message spawned out of (including
+                // itself) — the same figure both the lane-booking estimate
+                // here and FlyingCommentItem's real-duration recompute key
+                // off, so a lane never frees at a different moment than the
+                // comment it's timing.
+                val pendingSize = state.pending.size
+                val msg = state.pending.first()
+                val estimatedWidthPx = msg.html.length * NEKO_ESTIMATED_PX_PER_CHAR
+                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
+                val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
+                val lane = claimFreeLane(now) ?: claimSharedLane(now, speedPxPerMs)
                 if (lane != null) {
-                    // Captured before removeFirst() so it reflects the real
-                    // backlog depth this message spawned out of (including
-                    // itself) — the same figure both the lane-booking
-                    // estimate below and FlyingCommentItem's real-duration
-                    // recompute key off, so a lane never frees at a
-                    // different moment than the comment it's timing.
-                    val pendingSize = state.pending.size
-                    val msg = state.pending.removeFirst()
-                    val durationMs = estimateNekoDurationMs(msg.html, screenWidthPx, pendingSize)
-                    state.laneFreeAtMs[lane] = now + durationMs
+                    state.pending.removeFirst()
+                    recordLaneOccupant(lane, now, speedPxPerMs, estimatedWidthPx, durationMs)
                     state.active.add(
                         FlyingComment(
                             id = state.nextId++,
@@ -603,7 +722,18 @@ fun NekoChatOverlay(
                     // once none are left.
                 } else {
                     val nextFreeAt = state.laneFreeAtMs.values.minOrNull() ?: (now + 150L)
-                    val waitMs = (nextFreeAt - now).coerceIn(16L, 1_000L)
+                    // A tighter poll ceiling once lane-sharing could plausibly
+                    // help (pending already deep enough that claimSharedLane
+                    // stops early-returning) — a shared claim can open up well
+                    // before laneFreeAtMs's exclusive-clear estimate does, and
+                    // the plain 1s ceiling was tuned for a world without that
+                    // possibility.
+                    val pollCeilingMs = if (state.pending.size >= NEKO_LANE_SHARE_MIN_PENDING) {
+                        NEKO_LANE_SHARE_POLL_MS
+                    } else {
+                        1_000L
+                    }
+                    val waitMs = (nextFreeAt - now).coerceIn(16L, pollCeilingMs)
                     withTimeoutOrNull(waitMs) { state.wakeSignal.receive() }
                 }
             }
@@ -631,7 +761,8 @@ data class FlyingComment(
     val id: Long,
     val msg: ChatMessage,
     val lane: Int,
-    /** Spawn-time estimate (see [estimateNekoDurationMs]) — used only to book
+    /** Spawn-time estimate (computed via [nekoDurationMs] against an
+     *  estimated width, see [NEKO_ESTIMATED_PX_PER_CHAR]) — used only to book
      *  [NekoOverlayState.laneFreeAtMs] before the real text width is known,
      *  and as the very first frame's animation target before that.
      *  FlyingCommentItem recomputes the real value from the real measured
@@ -769,10 +900,37 @@ private fun nekoDurationMs(distancePx: Float, pendingSize: Int = 0): Int {
     return scaled.coerceAtLeast(NEKO_MIN_DURATION_MS)
 }
 
-private fun estimateNekoDurationMs(rawHtml: String, screenWidthPx: Float, pendingSize: Int = 0): Int {
-    val estimatedWidthPx = rawHtml.length * NEKO_ESTIMATED_PX_PER_CHAR
-    return nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
-}
+/** Extra concurrent occupants [claimSharedLane] may place in a single lane —
+ *  1 means "no sharing", so this is really "how many EXTRA comments" on top
+ *  of the one a lane already holds. Kept small and fixed rather than scaling
+ *  with backlog depth: sharing is meant to relieve a flood a little further
+ *  once bonus lanes and backlog speed-up are already both maxed out, not to
+ *  become the primary mechanism — a taller stack per lane would also start
+ *  costing more per claim (more occupants to safety-check). */
+private const val NEKO_LANE_SHARE_CAP = 2
+
+/** [NekoOverlayState.pending] depth at which [claimSharedLane] starts being
+ *  tried at all. Set low relative to [NEKO_BACKLOG_BONUS_LANES_THRESHOLD] —
+ *  a shared claim only ever fires when every lane is already busy anyway
+ *  (it's strictly a fallback after [claimFreeLane] fails), so trying it a
+ *  little early costs nothing extra on a quiet channel; this just skips the
+ *  attempt entirely for the common case of a handful of lanes being briefly
+ *  busy with perfectly ordinary chat. */
+private const val NEKO_LANE_SHARE_MIN_PENDING = 6
+
+/** Extra clearance beyond a lane occupant's own estimated width before a new
+ *  comment may spawn behind it — a small fixed buffer against estimation
+ *  noise and the two comments' outline glows visibly touching, not a
+ *  meaningfully-sized gap on a screen this wide. */
+private const val NEKO_LANE_SHARE_MARGIN_PX = 12f
+
+/** Tighter poll ceiling the drain loop falls back to once
+ *  [NEKO_LANE_SHARE_MIN_PENDING] is met — see its call site. A shared claim
+ *  can become safe well before any lane's exclusive [NekoOverlayState.laneFreeAtMs]
+ *  estimate elapses, so the plain 1s ceiling (tuned for a world without
+ *  sharing) would otherwise sit on a newly-safe shared lane for up to a
+ *  second before noticing. */
+private const val NEKO_LANE_SHARE_POLL_MS = 200L
 
 /** Vertical space each flying line gets — tall enough for NEKO_TEXT_STYLE's
  *  20sp bold plus a little breathing room between lines. */
