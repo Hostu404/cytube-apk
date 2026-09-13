@@ -27,6 +27,11 @@ import org.jsoup.Jsoup
  * presented on the Socket.IO handshake, where ioserver.js authUserMiddleware
  * verifies it — no login frame at all.
  *
+ * "Remember me" only controls whether the cookie survives a process
+ * restart, via EncryptedSharedPreferences — a successful login always
+ * counts for the rest of THIS process's lifetime regardless (see
+ * inMemorySession below); only the durable copy is conditional.
+ *
  * Socket login remains as a fallback for the session only; it is never stored.
  */
 class AuthRepository(context: Context, private val http: OkHttpClient, private val baseUrl: String) {
@@ -48,7 +53,33 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
         data class WebFlowUnavailable(val reason: String) : LoginOutcome
     }
 
+    /**
+     * Set on every successful [login], regardless of `remember`. Cleared on
+     * [logout] and never written anywhere durable, so it does not survive a
+     * process restart on its own — that lack of durability is exactly what
+     * is supposed to distinguish an unremembered login from a remembered
+     * one. Before this field existed, `remember = false` did not just skip
+     * disk persistence, it discarded the session for every purpose except
+     * the login screen's own local Compose state: [savedSession] read
+     * straight from EncryptedSharedPreferences, so the Account screen could
+     * say "Signed in as X" while every subsequent [credentialForSession]
+     * call (i.e. every channel join, and Compatibility View's cookie share)
+     * silently found nothing and fell back to a guest identity — two parts
+     * of the app disagreeing about whether the user was logged in.
+     * `@Volatile` because a login on one coroutine can be read from another
+     * (e.g. ChannelViewModel.connect) shortly after.
+     */
+    @Volatile
+    private var inMemorySession: Session? = null
+
+    /** The session in effect for this run of the app, whether or not it was
+     *  persisted — see [inMemorySession]'s doc comment for why an
+     *  unremembered login still has to count here. Checked first so it wins
+     *  over a stale persisted session for the lifetime of this process (it
+     *  cannot itself go stale in a way the persisted copy can't, since both
+     *  ultimately come from the same login flow). */
     fun savedSession(): Session? {
+        inMemorySession?.let { return it }
         val name = prefs.getString(KEY_NAME, null) ?: return null
         val cookie = prefs.getString(KEY_COOKIE, null) ?: return null
         return Session(name, cookie)
@@ -65,7 +96,11 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
      * should revoke the credential, not just forget it on this device.
      */
     suspend fun logout() = withContext(Dispatchers.IO) {
-        val cookie = prefs.getString(KEY_COOKIE, null)
+        // An unremembered session never made it into prefs at all (see
+        // inMemorySession's doc comment), so it has to be checked here too
+        // or logging out of one would skip the server-side /logout call
+        // entirely and just silently drop the in-memory copy below.
+        val cookie = inMemorySession?.authCookie ?: prefs.getString(KEY_COOKIE, null)
         if (cookie != null) {
             runCatching {
                 val req = Request.Builder()
@@ -76,6 +111,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                 http.newCall(req).execute().close()
             }
         }
+        inMemorySession = null
         prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
 
         // WebCompatView shares the auth cookie into Android's WebView
@@ -125,6 +161,10 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                     }
 
                     val session = Session(username, auth)
+                    // Always kept for this process's lifetime; only the durable
+                    // copy is gated on `remember` — see inMemorySession's doc
+                    // comment for why the in-memory one can't also be gated on it.
+                    inMemorySession = session
                     if (remember) {
                         prefs.edit().putString(KEY_NAME, username)
                             .putString(KEY_COOKIE, auth).apply()

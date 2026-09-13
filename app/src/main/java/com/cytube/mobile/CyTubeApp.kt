@@ -12,6 +12,7 @@ import com.cytube.mobile.di.Graph
 import com.cytube.mobile.player.YouTubeResolver
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import java.util.concurrent.TimeUnit
 
 /**
  * Emotes are the same handful of small images repeated thousands of times in a
@@ -45,8 +46,11 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             // from Graph.http.
             .okHttpClient {
                 Graph.http.newBuilder()
-                    .dispatcher(Dispatcher())
-                    .connectionPool(ConnectionPool())
+                    .dispatcher(Dispatcher().apply {
+                        maxRequests = 64
+                        maxRequestsPerHost = 20
+                    })
+                    .connectionPool(ConnectionPool(20, 5, TimeUnit.MINUTES))
                     // This header is specific to fetching third-party emote
                     // images, not something the login flow, channel-index
                     // scrape, or socket handshake want touched. Some emote
@@ -70,12 +74,8 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                     .build()
             }
             .components {
-                // Animated GIF emotes in chat (CyTube channels use a lot of
-                // them). Registered globally on the loader, but the emote
-                // *picker* grid opts back out per-request — see Panels.kt —
-                // since a whole grid of simultaneously-animating GIFs is real
-                // decode/CPU cost for a picker that's only up for a second to
-                // tap an emote.
+                // Animated GIF emotes in chat and emote picker (CyTube channels
+                // use a lot of them). Registered globally on the loader.
                 //
                 // GifDecoder is registered ahead of ImageDecoderDecoder on
                 // every API level, not just <28. Coil tries factories in
@@ -93,6 +93,7 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                 add(GifDecoder.Factory())
                 if (Build.VERSION.SDK_INT >= 28) add(ImageDecoderDecoder.Factory())
             }
+            .allowRgb565(true)
             .memoryCache {
                 MemoryCache.Builder(this)
                     .maxSizePercent(0.15)
@@ -101,7 +102,7 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("emote_cache"))
-                    .maxSizeBytes(48L * 1024 * 1024)
+                    .maxSizeBytes(128L * 1024 * 1024)
                     .build()
             }
             .respectCacheHeaders(false)   // emote URLs are effectively immutable

@@ -15,7 +15,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -24,6 +23,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.focus.FocusRequester
@@ -32,8 +32,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreVert
@@ -210,6 +208,7 @@ fun ChannelScreen(
     // PiP — floating video with no video track would just show a blank
     // window, defeating the point of PiP.
     val audioOnlyState = rememberUpdatedState(isAppInBackground && !isInPictureInPicture)
+    val ambientGlowEnabledState = rememberUpdatedState(state.ambientGlowEnabled)
 
     // Dominant color behind the windowed player (see WindowedAmbientGlow
     // below) — a single stable holder for the whole life of this screen, not
@@ -221,18 +220,6 @@ fun ChannelScreen(
     // first frame is still on the way.
     var ambientColor by remember { mutableStateOf<Color?>(null) }
     LaunchedEffect(state.media?.id) { ambientColor = null }
-
-    // EMBED's own on-screen play/pause/seek bar turned out not to be
-    // reliably reachable inside this WebView (confirmed live: tapping the
-    // video does nothing) — see EmbedPlayerController's own doc comment.
-    // Same lifetime rule as ambientColor just above: one holder for the
-    // whole screen, cleared on every media change so a stale controller
-    // from the previous item (whose WebView is gone) never lingers into the
-    // next one before EMBED's factory hands out a fresh one — see
-    // EmbedSurface's own comment on why factory only ever fires once per
-    // item to begin with.
-    var embedController by remember { mutableStateOf<EmbedPlayerController?>(null) }
-    LaunchedEffect(state.media?.id) { embedController = null }
 
     val playerContent = remember {
         movableContentOf {
@@ -265,13 +252,15 @@ fun ChannelScreen(
                 // first sample of a new item (ambientColor still null there,
                 // per the LaunchedEffect above) so a fresh item still snaps
                 // to its own color immediately rather than easing up from
-                // the previous item's leftover one.
-                onFrameSnapshot = { bitmap ->
-                    val sample = averageColor(bitmap)
-                    ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
-                },
+                // the previous item's leftover one. Only active when glow is
+                // enabled and video is not running audio-only.
+                onFrameSnapshot = if (ambientGlowEnabledState.value && !audioOnlyState.value) {
+                    { bitmap ->
+                        val sample = averageColor(bitmap)
+                        ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
+                    }
+                } else null,
                 audioOnly = audioOnlyState.value,
-                onEmbedController = { embedController = it },
                 onEnded = onPlaybackEnded,
                 onStall = onPlaybackStall
             )
@@ -708,7 +697,6 @@ fun ChannelScreen(
             onExit = { fullscreen = false },
             chatOverlayOn = chatOverlayOn,
             nekoState = nekoState,
-            embedController = embedController,
             playerContent = playerContent
         )
         return
@@ -905,16 +893,14 @@ fun ChannelScreen(
             )
 
             // A slow, independent brightness pulse on top of the hue drift
-            // above — the actual "hypnotic" part. The color alone drifting
-            // smoothly reads as calm; a steady, gentle breathing rhythm
-            // layered on it is what reads as hypnotic rather than just
-            // static. Small amplitude (0.85-1.0) and a slow, even pace
-            // (4s each way, eased rather than linear) so it stays felt more
-            // than seen — this should never be something a viewer notices
-            // as "the corner is pulsing", just something that makes the
-            // glow feel alive rather than a flat wash of color. Only
-            // animated at all while the glow is actually shown.
-            val glowPulse = if (ambientGlowActive) {
+            // above — the actual "hypnotic" part. Only animated when the glow
+            // is visually active (playing, in foreground, with a non-null
+            // color sample) to avoid keeping the 60/120Hz render loop running
+            // endlessly during pause, background audio, or before the video starts.
+            val isGlowVisuallyActive = ambientGlowActive && state.playing &&
+                !isAppInBackground && ambientColor != null
+
+            val glowPulse = if (isGlowVisuallyActive) {
                 rememberInfiniteTransition(label = "ambientPulse").animateFloat(
                     initialValue = 0.85f,
                     targetValue = 1f,
@@ -1008,13 +994,6 @@ fun ChannelScreen(
                         onClick = { fullscreen = true },
                         modifier = Modifier.align(Alignment.TopEnd)
                     )
-                    if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
-                        EmbedControlsRow(
-                            controller = embedController,
-                            visible = windowedControlsVisible,
-                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
-                        )
-                    }
                 }
             }
 
@@ -1186,48 +1165,6 @@ private fun WindowedFullscreenButton(visible: Boolean, onClick: () -> Unit, modi
     AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
         IconButton(onClick = onClick, modifier = Modifier.padding(8.dp)) {
             Icon(Icons.Default.Fullscreen, contentDescription = "Fullscreen", tint = Color.White)
-        }
-    }
-}
-
-/**
- * Play/pause + seek ±10s for an EMBED item, driving [EmbedPlayerController]
- * directly — see that class's own doc comment for why this exists at all
- * (the embed's own on-screen controls confirmed not reachable by tapping
- * the video inside this WebView). `controller` is null for the brief window
- * between an item becoming EMBED and its WebView actually finishing
- * construction (see EmbedSurface's factory) — the row just doesn't render
- * yet rather than showing buttons with nothing to call.
- *
- * No play/pause icon state: [EmbedPlayerController.togglePlayPause] is a
- * blind toggle with no way to read back whether the embed is actually
- * playing (see its own doc comment on why), so a single fixed icon that
- * means "toggle" is honest about what the button does rather than showing
- * a Play/Pause glyph that could be wrong half the time.
- */
-@Composable
-private fun EmbedControlsRow(
-    controller: EmbedPlayerController?,
-    visible: Boolean,
-    modifier: Modifier = Modifier
-) {
-    if (controller == null) return
-    AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut(), modifier = modifier) {
-        Row(
-            Modifier
-                .background(Color(0x99000000), shape = RoundedCornerShape(24.dp))
-                .padding(horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = { controller.seekBy(-10) }) {
-                Icon(Icons.Default.FastRewind, contentDescription = "Back 10 seconds", tint = Color.White)
-            }
-            IconButton(onClick = controller::togglePlayPause) {
-                Icon(Icons.Default.PlayArrow, contentDescription = "Play or pause", tint = Color.White)
-            }
-            IconButton(onClick = { controller.seekBy(10) }) {
-                Icon(Icons.Default.FastForward, contentDescription = "Forward 10 seconds", tint = Color.White)
-            }
         }
     }
 }
@@ -1736,7 +1673,7 @@ private fun TvPlaylistView(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                items(filtered, key = { it.uid }) { item ->
+                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}_$idx" else "pos_${idx}_${item.mediaId}" }) { _, item ->
                     val personallyResolvable =
                         com.cytube.mobile.net.MediaTypes.canResolveIndependently(item.type)
                     val isPick = item.uid == state.personalPickUid
@@ -1807,7 +1744,6 @@ private fun FullscreenPlayer(
     onExit: () -> Unit,
     chatOverlayOn: Boolean,
     nekoState: NekoOverlayState,
-    embedController: EmbedPlayerController?,
     playerContent: @Composable () -> Unit
 ) {
     Box(
@@ -1873,19 +1809,6 @@ private fun FullscreenPlayer(
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
-                    EmbedControlsRow(
-                        controller = embedController,
-                        // Tied to the same AnimatedVisibility as the rest of
-                        // this overlay already, so a second, separate
-                        // visible= here would just be redundant — always
-                        // true is correct: whenever this whole Box is
-                        // showing at all, this row shows with it.
-                        visible = true,
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 24.dp)
                     )
                 }
             }

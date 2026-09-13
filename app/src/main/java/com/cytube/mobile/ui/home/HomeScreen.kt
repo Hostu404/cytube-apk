@@ -48,7 +48,21 @@ fun HomeScreen(
     val context = LocalContext.current
     val isTv = remember { isTvDevice(context) }
 
-    LaunchedEffect(Unit) { vm.refreshSession() }
+    // Fires every time this composable is (re)composed -- which, under
+    // Navigation-Compose, is every time the homepage is actually navigated
+    // to, not just once: leaving "home" for a channel/login/settings screen
+    // tears this composable down, and coming back rebuilds it fresh. That
+    // makes this the one place responsible for "the public channel list
+    // should be current whenever the homepage is on screen" -- see
+    // HomeViewModel's own init{} doc comment for why refresh() was moved
+    // here instead of living there. vm.refresh() (no force) still respects
+    // ChannelIndexRepository's 60s cache, so bouncing in and out of a
+    // channel doesn't hammer the scrape every time -- the manual Refresh
+    // button (force = true) is what's left for "no, really, right now".
+    LaunchedEffect(Unit) {
+        vm.refreshSession()
+        vm.refresh()
+    }
 
     Scaffold(
         topBar = {
@@ -166,13 +180,13 @@ fun HomeScreen(
                 }
             }
 
-            if (state.loading) {
+            if (state.loading && state.filtered.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 }
-            } else if (state.indexUnavailable) {
+            } else if (state.indexUnavailable && state.filtered.isEmpty()) {
                 item { IndexUnavailableNote() }
             } else {
                 items(state.filtered, key = { it.name }) { channel ->

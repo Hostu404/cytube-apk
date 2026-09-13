@@ -67,9 +67,23 @@ object YouTubeResolver {
         initialised = true
     }
 
+    // YouTube video IDs are typically base64url-like (letters, digits,
+    // underscore, hyphen, e.g. 11 characters) — untrusted input from a
+    // room's playlist/server spliced into the StreamInfo URL. Enforce strict
+    // charset validation before hitting NewPipeExtractor.
+    private val SAFE_VIDEO_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
+
     suspend fun resolve(videoId: String): Result<Resolved> = withContext(Dispatchers.IO) {
+        if (!SAFE_VIDEO_ID_REGEX.matches(videoId)) {
+            Log.w(TAG, "rejected malformed YouTube video id: $videoId")
+            return@withContext Result.failure(IllegalArgumentException("Invalid YouTube video id"))
+        }
+        val now = System.currentTimeMillis()
+        if (cache.size > 20) {
+            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
+        }
         cache[videoId]?.let { (at, r) ->
-            if (System.currentTimeMillis() - at < CACHE_MS) return@withContext Result.success(r)
+            if (now - at < CACHE_MS) return@withContext Result.success(r)
         }
         runCatching {
             val info = StreamInfo.getInfo(

@@ -64,8 +64,12 @@ object GoogleDriveResolver {
             Log.w(TAG, "rejected malformed Google Drive file id (len=${fileId.length})")
             return@withContext Result.failure(IllegalArgumentException("Invalid Google Drive file id"))
         }
+        val now = System.currentTimeMillis()
+        if (cache.size > 20) {
+            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
+        }
         cache[fileId]?.let { (at, r) ->
-            if (System.currentTimeMillis() - at < CACHE_MS) return@withContext Result.success(r)
+            if (now - at < CACHE_MS) return@withContext Result.success(r)
         }
         runCatching {
             val req = Request.Builder()

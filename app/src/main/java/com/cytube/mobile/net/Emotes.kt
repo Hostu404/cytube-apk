@@ -59,17 +59,16 @@ class EmoteSet private constructor(
 
         return TOKEN.replace(out) { m ->
             val emote = hashed[m.value]
-            if (emote == null) Regex.escapeReplacement(m.value) else imgTag(emote)
+            if (emote == null) m.value else imgTag(emote)
         }
     }
 
     /**
      * Does this message contain anything we would substitute? Cheap pre-check,
-     * called on every incoming chat message. splitToSequence rather than
-     * split(): a busy channel's messages are mostly a handful of tokens with no
-     * emote in them, so a lazy sequence that can bail on the first hit (or the
-     * first mismatch, without ever materialising a List<String>) beats eagerly
-     * allocating the whole split up front.
+     * called on every incoming chat message. Zero-allocation index scanning:
+     * a busy channel's messages are mostly a handful of tokens with no
+     * emote in them, so scanning tokens with index boundaries bails on the
+     * first hit or mismatch without allocating regex Matchers or token sequences.
      *
      * This used to return `true` outright whenever the channel had ANY
      * whitespace-named emote at all, regardless of whether the message
@@ -86,7 +85,18 @@ class EmoteSet private constructor(
         if (spaced.isNotEmpty() && spaced.any { (regex, _) -> regex.containsMatchIn(message) }) {
             return true
         }
-        return WHITESPACE.splitToSequence(message).any { hashed.containsKey(it) }
+        if (hashed.isEmpty()) return false
+        var start = 0
+        val len = message.length
+        while (start < len) {
+            while (start < len && message[start].isWhitespace()) start++
+            if (start >= len) break
+            var end = start
+            while (end < len && !message[end].isWhitespace()) end++
+            if (hashed.containsKey(message.substring(start, end))) return true
+            start = end
+        }
+        return false
     }
 
     fun withUpdated(emote: Emote): EmoteSet =

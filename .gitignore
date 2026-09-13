@@ -1,12 +1,16 @@
 *.iml
 .gradle/
 .kotlin/
+.artifacts/
 local.properties
 .idea/
 build/
 captures/
 .externalNativeBuild/
 .cxx/
+
+app/src/main/java/com/cytube/mobile/webview/
+app/src/test/
 
 # Release signing — never committed. Copy keystore.properties.example to get
 # started; the .jks/.keystore itself also never belongs in the repo.

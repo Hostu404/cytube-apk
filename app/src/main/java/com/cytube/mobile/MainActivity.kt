@@ -270,7 +270,7 @@ class MainActivity : ComponentActivity() {
      *  this can arrive from any other installed app, not just from typing it. */
     private fun channelFromIntent(intent: Intent?): String? {
         val data = intent?.data ?: return null
-        if (data.host != "cytu.be") return null
+        if (data.scheme?.lowercase() != "https" || data.host?.lowercase() != "cytu.be") return null
         val segments = data.pathSegments
         if (segments.size < 2 || segments[0] != "r") return null
         return segments[1].takeIf { CHANNEL_NAME_REGEX.matches(it) }

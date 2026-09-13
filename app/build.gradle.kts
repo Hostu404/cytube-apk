@@ -24,8 +24,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.6.9.0"
+        versionCode = 12
+        versionName = "1.7 - Rocket Mode"
     }
 
     signingConfigs {
@@ -75,6 +75,7 @@ android {
         // Needed to reference BuildConfig.VERSION_NAME from the home screen's
         // title bar; AGP 8+ no longer generates BuildConfig unless asked.
         buildConfig = true
+        aidl = true
     }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
@@ -129,4 +130,6 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.newpipe.extractor)
+
+    testImplementation(libs.junit)
 }
