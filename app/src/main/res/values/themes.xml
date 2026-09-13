@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.CyTube" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.CyTube" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Disables Android's framework-level default focus highlight on API 26+
+             (Android TV / D-pad devices), which otherwise draws system focus outline
+             rectangles and artifacts over Compose layouts. -->
+        <item name="android:defaultFocusHighlightEnabled">false</item>
+    </style>
 </resources>
+

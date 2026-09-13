@@ -63,8 +63,15 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * down with it.
      */
     private fun cachedDataSourceFactory(headers: Map<String, String> = emptyMap()): DataSource.Factory {
+        val userAgent = if (headers.containsKey("User-Agent")) {
+            headers["User-Agent"]?.ifBlank { null }
+        } else {
+            Graph.DEFAULT_USER_AGENT
+        }
+        val requestHeaders = headers.filterKeys { it != "User-Agent" && it.isNotBlank() }
         val upstream = OkHttpDataSource.Factory(Graph.mediaHttp)
-            .apply { if (headers.isNotEmpty()) setDefaultRequestProperties(headers) }
+            .setUserAgent(userAgent)
+            .apply { if (requestHeaders.isNotEmpty()) setDefaultRequestProperties(requestHeaders) }
         return CacheDataSource.Factory()
             .setCache(Graph.mediaCache(appContext))
             .setUpstreamDataSourceFactory(upstream)

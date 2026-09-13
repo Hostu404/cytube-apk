@@ -36,6 +36,7 @@ import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.data.ThemeMode
 import com.cytube.mobile.ui.channel.ChannelScreen
 import com.cytube.mobile.ui.channel.PlaybackHost
+import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.home.HomeScreen
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.login.LoginScreen
@@ -95,7 +96,7 @@ class MainActivity : ComponentActivity() {
                 // screen re-reading SettingsStore on its own.
                 val appContext = LocalContext.current
                 val settingsStore = remember { SettingsStore(appContext) }
-                val settings by settingsStore.settings.collectAsState(initial = Settings())
+                val settings by settingsStore.settings.collectAsState(initial = Settings(syncAccuracy = defaultSyncAccuracy(appContext)))
                 val isDark = when (settings.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false

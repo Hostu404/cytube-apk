@@ -29,6 +29,9 @@ object Graph {
 
     const val BASE_URL = CyTubeClient.DEFAULT_BASE_URL
 
+    const val DEFAULT_USER_AGENT =
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
     val http: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)

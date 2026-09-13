@@ -633,10 +633,10 @@ private fun NewPipeSurface(
  * GoogleDriveIE, same content-workspacevideo-pa.googleapis.com endpoint and
  * API key): it sends no Referer/Origin/User-Agent override at all for these
  * formatStreamingData URLs — only the metadata lookup itself carries a
- * Referer. Matching that exactly (i.e., sending nothing) is what actually
- * fixed it — confirmed live, playback works.
+ * Referer. Matching that exactly (i.e., sending no User-Agent or other
+ * header overrides) is what actually fixed it — confirmed live, playback works.
  */
-private val GDRIVE_STREAM_HEADERS = emptyMap<String, String>()
+private val GDRIVE_STREAM_HEADERS = mapOf("User-Agent" to "")
 
 /** Resolves a Google Drive file id to a stream URL, then hands over to the normal player. */
 @Composable
@@ -709,7 +709,6 @@ private fun ExoSurface(
     val context = LocalContext.current
     val exo = remember(epoch) {
         val renderersFactory = DefaultRenderersFactory(context)
-            .forceEnableMediaCodecAsynchronousQueueing()
             .setEnableDecoderFallback(true)
 
         val audioAttributes = AudioAttributes.Builder()
@@ -883,6 +882,7 @@ private fun ExoSurface(
                         stallJob = null
                         if (!reachedReadyOnce) {
                             reachedReadyOnce = true
+                            stallStartedAtMs = 0L
                         } else if (stallStartedAtMs != 0L) {
                             val now = SystemClock.elapsedRealtime()
                             val stalledMs = now - stallStartedAtMs
@@ -897,18 +897,17 @@ private fun ExoSurface(
                         }
                     }
                     Player.STATE_BUFFERING -> {
-                        if (stallStartedAtMs == 0L) {
+                        // Only mid-playback rebuffers count as stalls. The initial buffer-up
+                        // (discovering container index/moov atom and seeking to start position on
+                        // large files) can take several seconds and is NOT a bandwidth stall.
+                        if (reachedReadyOnce && stallStartedAtMs == 0L) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start
                             stallJob?.cancel()
                             stallJob = scope.launch {
                                 recentStalls.removeAll { start - it.first > RECENT_STALL_WINDOW_MS }
                                 val priorStalled = recentStalls.sumOf { it.second }
-                                val threshold = if (reachedReadyOnce) {
-                                    (1_500L - priorStalled).coerceIn(300L, 1_500L)
-                                } else {
-                                    3_500L
-                                }
+                                val threshold = (1_500L - priorStalled).coerceIn(300L, 1_500L)
                                 delay(threshold)
                                 if (stallStartedAtMs == start) {
                                     recentStalls.clear()

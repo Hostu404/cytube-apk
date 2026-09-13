@@ -20,3 +20,10 @@ fun isTvDevice(context: Context): Boolean {
     val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
     return uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
 }
+
+/**
+ * Default sync tolerance in seconds: 5.0s on Android TV, 2.0s on phones/tablets.
+ */
+fun defaultSyncAccuracy(context: Context): Double =
+    if (isTvDevice(context)) 5.0 else 2.0
+
