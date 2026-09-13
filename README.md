@@ -27,6 +27,15 @@ This is a **native Android application**, not simply the CyTube website wrapped 
 
 ---
 
+## Support
+
+This is a hobby project, built and maintained in spare time. If you get some
+use out of it:
+
+**☕ [ko-fi.com/hostu](https://ko-fi.com/hostu)**
+
+---
+
 ## Features
 
 * Browse and join channels
@@ -206,12 +215,3 @@ not something invented from scratch. It also depends on:
 CyTube APK is released under the **GNU General Public License v3.0**.
 
 See [`LICENSE`](LICENSE) for the complete licence.
-
----
-
-## Support
-
-This is a hobby project, built and maintained in spare time. If you get some
-use out of it:
-
-**☕ [ko-fi.com/hostu](https://ko-fi.com/hostu)**
