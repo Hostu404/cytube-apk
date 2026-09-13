@@ -12,6 +12,7 @@ import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
 import com.cytube.mobile.player.PlayerHandle
+import com.cytube.mobile.ui.defaultSyncAccuracy
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
@@ -159,7 +160,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  change), so a fresh item's first stall isn't held back by a cooldown
      *  that belonged to the previous video. */
     private var lastQualityChangeAtMs: Long = 0L
-    private var settings: Settings = Settings()
+    private var settings: Settings = Settings(syncAccuracy = defaultSyncAccuracy(app))
     private var leaderTicker: Job? = null
     private var syncTicker: Job? = null
     private var syncJob: Job? = null
@@ -642,7 +643,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val media = _state.value.media ?: return
         val fallbackSeconds = media.currentTime
         viewModelScope.launch {
-            val resumeSeconds = runCatching { handle?.currentTimeSeconds() }.getOrNull() ?: fallbackSeconds
+            val currentPos = runCatching { handle?.currentTimeSeconds() }.getOrNull() ?: 0.0
+            val resumeSeconds = if (currentPos > 0.0) currentPos else fallbackSeconds
             update { st ->
                 val m = st.media
                 // The item (or the backend) changed underneath us while

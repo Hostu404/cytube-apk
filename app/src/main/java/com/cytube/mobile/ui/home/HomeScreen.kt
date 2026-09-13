@@ -94,7 +94,8 @@ fun HomeScreen(
                     }
                 }
             )
-        }
+        },
+        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),

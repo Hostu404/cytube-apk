@@ -16,6 +16,7 @@ import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.data.ThemeMode
 import com.cytube.mobile.ui.channel.openInBrowser
+import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -26,12 +27,12 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
-    var settings by remember { mutableStateOf(Settings()) }
     // Every other setting works the same on TV as on phone; these two are
     // the sole, explicit exceptions (Ambient glow is never rendered on TV —
     // see ChannelScreen — and PiP has no meaning without a home-screen
     // window to float into), so they're the only rows hidden here.
     val isTv = remember { isTvDevice(context) }
+    var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
     LaunchedEffect(Unit) { store.settings.collect { settings = it } }
 

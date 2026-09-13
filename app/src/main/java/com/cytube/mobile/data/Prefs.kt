@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.cytube.mobile.ui.defaultSyncAccuracy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -50,7 +51,7 @@ class SettingsStore(private val context: Context) {
     val settings: Flow<Settings> = context.dataStore.data.map { p ->
         Settings(
             syncEnabled = p[SYNC] ?: true,
-            syncAccuracy = p[ACCURACY] ?: 2.0,
+            syncAccuracy = p[ACCURACY] ?: defaultSyncAccuracy(context),
             compatMode = CompatMode.parse(p[COMPAT]),
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
