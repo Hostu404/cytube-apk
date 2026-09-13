@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -803,6 +804,14 @@ private fun ExoSurface(
         var stallJob: Job? = null
         val recentStalls = mutableListOf<Pair<Long, Long>>()
         val listener = object : Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                reachedReadyOnce = false
+                stallJob?.cancel()
+                stallJob = null
+                stallStartedAtMs = 0L
+                recentStalls.clear()
+            }
+
             // The immediate snapshot: taken the moment a new item's first
             // frame actually renders, so the glow doesn't sit on the
             // PREVIOUS item's color for the first few seconds of a new one.
@@ -997,13 +1006,11 @@ private fun ExoSurface(
     // ExoPlayer.
     //
     // epoch is also a key, not just media.id/type/resolved: `exo`/`handle`
-    // above are remember(epoch)'d, so a playerEpoch bump with the same
-    // media.id (ChannelViewModel's own quality-adaptation reload, the only
-    // thing that currently bumps it — see its own doc comment) builds a
-    // brand new ExoPlayer/handle pair, but without epoch as a key here this
-    // effect's coroutine wouldn't restart to ever call load()/loadUrl() on
-    // it — the old effect just keeps running, bound to the disposed handle.
-    LaunchedEffect(media.id, media.type, resolved, epoch) {
+    // above are remember(epoch)'d, so a playerEpoch bump builds a brand new
+    // ExoPlayer/handle pair and restarts this effect. qualityIndex is also
+    // included so automatic quality adaptation switches streams directly on
+    // the existing handle without tearing down the player.
+    LaunchedEffect(media.id, media.type, resolved, epoch, qualityIndex) {
         if (resolved != null) {
             handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers)
         } else {

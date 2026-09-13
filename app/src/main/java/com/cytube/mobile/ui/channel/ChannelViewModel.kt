@@ -160,6 +160,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  change), so a fresh item's first stall isn't held back by a cooldown
      *  that belonged to the previous video. */
     private var lastQualityChangeAtMs: Long = 0L
+    private var qualityUpgradeAttempts: Int = 0
     private var settings: Settings = Settings(syncAccuracy = defaultSyncAccuracy(app))
     private var leaderTicker: Job? = null
     private var syncTicker: Job? = null
@@ -488,6 +489,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // playing before has no bearing on this one. See
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
+        qualityUpgradeAttempts = 0
         lastServerTimeSeconds = media.currentTime
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = media.paused
@@ -578,7 +580,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val media = s.media ?: return
         if (media.direct.size <= 1) return
         val now = SystemClock.elapsedRealtime()
-        if (now - lastQualityChangeAtMs < QUALITY_UPGRADE_RECHECK_MS) return
+        val backoffMs = QUALITY_UPGRADE_RECHECK_MS * (1 shl qualityUpgradeAttempts.coerceAtMost(4))
+        if (now - lastQualityChangeAtMs < backoffMs) return
         val next = s.nativeQualityIndex - 1
         lastQualityChangeAtMs = now
         Log.i(TAG, "quality: trying back up to ${media.direct[next].quality}p after a stall-free window")
@@ -592,10 +595,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * lasts long enough to look like a genuine, sustained bandwidth
      * shortfall rather than a brief blip. Steps
      * [ChannelUiState.nativeQualityIndex] down one level (into
-     * MediaFrame.direct, already sorted highest-to-lowest) and reloads at
-     * the same position via a [ChannelUiState.playerEpoch] bump — the same
-     * full ExoPlayer rebuild a manual "player is stuck" recovery would use,
-     * just triggered automatically here. No amount of LoadControl/buffer-size
+     * MediaFrame.direct, already sorted highest-to-lowest).
+     * No amount of LoadControl/buffer-size
      * tuning can fix a SUSTAINED throughput shortfall (a bigger buffer only
      * buys more runway to absorb a short dip) — this is the actual lever for
      * that case. See [maybeUpgradeQuality] for the way back up.
@@ -610,55 +611,25 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (now - lastQualityChangeAtMs < QUALITY_CHANGE_COOLDOWN_MS) return
         if (s.nativeQualityIndex >= media.direct.lastIndex) return   // already at the lowest available
         val next = s.nativeQualityIndex + 1
+        qualityUpgradeAttempts++
         lastQualityChangeAtMs = now
         Log.i(TAG, "quality: stepping down to ${media.direct[next].quality}p after a ${stalledMs}ms stall")
         reloadAtQuality(next)
     }
 
     /**
-     * Shared by [onPlaybackStall] and [maybeUpgradeQuality]: reload the
-     * current item at a new [ChannelUiState.nativeQualityIndex].
-     *
-     * NativePlayerHandle.load() -- which every [ChannelUiState.playerEpoch]
-     * bump re-triggers, via ExoSurface's `remember(epoch)` -- seeds its start
-     * position from `media.currentTime`. That's a one-time snapshot of the
-     * server's own currentTime taken back when this item first loaded (see
-     * onMediaChanged) and never updated since. A quality-adaptation reload
-     * used to bump playerEpoch with that same stale snapshot still sitting in
-     * state.media, which silently rewound playback back to wherever the item
-     * STARTED -- often minutes behind -- on every single quality step, rather
-     * than reloading "at the same position" like the doc above always
-     * claimed. SyncEngine then saw a huge drift the moment the fresh grace
-     * period (see attachPlayer/playerAttachedAtMs) ended and hard-seeked
-     * forward to correct it -- which itself shows up as a fresh rebuffer to
-     * onStall, triggering another downgrade (or undoing an upgrade) and
-     * another rewind right on top of it. That rewind/hard-seek loop, not the
-     * quality step itself, was what made adaptation actively worse than doing
-     * nothing on a large file. Capturing wherever ExoPlayer's position
-     * actually is right now -- instead of trusting the stale snapshot --
-     * before bumping the epoch is what closes that loop.
+     * Shared by [onPlaybackStall] and [maybeUpgradeQuality]: updates
+     * [ChannelUiState.nativeQualityIndex] so PlayerSurface can switch quality
+     * in place on the existing player without tearing down ExoPlayer or bumping
+     * playerEpoch.
      */
     private fun reloadAtQuality(index: Int) {
-        val handle = player
-        val media = _state.value.media ?: return
-        val fallbackSeconds = media.currentTime
-        viewModelScope.launch {
-            val currentPos = runCatching { handle?.currentTimeSeconds() }.getOrNull() ?: 0.0
-            val resumeSeconds = if (currentPos > 0.0) currentPos else fallbackSeconds
-            update { st ->
-                val m = st.media
-                // The item (or the backend) changed underneath us while
-                // suspended above -- vanishingly unlikely given
-                // currentTimeSeconds() is a single main-thread hop, but a
-                // stale quality reload landing on the WRONG item is exactly
-                // the kind of bug this function exists to prevent.
-                if (m == null || m.id != media.id || st.player != MediaTypes.Player.NATIVE) return@update st
-                st.copy(
-                    media = m.copy(currentTime = resumeSeconds),
-                    nativeQualityIndex = index,
-                    playerEpoch = st.playerEpoch + 1
-                )
-            }
+        update { st ->
+            val m = st.media
+            if (m == null || st.player != MediaTypes.Player.NATIVE) return@update st
+            st.copy(
+                nativeQualityIndex = index
+            )
         }
     }
 
@@ -1044,6 +1015,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // A genuinely different item from whatever was loaded before — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
+        qualityUpgradeAttempts = 0
         update {
             it.copy(
                 media = frame,
@@ -1079,6 +1051,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // change from whatever was personally loaded — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
+        qualityUpgradeAttempts = 0
         lastServerTimeSeconds = channelMedia.currentTime
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = channelMedia.paused

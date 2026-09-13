@@ -102,6 +102,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     fun loadUrl(media: MediaFrame, url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
         if (isReleased) return
+        val sameMedia = (mediaId == media.id)
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
@@ -122,7 +123,8 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                exo.setMediaSource(mediaSource, startPositionMs(media))
+                val currentPosMs = if (sameMedia && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
+                exo.setMediaSource(mediaSource, currentPosMs)
             }
             exo.prepare()
             exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
@@ -139,6 +141,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     override fun load(media: MediaFrame, qualityIndex: Int) {
         if (isReleased) return
+        val sameMedia = (mediaId == media.id)
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
@@ -183,7 +186,8 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                exo.setMediaSource(mediaSource, startPositionMs(media))
+                val currentPosMs = if (sameMedia && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
+                exo.setMediaSource(mediaSource, currentPosMs)
             }
             exo.prepare()
             exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
