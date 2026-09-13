@@ -10,6 +10,7 @@ import androidx.media3.datasource.cache.SimpleCache
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.ChannelIndexRepository
 import com.cytube.mobile.net.CyTubeClient
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -55,7 +56,10 @@ object Graph {
     // rather than just being a stutter. Built off `http` so it still shares
     // its connection pool/dispatcher.
     val mediaHttp: OkHttpClient by lazy {
-        http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+        http.newBuilder()
+            .readTimeout(60, TimeUnit.SECONDS)
+            .connectionPool(ConnectionPool(8, 2, TimeUnit.MINUTES))
+            .build()
     }
 
     private var authRepo: AuthRepository? = null

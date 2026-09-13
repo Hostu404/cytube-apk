@@ -2,17 +2,23 @@ package com.cytube.mobile.ui.channel
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.TextureView
 import android.view.ViewGroup
+import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.PermissionRequest
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.annotation.OptIn
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,26 +30,45 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
-import com.cytube.mobile.net.SYNC_HARD_SEEK_THRESHOLD_SECONDS
 import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.YouTubeResolver
+import com.cytube.mobile.webview.BLANK_EMBED_HTML
+import com.cytube.mobile.webview.EMBED_DEFENSIVE_SHIM_JS
+import com.cytube.mobile.webview.EMBED_ENDED_SENTINEL
+import com.cytube.mobile.webview.EMBED_PAGE_ORIGIN
+import com.cytube.mobile.webview.EMBED_STATE_SENTINEL
+import com.cytube.mobile.webview.dailymotionSdkHtml
+import com.cytube.mobile.webview.peertubeSdkHtml
+import com.cytube.mobile.webview.sameSite
+import com.cytube.mobile.webview.streamableSdkHtml
+import com.cytube.mobile.webview.vimeoSdkHtml
+import com.cytube.mobile.webview.youtubeIframeApiHtml
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * Layer 4: player implementations.
@@ -54,71 +79,32 @@ import kotlinx.coroutines.delay
  * YouTube item and a film mid-playlist changes the source and nothing else.
  */
 
-/**
- * Reported document origin (no trailing slash) for the local pages
- * [dailymotionSdkHtml] and [youtubeIframeApiHtml] load via
- * loadDataWithBaseURL — see the yt call site's own comment for the
- * live-tested reasoning behind picking a plain, uninvolved third-party
- * origin here rather than the provider's own domain. example.com is
- * IANA-reserved specifically as a placeholder for exactly this: a real,
- * well-formed https origin guaranteed not to be any real site. No network
- * fetch is ever made against it — loadDataWithBaseURL only uses it as the
- * page's reported origin for cookies/CORS/postMessage/Referer purposes.
- * WebView's own network stack attaches a real Referer matching this origin
- * to every request on its own (confirmed live — see the yt
- * shouldInterceptRequest override's history comment for why an earlier,
- * hand-rolled attempt at forcing this manually was removed rather than
- * kept: it couldn't replay POST bodies and silently broke YouTube's
- * InnerTube API calls once this origin fix made it otherwise unnecessary).
- */
-private const val EMBED_PAGE_ORIGIN = "https://example.com"
-
-/** Logged verbatim (console.log, nothing else on the line) by
- *  youtubeIframeApiHtml/dailymotionSdkHtml the instant their own player
- *  fires an "ended" event — see EmbedSurface's onConsoleMessage override,
- *  which is the only thing that ever reads it. Exists because a WebView
- *  page has no other channel back to this app's onEnded callback; a
- *  literal sentinel string is simpler and harder to false-trigger than
- *  trying to parse the DIAG poll lines already flowing through the same
- *  console hook. */
-private const val EMBED_ENDED_SENTINEL = "__CYTUBE_EMBED_ENDED__"
-
-/** What [dailymotionSdkHtml]/[youtubeIframeApiHtml] load instead of building
- *  their real player page when the media id fails SAFE_EMBED_ID_REGEX — a
- *  plain black page, no script, nothing server-controlled in it at all. Same
- *  visible result (a black surface) as any other embed that never starts,
- *  rather than interpolating an untrusted id unsafely. */
-private const val BLANK_EMBED_HTML =
-    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head>" +
-        "<body style=\"margin:0;background:#000;\"></body></html>"
-
 /** Ceiling ExoPlayer will buffer toward under good network — see ExoSurface's
  *  LoadControl. Media3's own default (DefaultLoadControl.DEFAULT_MAX_BUFFER_MS)
  *  is 50s; raised here to give a large, high-bitrate file more runway to
  *  absorb a bandwidth dip before it ever has to enter STATE_BUFFERING. */
 private const val LOAD_CONTROL_MAX_BUFFER_MS = 90_000
 
-/** Margin kept between [LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS] and
- *  SyncEngine's hard-seek threshold — see that constant's own comment for
- *  why closing this margin to zero (or crossing it) would be a real bug,
- *  not just a tuning nit. */
-private const val REBUFFER_MARGIN_BELOW_HARD_SEEK_SECONDS = 2.0
+/** How much ExoPlayer buffers before initially starting playback. Lowered to
+ *  500ms so channel joins and seeks start playback almost instantly without
+ *  waiting for a large initial buffer to fill. Background loader immediately
+ *  fills toward DEFAULT_MIN_BUFFER_MS / LOAD_CONTROL_MAX_BUFFER_MS once
+ *  playback begins. */
+private const val LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS = 500
 
 /** How much ExoPlayer gathers before resuming playback after an actual
- *  stall — Media3's default is 5s, which was letting a file that stalled
- *  once on a slow connection immediately run dry and stall again a moment
- *  later. Raised so one stall has a real chance to be the last one for a
- *  while — but deliberately kept BELOW SyncEngine's own
- *  SYNC_HARD_SEEK_THRESHOLD_SECONDS (8s), not just an arbitrary bigger
- *  number: a rebuffer wait at or beyond that threshold would mean the
- *  drift built up by the wait itself is already enough to guarantee a hard
- *  seek (a visible jump) the instant playback resumes, on every single
- *  stall, rather than the gentle speed-ramp catch-up SyncEngine otherwise
- *  prefers. Deriving this from the shared constant (rather than a second
- *  hardcoded number) means the two can't quietly drift apart again if
- *  either one changes later. */
-private val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS: Int =
-    ((SYNC_HARD_SEEK_THRESHOLD_SECONDS - REBUFFER_MARGIN_BELOW_HARD_SEEK_SECONDS) * 1000).toInt()
+ *  stall — lowered to 2,000ms so stalls recover quickly instead of pausing
+ *  playback for extended periods. */
+private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 2_000
+
+/** Retain 30s of decoded/buffered media behind the playback position.
+ *  Enables instant backwards seeks and smooth backward SyncEngine speed
+ *  adjustments from buffer memory without re-requesting upstream chunks. */
+private const val LOAD_CONTROL_BACK_BUFFER_MS = 30_000
+
+/** Rolling window for tracking frequent short rebuffers so repeated stalls
+ *  under 1.5s accumulate toward quality adaptation rather than being lost. */
+private const val RECENT_STALL_WINDOW_MS = 10_000L
 
 @Composable
 fun PlayerSurface(
@@ -145,11 +131,6 @@ fun PlayerSurface(
      *  (see ExoSurface's own comment). Has no effect on EMBED/WEB, which
      *  don't own an ExoPlayer to begin with. */
     audioOnly: Boolean = false,
-    /** Fires once, right after EMBED creates its WebView, with a handle the
-     *  caller can use to drive play/pause/seek from outside it — see
-     *  [EmbedPlayerController]'s own doc comment for why this exists at all.
-     *  Never fires for any other player type. */
-    onEmbedController: ((EmbedPlayerController) -> Unit)? = null,
     /** Fires once, the moment this item finishes playing on its own (not a
      *  seek, not a manual stop) — NATIVE/NEWPIPE/GDRIVE via ExoPlayer's own
      *  STATE_ENDED, EMBED via a sentinel console message the yt/dm pages log
@@ -195,7 +176,31 @@ fun PlayerSurface(
                 // Deliberately NOT wired to the backgrounded signal
                 // ExoSurface uses for audioOnly — see EmbedSurface's own
                 // comment on why there's no safe way to reuse it here.
-                EmbedSurface(media.type, media.id, embedSrc, onEmbedController, onEnded)
+                //
+                // key() here is load-bearing, not decorative: EmbedSurface's
+                // AndroidView `factory` only ever runs once for a given
+                // WebView instance, and its own `update` block never
+                // reloads new content into an existing one (see its own
+                // onRelease comment). Without this key, the playlist
+                // advancing from one EMBED-routed item straight to another
+                // (e.g. a Vimeo item to a PeerTube one, or two Vimeo items
+                // back to back — CyTube classifies both as
+                // MediaTypes.Player.EMBED) hit the same
+                // `when` branch twice in a row, so Compose treated it as
+                // "the same call site, just new parameters" and reused the
+                // OLD WebView untouched — the new item's changeMedia was
+                // silently ignored and the previous video just kept
+                // playing forever. Keying on the identity of what should be
+                // on screen forces Compose to actually dispose the old
+                // node and mount a fresh one — the exact same mechanism
+                // that already made switching AWAY from EMBED (to NATIVE/
+                // NEWPIPE/GDRIVE, a different `when` branch) work correctly
+                // by accident. embedSrc is included alongside type/id since
+                // MediaFrame.embedPlayableSrc's own cu/bc/bn fallback can
+                // change independently of those two.
+                key(media.type, media.id, embedSrc) {
+                    EmbedSurface(media, embedSrc, onHandle, onFailed, onEnded)
+                }
             // WEB is handled by the channel screen, which swaps in the whole
             // CyTube page rather than a player.
             else -> Message("${MediaTypes.label(media.type)} needs Compatibility View.")
@@ -204,149 +209,136 @@ fun PlayerSurface(
 }
 
 /**
- * A one-way remote for an [EmbedSurface]'s WebView, handed out once via
- * [PlayerSurface]'s onEmbedController when the WebView is created.
- *
- * Why this exists: EMBED loads a provider's own page, whose own on-screen
- * play/pause/seek bar is normally reachable the same way it is in a real
- * mobile browser tab — tap the video, the provider's chrome appears, use it.
- * In practice that chrome did not reliably show up/respond inside this
- * WebView (confirmed live: tapping the video does nothing), and EMBED items
- * are never synced to the channel's own clock in the first place (see
- * MediaTypes.Player.EMBED's doc comment — no PlayerHandle, SyncEngine leaves
- * them alone entirely), so once a viewer's copy drifts there was previously
- * no way to fix it short of reloading the item. This reaches straight into
- * the page's own <video> element instead of depending on the provider's UI.
- *
- * No state comes back out on purpose — play/pause is a blind toggle and seek
- * is a blind relative offset, not a read-modify-write, since there is no
- * reliable, cheap way to get playback state back out of an arbitrary
- * provider's page (a JavascriptInterface round-trip for something this
- * minor is more moving parts than the feature is worth). That matches what
- * tapping the provider's own controls would do anyway.
- */
-class EmbedPlayerController(private val webView: WebView) {
-    /** window.__cytubeEmbed, when the loaded page defines it (currently only
-     *  [dailymotionSdkHtml]), is that provider's own SDK player instance
-     *  wrapped the same way — needed there because the SDK's actual <video>
-     *  lives inside a same-site-but-cross-origin child iframe DM.player()
-     *  creates, which JS on this top page can't reach directly the way it
-     *  can on every provider that's just a top-level navigation to its own
-     *  page (loadUrl(embedSrc) below — those are the plain
-     *  `document.querySelector('video')` fallback this always tries second). */
-    fun togglePlayPause() {
-        webView.evaluateJavascript(
-            "(function(){" +
-                "if(window.__cytubeEmbed){window.__cytubeEmbed.toggle();return;}" +
-                "var v=document.querySelector('video');" +
-                "if(v){if(v.paused){v.play();}else{v.pause();}}" +
-                "})();",
-            null
-        )
-    }
-
-    /** Negative to rewind. Clamped to 0 on the low end; the page's own
-     *  player clamps the high end against its own duration. */
-    fun seekBy(deltaSeconds: Int) {
-        webView.evaluateJavascript(
-            "(function(){" +
-                "if(window.__cytubeEmbed){window.__cytubeEmbed.seek($deltaSeconds);return;}" +
-                "var v=document.querySelector('video');" +
-                "if(v){v.currentTime=Math.max(0,v.currentTime+($deltaSeconds));}" +
-                "})();",
-            null
-        )
-    }
-}
-
-/**
  * A provider's own embeddable iframe (cu/bc/bn — meta.embed.src), hosted in a
- * WebView that's just the video surface. This is deliberately NOT the whole
- * CyTube page: chat, playlist, users and sync all stay native around it, and
- * the WebView here only ever has to render one already-built embed URL
- * (e.g. an "?embedded=True" view link) rather than run the channel's own
- * page scripts inside a stripped-down WebView.
- *
- * No PlayerHandle comes out of this — there is no ExoPlayer to hand over, so
- * SyncEngine leaves this item alone entirely (ChannelViewModel.onTimeUpdate
- * bails out whenever `player` is null), exactly like Compatibility View does
- * for WEB. The embed manages its own playback pace.
- *
- * No backgrounded-pause hook, unlike ExoSurface's audioOnly. There is no way
- * to tell an arbitrary provider's embedded page to stop decoding video while
- * leaving its audio running — that would mean reaching into whatever player
- * JS the embed itself runs, which varies per provider and isn't something
- * this WebView controls. The only lever this WebView actually has,
- * WebView.onPause()/onResume(), stops everything, audio included — that was
- * tried and reverted: it meant an embed went fully silent the instant the app
- * was backgrounded, a real behavior difference from the native path (which
- * keeps playing audio-only via ExoSurface's track selection instead). So an
- * embed just keeps running, full cost, while backgrounded — correct playback
- * over a battery win this surface can't deliver safely.
+ * WebView that's just the video surface.
  */
 @Composable
 private fun EmbedSurface(
-    type: String,
-    id: String,
+    media: MediaFrame,
     embedSrc: String,
-    onController: ((EmbedPlayerController) -> Unit)? = null,
+    onHandle: (PlayerHandle?) -> Unit,
+    onFailed: ((String) -> Unit)? = null,
+    onEnded: (() -> Unit)? = null
+) {
+    InProcessEmbedSurface(
+        media = media,
+        embedSrc = embedSrc,
+        onHandle = onHandle,
+        onEnded = onEnded
+    )
+}
+
+private class InProcessEmbedPlayerHandle(
+    private var webView: WebView?,
+    initialMedia: MediaFrame
+) : PlayerHandle {
+    override var mediaId: String? = initialMedia.id
+        private set
+    override var mediaType: String? = initialMedia.type
+        private set
+    override var mediaLengthSeconds: Int = initialMedia.seconds
+        private set
+
+    @Volatile
+    override var isPaused: Boolean = initialMedia.paused
+
+    @Volatile
+    override var isBuffering: Boolean = false
+
+    @Volatile
+    var lastCurrentTime: Double = if (initialMedia.currentTime > 0) initialMedia.currentTime else 0.0
+
+    override val isNative: Boolean
+        get() = false
+
+    override fun load(media: MediaFrame, qualityIndex: Int) {
+        mediaId = media.id
+        mediaType = media.type
+        mediaLengthSeconds = media.seconds
+        isPaused = media.paused
+        lastCurrentTime = if (media.currentTime > 0) media.currentTime else 0.0
+    }
+
+    override fun play() {
+        webView?.evaluateJavascript(
+            "if (window.__cytubeEmbed && window.__cytubeEmbed.play) window.__cytubeEmbed.play();",
+            null
+        )
+    }
+
+    override fun pause() {
+        webView?.evaluateJavascript(
+            "if (window.__cytubeEmbed && window.__cytubeEmbed.pause) window.__cytubeEmbed.pause();",
+            null
+        )
+    }
+
+    override fun seekTo(seconds: Double) {
+        webView?.evaluateJavascript(
+            "if (window.__cytubeEmbed && window.__cytubeEmbed.seekTo) window.__cytubeEmbed.seekTo($seconds);",
+            null
+        )
+    }
+
+    override suspend fun currentTimeSeconds(): Double = lastCurrentTime
+
+    override fun setVolume(volume: Float) {
+        webView?.evaluateJavascript(
+            "if (window.__cytubeEmbed && window.__cytubeEmbed.setVolume) window.__cytubeEmbed.setVolume($volume);",
+            null
+        )
+    }
+
+    override fun release() {
+        webView = null
+    }
+}
+
+@Composable
+private fun InProcessEmbedSurface(
+    media: MediaFrame,
+    embedSrc: String,
+    onHandle: (PlayerHandle?) -> Unit,
     onEnded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val currentOnHandle by rememberUpdatedState(onHandle)
+    val currentOnEnded by rememberUpdatedState(onEnded)
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
+    val type = media.type
+    val id = media.id
+    var isReady by remember(media.id, media.type, embedSrc) { mutableStateOf(false) }
+    val alpha by animateFloatAsState(
+        targetValue = if (isReady) 1f else 0f,
+        animationSpec = tween(durationMillis = 200),
+        label = "embedAlpha"
+    )
+
+    var handleRef by remember(media.id, media.type, embedSrc) { mutableStateOf<InProcessEmbedPlayerHandle?>(null) }
+
+    DisposableEffect(media.id, media.type, embedSrc) {
+        onDispose {
+            currentOnHandle(null)
+            handleRef?.release()
+            handleRef = null
+        }
+    }
 
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer { this.alpha = alpha },
         factory = { ctx ->
-            // Same as WebCompatView's own setup — an embed player commonly
-            // needs a cookie for a consent choice, an ad slot, or a session
-            // the site's JS checks before it will start decoding at all.
-            // Without this, WebView's per-app default can still leave
-            // third-party cookies (ad/DRM-license subdomains) blocked even
-            // with first-party cookies on.
-            android.webkit.CookieManager.getInstance().setAcceptCookie(true)
+            CookieManager.getInstance().setAcceptCookie(true)
             WebView(ctx).apply {
-                android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                // A prior theory here was that Compose's AndroidView breaks
-                // Chromium's hardware video hole-punch compositing, and
-                // forced this WebView onto LAYER_TYPE_SOFTWARE to work
-                // around it. That didn't fix the black screen, and
-                // WebCompatView — the same kind of WebView, in the same kind
-                // of Compose host, with none of this — plays other
-                // providers' video (confirmed: a yt live stream) just fine.
-                // So the compositing theory was wrong; the real cause was
-                // specific to how the dm item's URL got loaded (see the
-                // type == "dm" branch below), not a general WebView/Compose
-                // problem, and forcing software rendering here would only
-                // have cost every OTHER embed provider its GPU compositing
-                // for nothing.
-                // The default WebView canvas is white, and it paints that
-                // white before the page's own CSS ever gets a chance to load
-                // — the flash (and often a lingering white margin around
-                // whatever the page doesn't fill) is what was "ruining the
-                // immersion" here. Black is the one background that's always
-                // right for a video surface sitting in an otherwise-black
-                // player area.
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
                 setBackgroundColor(android.graphics.Color.BLACK)
-                // Confirmed live, for the yt/IFrame-API case specifically:
-                // DIAG logging showed document.hasFocus() === false the
-                // entire time this WebView sat on screen, even with
-                // visibilityState === 'visible' and onLine === true —
-                // while state stayed stuck at BUFFERING and
-                // loadedFraction never left 0, for minutes. An embedded
-                // WebView living alongside other focusable views in this
-                // app's own Compose UI (chat's text field, buttons) does
-                // NOT automatically receive Android input focus the way a
-                // real standalone browser tab does — nothing here was ever
-                // asking for it. Chromium throttles background/unfocused
-                // documents' network activity fairly aggressively (exactly
-                // the kind of stall this matches: a live stream's manifest
-                // fetch that never progresses). isFocusable is on by
-                // default for WebView already; isFocusableInTouchMode is
-                // what's actually needed for a touch-driven Android UI to
-                // let this view take focus at all — see requestFocus() in
-                // this AndroidView's update block below, which is what
-                // actually claims it once attached.
+
+                val handle = InProcessEmbedPlayerHandle(this, media)
+                handleRef = handle
+                currentOnHandle(handle)
+
                 isFocusable = true
                 isFocusableInTouchMode = true
                 isVerticalScrollBarEnabled = false
@@ -359,109 +351,35 @@ private fun EmbedSurface(
                     mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     allowFileAccess = false
                     allowContentAccess = false
-                    // A popup/new-window is how some embed players try to
-                    // "open in a new tab" rather than navigate the iframe in
-                    // place; there is nowhere for that to go here, so it's
-                    // refused outright rather than silently doing nothing.
                     javaScriptCanOpenWindowsAutomatically = false
                     setSupportMultipleWindows(false)
-                    // dm-only: live testing showed Dailymotion's page
-                    // serving a Cloudflare Turnstile challenge that never
-                    // resolves here — DIAG logging found <video> elements
-                    // that stay at w=0 h=0 paused=true indefinitely, well
-                    // past the point the same diagnostic script confirmed
-                    // real playback on the yt path. Android WebView's
-                    // default User-Agent carries a "; wv)" token identifying
-                    // it as an embedded WebView rather than a full browser
-                    // tab — a well-documented signal bot-management vendors
-                    // (Cloudflare included) treat as suspicious even though
-                    // the underlying engine is identical to Chrome itself.
-                    // CyTube's real web client (player/dailymotion.coffee)
-                    // never carries this marker because it only ever runs
-                    // inside an actual browser tab. Stripping the token
-                    // makes this WebView's fingerprint match what a genuine
-                    // browser — and CyTube's own client — presents; nothing
-                    // else about the request changes. Scoped to dm only so
-                    // the already-confirmed-working yt path (and every other
-                    // provider) keeps the exact User-Agent it had.
                     if (type == "dm") {
                         userAgentString = userAgentString.replace("; wv", "")
                     }
+                }
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    WebViewCompat.addDocumentStartJavaScript(
+                        this,
+                        EMBED_DEFENSIVE_SHIM_JS,
+                        setOf("*")
+                    )
                 }
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(
                         view: WebView,
                         request: WebResourceRequest
                     ): Boolean {
-                        // Only a top-level navigation away from the embed's
-                        // own site counts as "this isn't the video anymore" —
-                        // a subframe the embed itself creates (its own
-                        // player chrome, an ad/asset host, etc.) needs to load
-                        // in place same as in WebCompatView.
-                        //
-                        // "own site" is the registrable domain, not an exact
-                        // host match: an embed page's own consent/session/geo
-                        // redirect commonly lands on a sibling subdomain
-                        // (dailymotion.com's embed flow was observed doing
-                        // exactly this) before settling back on the player.
-                        // An exact-host check treated that hop as "left the
-                        // video" and kicked the whole thing out to an
-                        // external browser mid-load — see sameSite's own doc
-                        // comment for what this does and doesn't relax.
                         if (!request.isForMainFrame) return false
                         if (sameSite(request.url.host, embedHost)) return false
                         openInBrowser(context, request.url.toString())
                         return true
                     }
 
-                    // HISTORY, in order, because the real cause turned out
-                    // to be the opposite of what this override was built
-                    // for — worth keeping straight rather than rewriting
-                    // away: (1) a <meta name="referrer"> tag alone did NOT
-                    // stop error 152-4. (2) This override was added to force
-                    // a real Referer at the network layer instead
-                    // (forceYouTubeReferer, matching a real-world fix for
-                    // the identical error code) — tested alone, ALSO made
-                    // no difference at all, same error, same instant
-                    // timing. (3) Separately, youtubeIframeApiHtml's own
-                    // page origin was changed from youtube.com itself to a
-                    // neutral third party (example.com) — THAT was the
-                    // actual fix for 152, confirmed live (the error
-                    // vanished the run this shipped). So by the time 152
-                    // was gone, this override had already been shown
-                    // useless on its own and was just still sitting here.
-                    // (4) With 152 gone, playback stalled at BUFFERING
-                    // forever instead — and logging every request's host
-                    // (kept below) caught the actual cause: this override
-                    // was forcing EVERY request to (www.)youtube.com
-                    // through forceYouTubeReferer's HttpURLConnection,
-                    // which never read request.method and defaults to GET
-                    // — silently downgrading YouTube's InnerTube API POSTs
-                    // (youtubei/v1/player, the exact call that returns the
-                    // live stream's actual playability/manifest data) into
-                    // GETs, which the server correctly rejected with 405.
-                    // That 405 on /player is why the video never had
-                    // anything to load: loadedFraction stayed at 0 because
-                    // the player never got a working player response at
-                    // all. WebResourceRequest has no API to read the
-                    // original POST body either, so there's no way to
-                    // proxy these faithfully even by fixing the method.
-                    // The origin fix in (3) means WebView's own normal
-                    // network stack already sends a real, consistent
-                    // Referer matching this page's genuine origin for
-                    // every request — GET and POST alike — without any of
-                    // this. So the fix is to stop intercepting entirely:
-                    // this override now only logs (still valuable — it's
-                    // what caught the 405) and never touches the request.
                     override fun shouldInterceptRequest(
                         view: WebView,
                         request: WebResourceRequest
                     ): android.webkit.WebResourceResponse? {
                         if (type == "yt") {
-                            // host only, never the full URL — these are real
-                            // requests to YouTube's InnerTube API and can
-                            // carry session/auth query parameters that don't
-                            // belong in Logcat.
                             Log.d(
                                 "CyTubePlayer",
                                 "yt embed request method=${request.method} host=${request.url.host}"
@@ -470,48 +388,89 @@ private fun EmbedSurface(
                         return null
                     }
 
-                    // setBackgroundColor above only covers the WebView's own
-                    // canvas — it does nothing about a white background the
-                    // page's own CSS paints on top of it, which is exactly
-                    // what most bare video-embed pages do (a plain <body>
-                    // with no background rule at all defaults to white).
-                    // Forcing it dark here, once the page has actually
-                    // loaded, is the only way to reach that.
                     override fun onPageFinished(view: WebView, url: String?) {
+                        isReady = true
                         view.evaluateJavascript(
                             "document.documentElement.style.background='#000';" +
                                 "document.body.style.background='#000';" +
                                 "document.body.style.margin='0';",
                             null
                         )
-                        // The <video>-element poller that used to run here
-                        // (setInterval logging "DIAG videos=...") was scoped
-                        // to the original dm black-screen investigation and
-                        // was meant to come out with the rest of that
-                        // diagnostic instrumentation — it stayed behind by
-                        // mistake, running unconditionally on every embed
-                        // type including yt/vi, where it never found anything
-                        // (the real <video> element for an SDK-embedded
-                        // provider lives inside a cross-origin iframe this
-                        // top page's DOM can't see, so it always logged
-                        // videos=0 there — pure noise, not a real check).
-                        // Removed outright rather than re-scoped to dm only:
-                        // the dm bug it was built for is fixed and confirmed
-                        // working (see dailymotionSdkHtml).
+                        val curTime = if (media.currentTime > 0) media.currentTime else 0.0
+                        val isPaused = media.paused
+                        val genericWatcherJs = """
+                            (function() {
+                              if (window.__cytubeGenericWatched) return;
+                              window.__cytubeGenericWatched = true;
+                              function setup(v) {
+                                if (!v || v.__cytubeBound) return;
+                                v.__cytubeBound = true;
+                                if ($curTime > 0 && v.currentTime < 1) {
+                                  try { v.currentTime = $curTime; } catch(e){}
+                                }
+                                if ($isPaused) {
+                                  try { v.pause(); } catch(e){}
+                                }
+                                var report = function() {
+                                  try {
+                                    console.log('$EMBED_STATE_SENTINEL' + JSON.stringify({
+                                      paused: v.paused,
+                                      currentTime: v.currentTime || 0.0,
+                                      buffering: v.readyState < 3 && !v.paused
+                                    }));
+                                  } catch(e){}
+                                };
+                                v.addEventListener('play', report);
+                                v.addEventListener('playing', report);
+                                v.addEventListener('pause', report);
+                                v.addEventListener('timeupdate', report);
+                                v.addEventListener('waiting', report);
+                                v.addEventListener('seeking', report);
+                                v.addEventListener('seeked', report);
+                                v.addEventListener('ended', function() {
+                                  try { console.log('$EMBED_ENDED_SENTINEL'); } catch(e){}
+                                });
+                                if (!window.__cytubeEmbed) {
+                                  window.__cytubeEmbed = {
+                                    play: function() { var el = document.querySelector('video'); if (el) el.play().catch(function(){}); },
+                                    pause: function() { var el = document.querySelector('video'); if (el) el.pause(); },
+                                    seekTo: function(s) { var el = document.querySelector('video'); if (el) el.currentTime = s; },
+                                    setVolume: function(vol) { var el = document.querySelector('video'); if (el) el.volume = Math.max(0, Math.min(1, vol)); }
+                                  };
+                                }
+                                report();
+                                setInterval(report, 1000);
+                              }
+                              var vid = document.querySelector('video');
+                              if (vid) setup(vid);
+                              else {
+                                var obs = new MutationObserver(function() {
+                                  var el = document.querySelector('video');
+                                  if (el) {
+                                    setup(el);
+                                    try { obs.disconnect(); } catch(e){}
+                                  }
+                                });
+                                try {
+                                  obs.observe(document.documentElement || document.body, { childList: true, subtree: true });
+                                } catch(e){}
+                              }
+                            })();
+                        """.trimIndent()
+                        view.evaluateJavascript(genericWatcherJs, null)
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        view?.let {
+                            (it.parent as? ViewGroup)?.removeView(it)
+                            it.destroy()
+                        }
+                        return true
                     }
                 }
-                // With no WebChromeClient at all, WebView's default behavior
-                // is to silently DENY every onPermissionRequest — including
-                // RESOURCE_PROTECTED_MEDIA_ID, the handshake EME/Widevine-
-                // gated playback needs before it will decode a single frame.
-                // Most ad-supported commercial video platforms (Dailymotion
-                // included) gate at least some of their delivery through
-                // this, so without it the embed loaded and ran, but played
-                // fully black (and silent) with no visible error anywhere —
-                // the request was refused before decoding ever started, not
-                // a rendering problem. Grants ONLY protected-media, same as
-                // a normal browser tab does automatically for this specific
-                // permission; camera/mic/MIDI stay denied, same as before.
                 webChromeClient = object : WebChromeClient() {
                     override fun onPermissionRequest(request: PermissionRequest) {
                         val grantable = request.resources.filter {
@@ -524,735 +483,105 @@ private fun EmbedSurface(
                         }
                     }
 
-                    // The EME grant above turned out not to be the whole
-                    // story — still black after it. Rather than guess again,
-                    // this surfaces whatever the embed page's own JS is
-                    // actually saying (a codec/CORS/license error, a blocked
-                    // request, etc.) in Logcat under the same tag ExoSurface
-                    // already logs to, so the real cause can be read instead
-                    // of guessed a third time.
-                    override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
+                        val msg = consoleMessage.message()
+                        if (msg == EMBED_ENDED_SENTINEL) {
+                            currentOnEnded?.invoke()
+                            return true
+                        }
+                        if (msg.startsWith(EMBED_STATE_SENTINEL)) {
+                            val jsonStr = msg.removePrefix(EMBED_STATE_SENTINEL)
+                            try {
+                                val json = JSONObject(jsonStr)
+                                val paused = json.optBoolean("paused", true)
+                                val currentTime = json.optDouble("currentTime", 0.0)
+                                val buffering = json.optBoolean("buffering", false)
+                                handle.isPaused = paused
+                                handle.lastCurrentTime = currentTime
+                                handle.isBuffering = buffering
+                            } catch (ignored: Throwable) {}
+                            isReady = true
+                            return true
+                        }
+
                         Log.w(
                             "CyTubePlayer",
                             "embed console [${consoleMessage.messageLevel()}] " +
                                 "${consoleMessage.message()} " +
                                 "(${consoleMessage.sourceId()}:${consoleMessage.lineNumber()})"
                         )
-                        // Both youtubeIframeApiHtml and dailymotionSdkHtml log
-                        // this exact string (see EMBED_ENDED_SENTINEL) the
-                        // moment their own page thinks this item finished —
-                        // there is no other channel out of an arbitrary
-                        // provider's WebView page back to Kotlin here, so
-                        // piggybacking on the same console hook DIAG logging
-                        // already uses is the cheapest way to get a real
-                        // signal out. The dm side of this is unverified by
-                        // live testing (see dailymotionSdkHtml's own comment)
-                        // — kept deliberately simple (a literal string match,
-                        // not a prefix/parse) so a page that never sends it
-                        // just never auto-advances, rather than risking a
-                        // false match on something else.
-                        if (consoleMessage.message() == EMBED_ENDED_SENTINEL) {
-                            onEnded?.invoke()
-                        }
                         return true
                     }
                 }
+                val initTime = if (media.currentTime > 0) media.currentTime else 0.0
+                val initPaused = media.paused
                 if (type == "dm") {
-                    // Loading dailymotion.com/embed/video/ID directly (what
-                    // knownEmbedUrl builds and every other provider here
-                    // just loadUrl()s) played fully black with audio, and
-                    // forcing software rendering above didn't change that —
-                    // so the cause isn't a general "WebView can't composite
-                    // video" problem after all (WebCompatView, the SAME kind
-                    // of WebView, plays other providers' video fine). It's
-                    // specific to that bare iframe URL. CyTube's own client
-                    // never loads it either: its dailymotion.coffee player
-                    // loads Dailymotion's own Player SDK script
-                    // (api.dmcdn.net/all.js) and calls DM.player() against an
-                    // element on ITS page, rather than navigating to
-                    // Dailymotion's embed URL as a top-level page the way
-                    // knownEmbedUrl's link does. This does the same thing:
-                    // a tiny local page that pulls in the real SDK and lets
-                    // it build the player itself. baseUrl was originally set
-                    // to a real dailymotion.com origin on the theory that
-                    // the SDK needed to see "the same origin it would on
-                    // Dailymotion's own site" — but that theory turned out
-                    // to be backwards, confirmed on the yt case just below
-                    // (identical pattern, identical player family): CyTube's
-                    // real client's own page origin is never youtube.com or
-                    // dailymotion.com, it's whatever domain the CyTube
-                    // instance itself runs on — a normal THIRD-PARTY site
-                    // embedding the provider's video, the ordinary case
-                    // every provider's SDK is built to expect. Claiming to
-                    // BE the provider's own domain is the unusual,
-                    // effectively self-embedding case, and is what actually
-                    // explains yt's error 152 surviving two independent
-                    // Referer fixes untouched (see the yt branch's own
-                    // comment for the live-tested evidence). example.com
-                    // (no network fetch happens against it — loadDataWithBaseURL
-                    // just uses it as the page's reported origin for
-                    // cookies/CORS/postMessage checks) is IANA-reserved
-                    // specifically as a placeholder for exactly this: a
-                    // real, well-formed https origin that is definitely not
-                    // any real site, still non-null/non-about:blank (which
-                    // video platforms commonly refuse to serve to at all).
                     loadDataWithBaseURL(
                         "$EMBED_PAGE_ORIGIN/",
-                        dailymotionSdkHtml(id),
+                        dailymotionSdkHtml(id, initTime, initPaused),
                         "text/html",
                         "utf-8",
                         null
                     )
                 } else if (type == "yt") {
-                    // Same root cause as dm, different symptom: navigating a
-                    // WebView straight to youtube.com/embed/ID — what
-                    // knownEmbedUrl builds, and what this loaded before —
-                    // gets YouTube's own player to show "Error 153" instead
-                    // of the video, a well-documented YouTube-in-WebView
-                    // failure. It shows up here on any yt item that reaches
-                    // EMBED at all: a live stream routed here up front (see
-                    // MediaTypes.playerFor's isLive branch — NEWPIPE can't
-                    // reliably play live), or a VOD item NEWPIPE started and
-                    // then failed on (reportPlaybackFailure's silent
-                    // fallback). CyTube's own client never navigates to that
-                    // URL either — it loads the real YouTube IFrame Player
-                    // API (youtube.com/iframe_api) and constructs a
-                    // YT.Player against an element on ITS OWN page, the same
-                    // shape of fix as dailymotionSdkHtml just above.
-                    //
-                    // baseUrl was originally set to https://www.youtube.com/
-                    // itself, on the theory that the SDK needed a real
-                    // https origin rather than null/about:blank. That got
-                    // past "Error 153" (confirmed: www-widgetapi.js loaded
-                    // and ran), but every rebuild after that hit a NEW,
-                    // different failure — onError UNKNOWN(152) firing in
-                    // the exact same millisecond as onReady, every single
-                    // time — and it survived two independent, targeted
-                    // fixes for the most likely explanation (a missing
-                    // Referer header): a <meta name="referrer"> tag, then a
-                    // shouldInterceptRequest network-layer override forcing
-                    // a real Referer HTTP header onto every request to
-                    // (www.)youtube.com directly. Neither changed the
-                    // outcome at all — same code, same instant timing, on
-                    // every rebuild. A real network-dependent check
-                    // failing would be expected to show SOME variance
-                    // (network latency, or at least a different code once
-                    // the actual header changed); getting the identical
-                    // result regardless points away from Referer entirely
-                    // and toward something evaluated locally and
-                    // synchronously the moment playVideo() runs.
-                    //
-                    // The one thing that WAS still true in every failing
-                    // attempt: this page's own reported origin was
-                    // youtube.com itself — CyTube's real client never does
-                    // this (its page origin is always the CyTube instance's
-                    // own domain, a normal third-party site embedding
-                    // someone else's video, which is the ordinary case
-                    // every provider's player is built to expect). A page
-                    // that claims to BE youtube.com while asking youtube.com
-                    // to embed one of its own videos is an unusual,
-                    // effectively self-embedding configuration, and is the
-                    // remaining, untested variable. example.com (no network
-                    // fetch happens against it — loadDataWithBaseURL just
-                    // uses it as the page's reported origin for
-                    // cookies/CORS/postMessage checks) is IANA-reserved
-                    // specifically as a placeholder for exactly this: a
-                    // real, well-formed https origin that is definitely not
-                    // any real site — still a genuine https origin, not
-                    // null/about:blank, same reasoning as before, just no
-                    // longer self-referential.
                     loadDataWithBaseURL(
                         "$EMBED_PAGE_ORIGIN/",
-                        youtubeIframeApiHtml(id),
+                        youtubeIframeApiHtml(id, initTime, initPaused),
                         "text/html",
                         "utf-8",
                         null
                     )
                 } else if (type == "vi") {
-                    // Same family of problem as yt/dm, checked the same way
-                    // before assuming it: CyTube's real client
-                    // (player/vimeo.coffee, calzoneman/sync) never navigates
-                    // a page straight to player.vimeo.com/video/ID — what
-                    // knownEmbedUrl builds and what every other provider
-                    // here just loadUrl()s. It builds an <iframe> pointing
-                    // there as an element on ITS OWN page, loads Vimeo's own
-                    // Player SDK (player.vimeo.com/api/player.js), and
-                    // wraps that iframe with `new Vimeo.Player(iframeEl)`
-                    // for control/events — the same shape as the dm/yt
-                    // fixes just above (SDK loaded on our own page, real
-                    // https origin, provider's script builds/controls the
-                    // actual player) rather than a bare top-level
-                    // navigation. Applying the same fix preemptively here
-                    // rather than waiting to hit the same failure live,
-                    // since the pattern (and its fix) is now proven twice.
                     loadDataWithBaseURL(
                         "$EMBED_PAGE_ORIGIN/",
-                        vimeoSdkHtml(id),
+                        vimeoSdkHtml(id, initTime, initPaused),
+                        "text/html",
+                        "utf-8",
+                        null
+                    )
+                } else if (type == "pt") {
+                    val ptEmbedUrl = MediaTypes.knownEmbedUrl("pt", id)
+                    loadDataWithBaseURL(
+                        "$EMBED_PAGE_ORIGIN/",
+                        peertubeSdkHtml(ptEmbedUrl, initTime, initPaused),
+                        "text/html",
+                        "utf-8",
+                        null
+                    )
+                } else if (type == "sb") {
+                    loadDataWithBaseURL(
+                        "$EMBED_PAGE_ORIGIN/",
+                        streamableSdkHtml(id, initTime, initPaused),
                         "text/html",
                         "utf-8",
                         null
                     )
                 } else if (embedSrc.startsWith("https://", ignoreCase = true)) {
-                    // embedSrc here is meta.embed.src, scuri, or
-                    // MediaTypes.knownEmbedUrl's own output — all either
-                    // server-supplied strings (the first two) or built from
-                    // one (the third, now itself validated for the "pt"
-                    // case — see MediaTypes.knownEmbedUrl). None of that is
-                    // a trusted constant, and this is the one WebView load
-                    // call in the app that would otherwise hand an
-                    // unvalidated scheme straight to loadUrl(): a doctored
-                    // media frame could set embedSrc to a javascript:/
-                    // file:/content: URI and have it navigated as the
-                    // "video". mixedContentMode/allowFileAccess/
-                    // allowContentAccess above already narrow a lot of that,
-                    // but this is the actual scheme gate — only a real
-                    // https page is ever loaded here; anything else falls
-                    // through to the same blank surface a failed embed
-                    // already shows. This is also the path Twitch (tw/tv/tc)
-                    // would hit if it ever reached EMBED — it never does
-                    // (MediaTypes.playerFor has no branch for it, and
-                    // knownEmbedUrl returns null for those types on purpose,
-                    // see that function's own comment), so Twitch always
-                    // falls through to the whole-page WEB offer instead,
-                    // where the real CyTube page's own origin — not a faked
-                    // one — is what its parent-domain check actually needs.
-                    // Untouched here; not yet live-tested this session.
                     loadUrl(embedSrc)
                 } else {
                     Log.w("CyTubePlayer", "refusing to load embed with untrusted scheme: type=$type")
                     loadDataWithBaseURL("$EMBED_PAGE_ORIGIN/", BLANK_EMBED_HTML, "text/html", "utf-8", null)
                 }
-                // factory runs exactly once per WebView (see the load
-                // branch just above — there's nothing in `update` below
-                // that would ever reload a second item into this same
-                // instance), so this fires once with a controller that
-                // stays valid for this item's whole time on screen.
-                onController?.invoke(EmbedPlayerController(this))
             }
         },
-        // requestFocus() here rather than in `factory`: this view is not
-        // guaranteed to be attached to the window yet when factory returns
-        // (Compose attaches it as part of composing this call), and
-        // View.requestFocus() on an unattached view can silently no-op.
-        // `update` runs after Compose has actually placed it, and again on
-        // any later recomposition — calling this repeatedly is harmless,
-        // and it's the only reliable point to claim focus from. See the
-        // isFocusableInTouchMode comment above for why this is needed at
-        // all: without it the yt IFrame API case sat with
-        // document.hasFocus() permanently false, which is what this fixes.
-        update = { it.requestFocus() }
+        update = { it.requestFocus() },
+        onRelease = {
+            currentOnHandle(null)
+            handleRef?.release()
+            handleRef = null
+            (it.parent as? ViewGroup)?.removeView(it)
+            it.stopLoading()
+            it.webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean = true
+            }
+            it.webChromeClient = null
+            it.removeAllViews()
+            it.destroy()
+        }
     )
-}
-
-/**
- * CyTube's own media id for a dm/yt item is expected to be a provider's bare
- * video id — alphanumeric, occasionally with `-`/`_` (YouTube's 11-character
- * ids use both). [dailymotionSdkHtml]/[youtubeIframeApiHtml] splice it
- * straight into a `<script>` block as a JS string literal, so this is the
- * actual security boundary for that: a value that matches gets interpolated
- * (still backslash/quote-escaped below, defense in depth); a value that
- * doesn't is refused outright rather than patched up, because quote/
- * backslash escaping alone does not stop every injection shape here — an id
- * containing the literal substring "</script>" closes the surrounding
- * `<script>` tag regardless of how the JS-string content inside it was
- * escaped, letting a doctored media id (a malicious or compromised channel's
- * changeMedia frame — this is server data, not a value the app generated)
- * inject arbitrary HTML/JS into a page this WebView then loads and runs.
- */
-private val SAFE_EMBED_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
-
-/**
- * A minimal page that does exactly what CyTube's own dailymotion.coffee
- * player does: load Dailymotion's Player SDK (api.dmcdn.net/all.js) and let
- * it build the player against a plain element, rather than treating
- * Dailymotion's embed URL as an ordinary page to navigate to. See the
- * EmbedSurface call site for why this exists — the ordinary knownEmbedUrl
- * iframe played fully black.
- *
- * [id] is CyTube's media id for a dm item, which is always Dailymotion's own
- * bare video id (see get-info.js/mediaquery upstream — nothing else is ever
- * packed into it the way, say, PeerTube's id has a domain baked in) — but it
- * is still server data, not a trusted constant, so it's validated against
- * [SAFE_EMBED_ID_REGEX] before it ever reaches the template; an id that
- * fails renders a blank black page instead (same visible failure mode as any
- * other embed that never starts) rather than being interpolated unsafely.
- */
-private fun dailymotionSdkHtml(id: String): String {
-    if (!SAFE_EMBED_ID_REGEX.matches(id)) return BLANK_EMBED_HTML
-    // Not a full JS-string escaper, but no longer the only line of defense
-    // either — id is already known to match SAFE_EMBED_ID_REGEX (no quotes,
-    // backslashes, angle brackets, or anything else meaningful to HTML/JS
-    // can reach here), so this is pure defense in depth against this regex
-    // itself ever being loosened carelessly later.
-    val safeId = id.replace("\\", "\\\\").replace("'", "\\'")
-    return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-        <!-- Confirmed on the yt page (see youtubeIframeApiHtml's own
-             comment) that WebView doesn't reliably attach a Referer to
-             requests a loadDataWithBaseURL page makes, which broke
-             YouTube's embed verification outright. Applied here too,
-             defensively: Dailymotion's own Player SDK does similar
-             origin/referer-based checks before it'll serve a stream, and
-             this is a one-line, harmless-if-unneeded fix rather than
-             waiting to hit the identical failure mode on this provider
-             separately. -->
-        <meta name="referrer" content="strict-origin">
-        <style>
-          /* height:100% (still used below by the player SDK's own width/
-             height options, which is fine — that's a different, later
-             resolution against #dmplayer's now-fixed size) cascading through
-             html -> body -> #dmplayer collapsed to a real height in a normal
-             browser tab, but reports 0 in this WebView (confirmed for the
-             identical pattern in youtubeIframeApiHtml — see that function's
-             own comment for the diagnostic evidence). position:fixed with
-             all four insets anchors directly to the WebView's own layout
-             viewport instead of depending on that percentage chain
-             resolving, which is the standard fix for this exact WebView
-             quirk. */
-          html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-          html, body, #dmplayer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; }
-        </style>
-        </head>
-        <body>
-        <div id="dmplayer"></div>
-        <script>
-          window.dmAsyncInit = function() {
-            // The previous fix (calling .create() on DM.player()'s return
-            // value) was itself still a guess dressed up as a lead, and
-            // there was a better answer sitting in CyTube's own real web
-            // client the whole time: player/dailymotion.coffee (github.com/
-            // calzoneman/sync, the actual proven-working CyTube source, not
-            // an assumption about it) calls DM.Player.create(element,
-            // options) — capital "Player", a static factory method — never
-            // DM.player(element, options) lowercase. This code called the
-            // lowercase form from the start, which live testing proved
-            // returns a limited controller (create/destroy/play/pause/
-            // seek/etc, no paused/currentTime/duration properties, no
-            // .on()) rather than the real player DM.Player.create() hands
-            // back. That explains every symptom seen so far in one shot —
-            // wrong entry point the whole time, not a Promise, not a
-            // missing create() call on the wrong object. Matching the real
-            // client's call exactly now instead of guessing at this
-            // object's own internals further.
-            var el = document.getElementById('dmplayer');
-            // Same defensive check the real client makes before creating
-            // (DM.Player._INSTANCES[@element.id] / DM.Player.destroy): a
-            // stale instance already bound to this element id would
-            // otherwise make create() below misbehave. Unlikely to ever
-            // fire here (this WebView loads fresh HTML per changeMedia,
-            // never reuses a #dmplayer element across loads) but matching
-            // the real client exactly costs nothing.
-            if (window.DM && DM.Player && DM.Player._INSTANCES && DM.Player._INSTANCES[el.id]) {
-              DM.Player.destroy(el.id);
-            }
-            var player = DM.Player.create(el, {
-              video: '$safeId',
-              width: '100%',
-              height: '100%',
-              params: {
-                autoplay: 1,
-                logo: 0,
-                'queue-enable': false,
-                'sharing-enable': false,
-                'ui-logo': false,
-                'ui-start-screen-info': false
-              }
-            });
-            // The real client guards every play()/pause()/seek()/load()
-            // call with "if @dm and @dmReady", only ever set true inside
-            // the 'apiready' handler — calling these before that fires is
-            // apparently unsafe on this SDK. Mirrored here as `ready`.
-            var ready = false;
-            var lastKnownPaused;
-            // See EmbedPlayerController's own comment on why this exists —
-            // the SDK's real <video> is inside a child iframe this top
-            // page's JS can't reach directly, so the controller goes
-            // through the SDK's own player object instead.
-            window.__cytubeEmbed = {
-              toggle: function() {
-                if (!player || !ready) return;
-                if (lastKnownPaused) { player.play(); } else { player.pause(); }
-              },
-              seek: function(delta) {
-                if (!player || !ready) return;
-                var t = (typeof player.currentTime === 'number' ? player.currentTime : 0) + delta;
-                player.seek(Math.max(0, t));
-              }
-            };
-            if (player && player.addEventListener) {
-              player.addEventListener('apiready', function() { ready = true; });
-              player.addEventListener('pause', function() { lastKnownPaused = true; });
-              player.addEventListener('playing', function() { lastKnownPaused = false; });
-              // CyTube's own client advances to the next video specifically
-              // on 'ended' — 'video_end' has a different, narrower meaning
-              // there (briefly marks the player not-ready, unrelated to
-              // auto-advance). Matching that real distinction rather than
-              // firing the sentinel on every end-ish name blind.
-              player.addEventListener('ended', function() {
-                console.log('$EMBED_ENDED_SENTINEL');
-              });
-            }
-          };
-        </script>
-        <script src="https://api.dmcdn.net/all.js"></script>
-        </body>
-        </html>
-    """.trimIndent()
-}
-
-/**
- * Same idea as [dailymotionSdkHtml], for the other provider confirmed to
- * need it: navigating straight to youtube.com/embed/ID (what this loaded
- * before, same as knownEmbedUrl still hands out for the fallback-offer
- * dialog's own link) gets YouTube's player to show "Error 153" instead of
- * playing, inside this WebView specifically. This instead loads the real
- * YouTube IFrame Player API (youtube.com/iframe_api) and builds a YT.Player
- * against an element on this page — the same shape of embed CyTube's own
- * client uses, and a real https origin (see the loadDataWithBaseURL call
- * site) rather than null/about:blank, which is the specific part of this
- * that actually avoids the 153.
- */
-private fun youtubeIframeApiHtml(id: String): String {
-    // See dailymotionSdkHtml's own comment: the real boundary is the
-    // SAFE_EMBED_ID_REGEX gate, not the quote/backslash escaping below,
-    // which alone can't stop a "</script>"-shaped id from breaking out of
-    // this page's own <script> block.
-    if (!SAFE_EMBED_ID_REGEX.matches(id)) return BLANK_EMBED_HTML
-    val safeId = id.replace("\\", "\\\\").replace("'", "\\'")
-    return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-        <!-- The 0-height fix below cleared the black screen's own cause
-             (confirmed: iframeRect/bodySize went from ...x0 to real
-             non-zero values), but onError UNKNOWN(152) still fires right
-             after playVideo() and state never leaves UNSTARTED — a
-             DIFFERENT, separate problem: YouTube error 152-4 ("Video not
-             available") is documented as a Referer-header verification
-             failure, specifically reported for WebView content loaded from
-             a local source (file:///, data:, or — this app's case —
-             loadDataWithBaseURL) rather than a genuine network navigation:
-             the browser doesn't reliably attach a Referer to subresource
-             requests a locally-loaded page makes, even with a baseUrl set,
-             and YouTube's embed endpoint rejects the request when it can't
-             read one. Forcing a referrer policy explicitly, rather than
-             relying on WebView's default behavior for local content, is
-             the documented fix. -->
-        <meta name="referrer" content="strict-origin">
-        <style>
-          /* Root cause of the black screen, confirmed live: DIAG poll logged
-             iframeRect=<realwidth>x0 and bodySize=<realwidth>x0 — width
-             resolved correctly but the html -> body -> #ytplayer
-             height:100% cascade collapsed to 0 in this WebView (a
-             documented WebView quirk: percentage height depends on the
-             ancestor chain resolving to a real size, which can silently
-             fail here even when width resolves fine). A YT.Player built
-             against a genuinely 0-height container is invisible even while
-             "playing". This was NOT what was also causing onError
-             UNKNOWN(152) — see the referrer meta tag above for that,
-             a separate cause. position:fixed with all four insets anchors
-             directly to the WebView's own layout viewport instead of
-             depending on that percentage chain, which is the standard
-             fix. */
-          html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-          html, body, #ytplayer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; }
-        </style>
-        </head>
-        <body>
-        <div id="ytplayer"></div>
-        <script>
-          var tag = document.createElement('script');
-          tag.src = 'https://www.youtube.com/iframe_api';
-          document.getElementsByTagName('script')[0].parentNode.insertBefore(tag, document.getElementsByTagName('script')[0]);
-
-          // "Error 153" is gone (confirmed: www-widgetapi.js loads and runs
-          // now), but the screen went black instead — and the ORIGINAL
-          // top-level DIAG poller (document.querySelectorAll('video'), still
-          // running via onPageFinished in EmbedSurface) is blind to this:
-          // the API's real <video> lives inside a cross-origin child iframe
-          // this page's own JS can't reach (same reasoning as
-          // EmbedPlayerController's window.__cytubeEmbed comment), so it
-          // will report videos=0 regardless of whether the nested player is
-          // actually working. This logs the PLAYER OBJECT's own view of
-          // reality instead — state transitions, IFrame API error codes (the
-          // real 2/5/100/101/150 codes this API defines, distinct from the
-          // "Error 153" that only showed up when loading the bare embed URL
-          // directly), current time, and the iframe element's own rendered
-          // size — all piped through console.log to the same onConsoleMessage
-          // hook already wired to Logcat (tag CyTubePlayer). A state that
-          // reaches PLAYING (1) with currentTime advancing and a non-zero
-          // iframe rect would mean this is purely a compositing bug specific
-          // to a video inside a nested cross-origin iframe reached this way;
-          // a state stuck at UNSTARTED/CUED/BUFFERING, or an onError firing,
-          // points back at the player itself never actually starting.
-          function stateName(code) {
-            switch (code) {
-              case -1: return 'UNSTARTED';
-              case 0: return 'ENDED';
-              case 1: return 'PLAYING';
-              case 2: return 'PAUSED';
-              case 3: return 'BUFFERING';
-              case 5: return 'CUED';
-              default: return 'UNKNOWN(' + code + ')';
-            }
-          }
-          function errorName(code) {
-            switch (code) {
-              case 2: return 'INVALID_PARAM';
-              case 5: return 'HTML5_ERROR';
-              case 100: return 'NOT_FOUND';
-              case 101: return 'NOT_EMBEDDABLE';
-              case 150: return 'NOT_EMBEDDABLE';
-              default: return 'UNKNOWN(' + code + ')';
-            }
-          }
-
-          // onError 152 is GONE now (confirmed live, after switching this
-          // page's own origin away from youtube.com itself — see the
-          // loadDataWithBaseURL call site's comment) — progress, but state
-          // is now stuck at BUFFERING indefinitely instead, t never leaving
-          // 0.0, with no error at all. That's a different shape of problem:
-          // not a rejection, a stall. YouTube's IFrame Player is documented
-          // to observe the Page Visibility API and throttle/defer actual
-          // loading while it believes its host document isn't visible or
-          // focused — a real risk for a WebView hosted inside a Compose
-          // AndroidView, which this app has no independent confirmation
-          // reports itself as visible/focused the same way a normal
-          // Activity-owned WebView would. Logging these directly, plus a
-          // catch-all for any JS error/promise rejection the widget's own
-          // internals might be swallowing silently, rather than guessing
-          // this is the cause without checking.
-          window.addEventListener('error', function(e) {
-            console.log('DIAG window error: ' + (e.message || e) + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
-          });
-          window.addEventListener('unhandledrejection', function(e) {
-            console.log('DIAG unhandledrejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
-          });
-          document.addEventListener('visibilitychange', function() {
-            console.log('DIAG visibilitychange -> ' + document.visibilityState);
-          });
-
-          var player = null;
-          window.onYouTubeIframeAPIReady = function() {
-            console.log('DIAG onYouTubeIframeAPIReady fired, creating player for $safeId' +
-              ' visibilityState=' + document.visibilityState +
-              ' hidden=' + document.hidden +
-              ' hasFocus=' + document.hasFocus() +
-              ' onLine=' + navigator.onLine);
-            // No error, state just never left BUFFERING and currentTime
-            // never left 0.0 — confirmed live, for minutes at a time, after
-            // the previous (origin) fix cleared error 152 entirely. That
-            // silent-stall shape, specifically for a PROGRAMMATIC
-            // playVideo() call with no real user tap behind it, is a
-            // documented browser autoplay-policy behavior: unmuted
-            // autoplay is broadly blocked (Chrome/Chromium policy, which
-            // WebView's engine shares), and the IFrame API doesn't surface
-            // that block as onError — it just never progresses, which is
-            // exactly this. mediaPlaybackRequiresUserGesture=false on this
-            // WebView's own settings governs content THIS page directly
-            // controls; it does not reach into policy decisions the
-            // separate, cross-origin YouTube iframe's own engine makes for
-            // itself. Starting muted is the standard, documented way
-            // around this — then unmuting the instant onStateChange
-            // actually confirms PLAYING, rather than staying muted forever.
-            var unmuted = false;
-            player = new YT.Player('ytplayer', {
-              videoId: '$safeId',
-              width: '100%',
-              height: '100%',
-              playerVars: {
-                autoplay: 1,
-                mute: 1,
-                playsinline: 1,
-                modestbranding: 1,
-                rel: 0
-              },
-              events: {
-                onReady: function(e) {
-                  console.log('DIAG onReady, calling mute()+playVideo()');
-                  e.target.mute();
-                  e.target.playVideo();
-                },
-                onStateChange: function(e) {
-                  console.log('DIAG onStateChange ' + stateName(e.data));
-                  if (e.data === 1 && !unmuted) {
-                    unmuted = true;
-                    console.log('DIAG state reached PLAYING, calling unMute()');
-                    e.target.unMute();
-                  }
-                  // ENDED (0) is the IFrame API's own documented state for
-                  // "this video finished" — confirmed present in the same
-                  // stateName() mapping already live-tested against real
-                  // onStateChange events above (UNSTARTED/PLAYING/etc all
-                  // showed up correctly during the error-152 debugging).
-                  // See EMBED_ENDED_SENTINEL's own comment for why this is a
-                  // plain console.log rather than any richer channel back to
-                  // Kotlin.
-                  if (e.data === 0) {
-                    console.log('$EMBED_ENDED_SENTINEL');
-                  }
-                },
-                onError: function(e) {
-                  console.log('DIAG onError ' + errorName(e.data));
-                }
-              }
-            });
-            // See EmbedPlayerController's own comment on why this exists —
-            // same reason as dm's window.__cytubeEmbed: the real <video> is
-            // inside a child iframe this top page's JS can't reach, so the
-            // controller goes through the API's own player object instead.
-            window.__cytubeEmbed = {
-              toggle: function() {
-                if (!player || !player.getPlayerState) return;
-                if (player.getPlayerState() === 1) { player.pauseVideo(); } else { player.playVideo(); }
-              },
-              seek: function(delta) {
-                if (!player || !player.getCurrentTime) return;
-                player.seekTo(Math.max(0, player.getCurrentTime() + delta), true);
-              }
-            };
-            setInterval(function() {
-              if (!player || !player.getPlayerState) return;
-              var iframe = player.getIframe ? player.getIframe() : null;
-              var rect = iframe ? iframe.getBoundingClientRect() : null;
-              var t = player.getCurrentTime ? player.getCurrentTime() : -1;
-              var loaded = player.getVideoLoadedFraction ? player.getVideoLoadedFraction() : -1;
-              console.log(
-                'DIAG poll state=' + stateName(player.getPlayerState()) +
-                ' t=' + (typeof t === 'number' ? t.toFixed(1) : t) +
-                ' loadedFraction=' + loaded +
-                ' iframeRect=' + (rect ? (rect.width + 'x' + rect.height) : 'null') +
-                ' bodySize=' + document.body.clientWidth + 'x' + document.body.clientHeight +
-                ' visibilityState=' + document.visibilityState +
-                ' hasFocus=' + document.hasFocus() +
-                ' onLine=' + navigator.onLine
-              );
-            }, 2000);
-          };
-        </script>
-        </body>
-        </html>
-    """.trimIndent()
-}
-
-/**
- * Same idea as [dailymotionSdkHtml]/[youtubeIframeApiHtml], for Vimeo.
- * CyTube's real client (player/vimeo.coffee, calzoneman/sync) builds an
- * `<iframe src="https://player.vimeo.com/video/ID">` as an element on ITS
- * OWN page — never navigates a page straight to that URL, which is what
- * knownEmbedUrl builds and every other provider without a dedicated
- * function here just loadUrl()s — then loads Vimeo's own Player SDK
- * (player.vimeo.com/api/player.js) and wraps that iframe with
- * `new Vimeo.Player(iframeEl)` for control and events. Built preemptively
- * from that real source rather than waiting to hit the same class of
- * failure live and diagnosing it from scratch the way yt/dm needed.
- */
-private fun vimeoSdkHtml(id: String): String {
-    if (!SAFE_EMBED_ID_REGEX.matches(id)) return BLANK_EMBED_HTML
-    val safeId = id.replace("\\", "\\\\").replace("'", "\\'")
-    return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-        <!-- Same reasoning as dailymotionSdkHtml/youtubeIframeApiHtml's own
-             referrer tags: WebView doesn't reliably attach a Referer to
-             requests a loadDataWithBaseURL page makes, and Vimeo's player
-             does its own origin/referer-based checks before serving a
-             stream — a harmless-if-unneeded precaution against hitting the
-             identical failure mode a third time. -->
-        <meta name="referrer" content="strict-origin">
-        <style>
-          /* Diagnosed with real measurements (not guessed): #vimeowrap fills
-             the viewport correctly via position:fixed/inset-0, but the
-             iframe itself was rendering at its untouched browser-default box
-             regardless of the external #vimeoplayer{...} stylesheet rule —
-             that rule was never actually being applied to it. Inline style=""
-             directly on the <iframe> (below) is the highest-precedence fix
-             and matches every real Vimeo-published responsive embed's own
-             convention. Still doesn't fill the frame correctly on-device as
-             of 1.6.9.0 — tracked as a known limitation (see README) rather
-             than guessed at further; left in place since it's harmless and
-             is the closest match to Vimeo's own reference embed code. -->
-          html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
-          html, body, #vimeowrap { position: fixed; top: 0; right: 0; bottom: 0; left: 0; }
-        </style>
-        </head>
-        <body>
-        <div id="vimeowrap">
-        <iframe id="vimeoplayer" src="https://player.vimeo.com/video/$safeId" allow="autoplay; fullscreen" allowfullscreen style="display:block;width:100%;height:100%;border:0;margin:0;padding:0;"></iframe>
-        </div>
-        <script src="https://player.vimeo.com/api/player.js"></script>
-        <script>
-          var player = new Vimeo.Player(document.getElementById('vimeoplayer'));
-          var lastKnownPaused;
-          // See EmbedPlayerController's own comment on why this exists —
-          // Vimeo's real <video> is inside that iframe's own document,
-          // which this page's JS can't reach directly (cross-origin, same
-          // reasoning as the yt/dm cases), so the controller goes through
-          // the SDK's own player object instead. play()/pause()/
-          // setCurrentTime() all return Promises on this SDK — the .catch
-          // handlers below match CyTube's own real client exactly (see
-          // vimeo.coffee), which swallows/logs rejections rather than
-          // letting them go unhandled.
-          window.__cytubeEmbed = {
-            toggle: function() {
-              if (!player) return;
-              if (lastKnownPaused) {
-                player.play().catch(function(e) { console.log('vimeo play() rejected: ' + (e && e.message ? e.message : e)); });
-              } else {
-                player.pause().catch(function(e) { console.log('vimeo pause() rejected: ' + (e && e.message ? e.message : e)); });
-              }
-            },
-            seek: function(delta) {
-              if (!player) return;
-              player.getCurrentTime().then(function(t) {
-                player.setCurrentTime(Math.max(0, t + delta)).catch(function() {});
-              }).catch(function() {});
-            }
-          };
-          player.on('pause', function() { lastKnownPaused = true; });
-          player.on('play', function() { lastKnownPaused = false; });
-          // CyTube's own client only advances to the next item on 'ended'
-          // (see vimeo.coffee's own play-next-on-CLIENT.leader call) —
-          // matching that exactly rather than guessing at other event names.
-          player.on('ended', function() { console.log('$EMBED_ENDED_SENTINEL'); });
-          // CyTube's own client calls play() itself right after
-          // construction rather than relying on an autoplay query param —
-          // matched here exactly rather than assumed to be equivalent.
-          player.play().catch(function(e) { console.log('vimeo play() rejected: ' + (e && e.message ? e.message : e)); });
-        </script>
-        </body>
-        </html>
-    """.trimIndent()
-}
-
-/**
- * True when [navigatingHost] is the same site as [embedHost] — an exact
- * match, or a subdomain of the same registrable domain (last two labels:
- * "geo.dailymotion.com" and "www.dailymotion.com" are the same site;
- * "dailymotion.com.evil.example" is not, since its last two labels are
- * "evil.example"). Deliberately simple rather than a full public-suffix-list
- * lookup: every provider knownEmbedUrl/embedSrc actually hands this a plain
- * .com/.jp/.tv-style host, never a multi-part TLD like .co.uk, so "last two
- * labels" is exact for the domains this app actually deals with rather than
- * an approximation carrying edge cases nothing here will ever hit.
- */
-private fun sameSite(navigatingHost: String?, embedHost: String?): Boolean {
-    if (navigatingHost == null || embedHost == null) return false
-    if (navigatingHost.equals(embedHost, ignoreCase = true)) return true
-    fun registrableDomain(host: String): String {
-        val labels = host.split(".")
-        return if (labels.size >= 2) labels.takeLast(2).joinToString(".") else host
-    }
-    return registrableDomain(navigatingHost).equals(registrableDomain(embedHost), ignoreCase = true)
 }
 
 /** Resolves a YouTube id to a stream URL, then hands over to the normal player. */
@@ -1379,24 +708,34 @@ private fun ExoSurface(
 ) {
     val context = LocalContext.current
     val exo = remember(epoch) {
-        ExoPlayer.Builder(context)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .forceEnableMediaCodecAsynchronousQueueing()
+            .setEnableDecoderFallback(true)
+
+        val audioAttributes = AudioAttributes.Builder()
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+
+        ExoPlayer.Builder(context, renderersFactory)
+            .setAudioAttributes(audioAttributes, true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .setSeekParameters(SeekParameters.CLOSEST_SYNC)
             .setLoadControl(
-                // Steady-state target (min) and startup latency
-                // (bufferForPlayback) are left at Media3's own defaults —
-                // this only raises the ceiling ExoPlayer will build toward
-                // under good network (more runway to absorb a large file's
-                // bandwidth dips before it ever has to stall) and how much
-                // it demands before resuming after an actual stall, so one
-                // stall doesn't immediately repeat. Doesn't change anything
-                // for a short/small file — it finishes buffering long
-                // before either number is reached either way.
+                // Steady-state target (min) is left at Media3's default (50s);
+                // bufferForPlayback is tuned down to 500ms to start playback
+                // faster on network-resolved items (Google Drive, NewPipe);
+                // max buffer is raised to give more runway on high-bitrate files;
+                // rebuffer target demands enough to resume safely after a stall.
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
                         DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
                         LOAD_CONTROL_MAX_BUFFER_MS,
-                        DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                        LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS,
                         LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
                     )
+                    .setBackBuffer(LOAD_CONTROL_BACK_BUFFER_MS, true)
+                    .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
             )
             .build()
@@ -1412,9 +751,11 @@ private fun ExoSurface(
     // trackSelectionParameters is cheap to rebuild and safe to set mid-playback;
     // ExoPlayer just reselects tracks on the next internal cycle.
     LaunchedEffect(exo, audioOnly) {
-        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
-            .build()
+        runCatching {
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
+                .build()
+        }
     }
 
     // Exposes this ExoPlayer to the system: a Fire TV remote's dedicated
@@ -1452,6 +793,7 @@ private fun ExoSurface(
     // current view is at the moment a frame renders.
     val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
 
+    val scope = rememberCoroutineScope()
     DisposableEffect(exo) {
         // Scoped to this exo/listener's own lifetime (a fresh pair per
         // epoch — see the LaunchedEffect above), so these reset naturally
@@ -1459,6 +801,8 @@ private fun ExoSurface(
         // needing an explicit reset of their own.
         var reachedReadyOnce = false
         var stallStartedAtMs = 0L
+        var stallJob: Job? = null
+        val recentStalls = mutableListOf<Pair<Long, Long>>()
         val listener = object : Player.Listener {
             // The immediate snapshot: taken the moment a new item's first
             // frame actually renders, so the glow doesn't sit on the
@@ -1525,28 +869,62 @@ private fun ExoSurface(
             // shouldn't be treated as one. A stall that happens AFTER this
             // item already played at least one frame is the real signal:
             // playback that had already started has since run its buffer dry.
+            //
+            // If buffering exceeds threshold or repeated rebuffers accumulate
+            // across RECENT_STALL_WINDOW_MS, stallJob or STATE_READY fires
+            // onStall so ChannelViewModel can step down quality without
+            // waiting for the slow, high-bitrate stream to finish gathering
+            // seconds of data that will just be discarded on reload.
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
                 when (playbackState) {
                     Player.STATE_READY -> {
+                        stallJob?.cancel()
+                        stallJob = null
                         if (!reachedReadyOnce) {
                             reachedReadyOnce = true
                         } else if (stallStartedAtMs != 0L) {
-                            val stalledMs = android.os.SystemClock.elapsedRealtime() - stallStartedAtMs
+                            val now = SystemClock.elapsedRealtime()
+                            val stalledMs = now - stallStartedAtMs
                             stallStartedAtMs = 0L
-                            onStall?.invoke(stalledMs)
+                            recentStalls.add(now to stalledMs)
+                            recentStalls.removeAll { now - it.first > RECENT_STALL_WINDOW_MS }
+                            val totalStalledMs = recentStalls.sumOf { it.second }
+                            if (totalStalledMs >= 1_500L || recentStalls.size >= 2) {
+                                recentStalls.clear()
+                                onStall?.invoke(totalStalledMs.coerceAtLeast(1_500L))
+                            }
                         }
                     }
                     Player.STATE_BUFFERING -> {
-                        if (reachedReadyOnce && stallStartedAtMs == 0L) {
-                            stallStartedAtMs = android.os.SystemClock.elapsedRealtime()
+                        if (stallStartedAtMs == 0L) {
+                            val start = SystemClock.elapsedRealtime()
+                            stallStartedAtMs = start
+                            stallJob?.cancel()
+                            stallJob = scope.launch {
+                                recentStalls.removeAll { start - it.first > RECENT_STALL_WINDOW_MS }
+                                val priorStalled = recentStalls.sumOf { it.second }
+                                val threshold = if (reachedReadyOnce) {
+                                    (1_500L - priorStalled).coerceIn(300L, 1_500L)
+                                } else {
+                                    3_500L
+                                }
+                                delay(threshold)
+                                if (stallStartedAtMs == start) {
+                                    recentStalls.clear()
+                                    onStall?.invoke(1_500L)
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-        exo.addListener(listener)
-        onDispose { exo.removeListener(listener) }
+        runCatching { exo.addListener(listener) }
+        onDispose {
+            stallJob?.cancel()
+            runCatching { exo.removeListener(listener) }
+        }
     }
 
     // Keeps the ambient glow actually tracking the video instead of freezing
@@ -1560,26 +938,37 @@ private fun ExoSurface(
     // and a paused screen is exactly the "avoid processing when paused"
     // case — and it costs nothing at all when onFrameSnapshot is null
     // (ambient glow can't be shown for this surface, e.g. EMBED/WEB).
-    LaunchedEffect(exo) {
+    LaunchedEffect(exo, onFrameSnapshot) {
         val snapshot = onFrameSnapshot ?: return@LaunchedEffect
-        while (true) {
-            delay(AMBIENT_RESAMPLE_INTERVAL_MS)
-            if (!exo.isPlaying) continue
-            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
-            runCatching { textureView.getBitmap(AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE) }
-                .getOrNull()
-                ?.let(snapshot)
+        var sampleBitmap: Bitmap? = null
+        try {
+            while (true) {
+                delay(AMBIENT_RESAMPLE_INTERVAL_MS)
+                val isPlaying = runCatching { exo.isPlaying }.getOrDefault(false)
+                if (!isPlaying) continue
+                val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
+                if (sampleBitmap == null || sampleBitmap.isRecycled) {
+                    sampleBitmap = Bitmap.createBitmap(
+                        AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
+                    )
+                }
+                val bitmap = runCatching { textureView.getBitmap(sampleBitmap) }.getOrNull() ?: continue
+                snapshot(bitmap)
+            }
+        } finally {
+            sampleBitmap?.recycle()
         }
     }
 
     DisposableEffect(handle) {
         onDispose {
+            playerViewRef[0] = null
             onHandle(null)
             // Session first, then the player it wraps — releasing in the
             // other order would leave the session momentarily pointing at
             // an already-released player.
-            mediaSession.release()
-            exo.release()
+            runCatching { mediaSession.release() }
+            handle.release()
         }
     }
 
@@ -1651,7 +1040,16 @@ private fun ExoSurface(
                 )
             }.also { playerViewRef[0] = it }
         },
-        update = { it.useController = showControls }
+        update = { view ->
+            if (view.player !== exo) {
+                view.player = exo
+            }
+            view.useController = showControls
+            playerViewRef[0] = view
+        },
+        onRelease = { view ->
+            view.player = null
+        }
     )
 }
 
@@ -1686,16 +1084,17 @@ private fun nextMediaSessionId(): Int = mediaSessionIdCounter.getAndIncrement()
 internal fun averageColor(bitmap: Bitmap): Color {
     val w = bitmap.width
     val h = bitmap.height
-    if (w <= 0 || h <= 0) return Color.Black
-    val pixels = IntArray(w * h)
+    val n = w * h
+    if (w <= 0 || h <= 0 || n <= 0) return Color.Black
+    val pixels = IntArray(n)
     bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
     var r = 0L; var g = 0L; var b = 0L
-    for (p in pixels) {
+    for (i in 0 until n) {
+        val p = pixels[i]
         r += (p shr 16) and 0xFF
         g += (p shr 8) and 0xFF
         b += p and 0xFF
     }
-    val n = pixels.size
     return Color(red = (r / n) / 255f, green = (g / n) / 255f, blue = (b / n) / 255f)
 }
 

@@ -41,11 +41,16 @@ data class HomeUiState(
 class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settings = SettingsStore(app)
-    private val _state = MutableStateFlow(HomeUiState())
+    private val _state = MutableStateFlow(
+        HomeUiState(
+            channels = Graph.channelIndex.cachedChannels,
+            loading = Graph.channelIndex.cachedChannels.isEmpty()
+        )
+    )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
 
     init {
-        refresh()
+        // refresh() intentionally not called here -- see HomeScreen's LaunchedEffect(Unit).
         // Each of these runs on its own coroutine, so a plain
         // `_state.value = _state.value.copy(...)` risks a lost update if two
         // land back to back (read-modify-write is not atomic across a
@@ -61,7 +66,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh(force: Boolean = false) {
         viewModelScope.launch {
-            _state.update { it.copy(loading = true) }
+            if (_state.value.channels.isEmpty()) {
+                _state.update { it.copy(loading = true) }
+            }
             val list = runCatching { Graph.channelIndex.publicChannels(force) }.getOrDefault(emptyList())
             _state.update {
                 it.copy(

@@ -131,7 +131,6 @@ Known limitations include:
 * Picture-in-picture support is still being improved.
 * Certain media providers have their own restrictions.
 * TV-specific behaviour and compatibility are still being refined.
-* Vimeo's embedded player currently plays with audio but doesn't fill its frame correctly (video renders undersized) — being tracked, use Compatibility View as a workaround in the meantime if it bothers you.
 
 The application is actively being developed, so behaviour may change between releases.
 

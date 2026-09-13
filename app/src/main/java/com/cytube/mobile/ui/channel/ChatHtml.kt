@@ -1,5 +1,6 @@
 package com.cytube.mobile.ui.channel
 
+import android.util.LruCache
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
@@ -95,6 +96,19 @@ object ChatHtml {
         val spoilerCount: Int = 0
     )
 
+    private data class RenderCacheKey(
+        val raw: String,
+        val greentext: Boolean,
+        val linkColorVal: ULong,
+        val showImages: Boolean,
+        val emotesHash: Int,
+        val dropImages: Boolean,
+        val revealSpoilers: Boolean,
+        val revealedSpoilers: Set<Int>
+    )
+
+    private val renderCache = LruCache<RenderCacheKey, Rendered>(300)
+
     fun render(
         raw: String,
         greentext: Boolean,
@@ -127,6 +141,20 @@ object ChatHtml {
          */
         revealedSpoilers: Set<Int> = emptySet()
     ): Rendered {
+        val cacheKey = RenderCacheKey(
+            raw = raw,
+            greentext = greentext,
+            linkColorVal = linkColor.value,
+            showImages = showImages,
+            emotesHash = System.identityHashCode(emotes),
+            dropImages = dropImages,
+            revealSpoilers = revealSpoilers,
+            revealedSpoilers = revealedSpoilers
+        )
+        synchronized(renderCache) {
+            renderCache.get(cacheKey)?.let { return it }
+        }
+
         // Emote substitution happens here, exactly as the official client does
         // it on receipt (util.js:1508). Needed whenever emotes will be shown OR
         // dropped (dropImages still has to recognise them as emotes first);
@@ -143,7 +171,11 @@ object ChatHtml {
                 appendLinkified(html, linkColor)
                 if (greentext) pop()
             }
-            return Rendered(plain, emptyList())
+            val result = Rendered(plain, emptyList())
+            synchronized(renderCache) {
+                renderCache.put(cacheKey, result)
+            }
+            return result
         }
 
         val images = mutableListOf<String>()
@@ -157,7 +189,11 @@ object ChatHtml {
             walk(body, this, ctx)
             if (greentext) pop()
         }
-        return Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.spoilerIndex)
+        val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.spoilerIndex)
+        synchronized(renderCache) {
+            renderCache.put(cacheKey, result)
+        }
+        return result
     }
 
     /** See [Rendered.soloEmoteCount]: nonzero only when every bit of visible

@@ -18,6 +18,12 @@ interface PlayerHandle {
      *  loop on large, high-bitrate files. */
     val isBuffering: Boolean
 
+    /** True when the player is actively playing with a valid playback position. */
+    val isPlaying: Boolean get() = !isPaused && !isBuffering
+
+    /** True for native ExoPlayer backend, false for WebView embed controllers. */
+    val isNative: Boolean get() = true
+
     /** [qualityIndex] indexes into media.direct (already sorted
      *  highest-to-lowest — see DirectSource.parse), for the NATIVE backend's
      *  own lightweight quality auto-adaptation (see ChannelViewModel's
@@ -29,9 +35,6 @@ interface PlayerHandle {
     fun play()
     fun pause()
     fun seekTo(seconds: Double)
-    /** Nudges playback rate to close small drift without a hard seek (and
-     *  therefore without forcing a rebuffer). 1.0 is normal speed. */
-    fun setSpeed(speed: Float)
     suspend fun currentTimeSeconds(): Double
     fun setVolume(volume: Float)
     fun release()

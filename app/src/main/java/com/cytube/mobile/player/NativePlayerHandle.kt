@@ -12,6 +12,8 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaFrame
 import kotlinx.coroutines.Dispatchers
@@ -30,12 +32,24 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     // reach the process-wide singleton cache (Graph.mediaCache).
     private val appContext = context.applicationContext
 
+    @Volatile private var isReleased = false
+
     override var mediaId: String? = null; private set
     override var mediaType: String? = null; private set
     override var mediaLengthSeconds: Int = 0; private set
 
-    override val isPaused: Boolean get() = !exo.playWhenReady
-    override val isBuffering: Boolean get() = exo.playbackState == Player.STATE_BUFFERING
+    override val isPaused: Boolean
+        get() = if (isReleased) true else runCatching { !exo.playWhenReady }.getOrDefault(true)
+
+    override val isBuffering: Boolean
+        get() = if (isReleased) false else runCatching {
+            exo.playbackState == Player.STATE_BUFFERING || exo.playbackState == Player.STATE_IDLE || (exo.isLoading && !exo.isPlaying)
+        }.getOrDefault(false)
+
+    override val isPlaying: Boolean
+        get() = if (isReleased) false else runCatching { exo.isPlaying }.getOrDefault(false)
+
+    override val isNative: Boolean get() = true
 
     /**
      * Every byte fetched for playback — whether the raw source straight off
@@ -57,6 +71,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     }
 
+    private fun createMediaSourceFactory(headers: Map<String, String> = emptyMap()): DefaultMediaSourceFactory {
+        val extractorsFactory = DefaultExtractorsFactory()
+            .setConstantBitrateSeekingEnabled(true)
+            .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES)
+        return DefaultMediaSourceFactory(cachedDataSourceFactory(headers), extractorsFactory)
+    }
+
     /**
      * Play a URL resolved elsewhere (NewPipe, GoogleDriveResolver), keeping the
      * frame's metadata.
@@ -73,29 +94,34 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * the stream itself needs (e.g. Referer) on top of that.
      */
     fun loadUrl(media: MediaFrame, url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
+        if (isReleased) return
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
         Log.i("CyTubePlayer", "load type=${media.type} via=resolved mime=$mimeType headers=${headers.keys}")
-        val item = MediaItem.Builder().setUri(url)
-            .apply { if (!mimeType.isNullOrBlank()) setMimeType(mimeType) }
-            // Read by the MediaSession (see PlayerSurface's ExoSurface) to
-            // populate whatever system Now Playing UI is showing — without
-            // this, a hardware remote's transport overlay or Alexa's own
-            // response just has a blank title to show for what's playing.
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
-            .build()
-        val mediaSource = DefaultMediaSourceFactory(cachedDataSourceFactory(headers)).createMediaSource(item)
-        exo.setPlaybackSpeed(1f)
-        // Seed the real starting position instead of always beginning at 0 —
-        // see the comment on startPositionMs() below for why this matters.
-        if (media.isLivestream) {
-            exo.setMediaSource(mediaSource)
-        } else {
-            exo.setMediaSource(mediaSource, startPositionMs(media))
+        runCatching {
+            val item = MediaItem.Builder().setUri(url)
+                .apply { if (!mimeType.isNullOrBlank()) setMimeType(mimeType) }
+                // Read by the MediaSession (see PlayerSurface's ExoSurface) to
+                // populate whatever system Now Playing UI is showing — without
+                // this, a hardware remote's transport overlay or Alexa's own
+                // response just has a blank title to show for what's playing.
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
+                .build()
+            val mediaSource = createMediaSourceFactory(headers).createMediaSource(item)
+            exo.setPlaybackSpeed(1f)
+            // Seed the real starting position instead of always beginning at 0 —
+            // see the comment on startPositionMs() below for why this matters.
+            if (media.isLivestream) {
+                exo.setMediaSource(mediaSource)
+            } else {
+                exo.setMediaSource(mediaSource, startPositionMs(media))
+            }
+            exo.prepare()
+            exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
+        }.onFailure { e ->
+            Log.w("CyTubePlayer", "loadUrl failed in NativePlayerHandle: ${e.message}", e)
         }
-        exo.prepare()
-        exo.playWhenReady = true
     }
 
     /**
@@ -105,6 +131,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * channel offer Compatibility View rather than crashing.
      */
     override fun load(media: MediaFrame, qualityIndex: Int) {
+        if (isReleased) return
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
@@ -118,40 +145,44 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         // more quality options) or a media with no [direct] entries at all
         // both fall back to bestSource, same as if this parameter never
         // existed.
-        val source = media.direct.getOrNull(qualityIndex) ?: media.bestSource
-        val metadata = MediaMetadata.Builder().setTitle(media.title).build()
-        val item = if (source != null) {
-            MediaItem.Builder()
-                .setUri(source.link)
-                .apply { if (source.contentType.isNotBlank()) setMimeType(source.contentType) }
-                .setMediaMetadata(metadata)
-                .build()
-        } else {
-            MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
+        runCatching {
+            val source = media.direct.getOrNull(qualityIndex) ?: media.bestSource
+            val metadata = MediaMetadata.Builder().setTitle(media.title).build()
+            val item = if (source != null) {
+                MediaItem.Builder()
+                    .setUri(source.link)
+                    .apply { if (source.contentType.isNotBlank()) setMimeType(source.contentType) }
+                    .setMediaMetadata(metadata)
+                    .build()
+            } else {
+                MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
+            }
+            Log.i("CyTubePlayer", "native load type=${media.type} " +
+                "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex")
+            exo.setPlaybackSpeed(1f)
+            // Routed through the same cached, longer-timeout data source as
+            // loadUrl() below (see cachedDataSourceFactory) rather than
+            // exo.setMediaItem()'s default HTTP stack — this is the main native
+            // playback path (a straight "fi" file off CyTube's own playlist),
+            // exactly where a large file's buffering has to hold up.
+            val mediaSource = createMediaSourceFactory().createMediaSource(item)
+            // Seed the real starting position instead of always beginning at 0 —
+            // see the comment on startPositionMs() below for why this matters.
+            // Livestreams are excluded: their currentTime is CyTube's own
+            // elapsed-seconds counter for the item, not a position within
+            // ExoPlayer's live window, so seeking to it can land outside the
+            // window entirely. Leaving them on the no-arg overload keeps the
+            // prior (correct) behaviour of joining at the live edge.
+            if (media.isLivestream) {
+                exo.setMediaSource(mediaSource)
+            } else {
+                exo.setMediaSource(mediaSource, startPositionMs(media))
+            }
+            exo.prepare()
+            exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
+        }.onFailure { e ->
+            Log.w("CyTubePlayer", "load failed in NativePlayerHandle: ${e.message}", e)
         }
-        Log.i("CyTubePlayer", "native load type=${media.type} " +
-            "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex")
-        exo.setPlaybackSpeed(1f)
-        // Routed through the same cached, longer-timeout data source as
-        // loadUrl() below (see cachedDataSourceFactory) rather than
-        // exo.setMediaItem()'s default HTTP stack — this is the main native
-        // playback path (a straight "fi" file off CyTube's own playlist),
-        // exactly where a large file's buffering has to hold up.
-        val mediaSource = DefaultMediaSourceFactory(cachedDataSourceFactory()).createMediaSource(item)
-        // Seed the real starting position instead of always beginning at 0 —
-        // see the comment on startPositionMs() below for why this matters.
-        // Livestreams are excluded: their currentTime is CyTube's own
-        // elapsed-seconds counter for the item, not a position within
-        // ExoPlayer's live window, so seeking to it can land outside the
-        // window entirely. Leaving them on the no-arg overload keeps the
-        // prior (correct) behaviour of joining at the live edge.
-        if (media.isLivestream) {
-            exo.setMediaSource(mediaSource)
-        } else {
-            exo.setMediaSource(mediaSource, startPositionMs(media))
-        }
-        exo.prepare()
-        exo.playWhenReady = true
     }
 
     /**
@@ -171,28 +202,49 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * hasn't started yet) rather than a real position, so that still starts
      * at 0 like before.
      */
-    private fun startPositionMs(media: MediaFrame): Long =
-        (media.currentTime * 1000).toLong().coerceAtLeast(0)
-
-    override fun play() { exo.playWhenReady = true }
-    override fun pause() { exo.playWhenReady = false }
-
-    /** A hard seek always starts back at normal speed — otherwise a leftover
-     *  ramp from a previous drift correction would silently keep playback
-     *  fast/slow after the jump that was supposed to fix it. */
-    override fun seekTo(seconds: Double) {
-        exo.setPlaybackSpeed(1f)
-        exo.seekTo((seconds * 1000).toLong().coerceAtLeast(0))
+    private fun startPositionMs(media: MediaFrame): Long {
+        val cur = media.currentTime
+        if (cur.isNaN() || cur.isInfinite() || cur <= 0.0) return 0L
+        val length = media.seconds
+        val clamped = if (length > 0 && cur > length) length.toDouble() else cur
+        return (clamped * 1000).toLong().coerceAtLeast(0L)
     }
 
-    override fun setSpeed(speed: Float) {
-        exo.setPlaybackSpeed(speed.coerceIn(0.85f, 1.15f))
+    override fun play() {
+        if (isReleased) return
+        runCatching { exo.playWhenReady = true }
+    }
+
+    override fun pause() {
+        if (isReleased) return
+        runCatching { exo.playWhenReady = false }
+    }
+
+    override fun seekTo(seconds: Double) {
+        if (isReleased) return
+        if (seconds.isNaN() || seconds.isInfinite()) return
+        runCatching {
+            val length = mediaLengthSeconds
+            val targetSeconds = if (length > 0 && seconds > length) length.toDouble() else seconds
+            val targetMs = (targetSeconds * 1000).toLong().coerceAtLeast(0L)
+            exo.seekTo(targetMs)
+        }
     }
 
     override suspend fun currentTimeSeconds(): Double = withContext(Dispatchers.Main) {
-        exo.currentPosition / 1000.0
+        if (isReleased) 0.0
+        else runCatching { (exo.currentPosition / 1000.0).coerceAtLeast(0.0) }.getOrDefault(0.0)
     }
 
-    override fun setVolume(volume: Float) { exo.volume = volume.coerceIn(0f, 1f) }
-    override fun release() { exo.release() }
+    override fun setVolume(volume: Float) {
+        if (isReleased) return
+        if (volume.isNaN() || volume.isInfinite()) return
+        runCatching { exo.volume = volume.coerceIn(0f, 1f) }
+    }
+
+    override fun release() {
+        if (isReleased) return
+        isReleased = true
+        runCatching { exo.release() }
+    }
 }

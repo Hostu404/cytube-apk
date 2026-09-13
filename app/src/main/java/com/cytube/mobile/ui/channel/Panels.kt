@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -37,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
@@ -49,7 +51,7 @@ import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Density
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.delay
@@ -61,8 +63,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import coil.decode.BitmapFactoryDecoder
 import coil.request.ImageRequest
+import coil.size.Precision
 import coil.size.Size
 import com.cytube.mobile.net.ChannelUser
 import com.cytube.mobile.net.Emote
@@ -75,7 +77,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val TIME_FMT = SimpleDateFormat("HH:mm", Locale.getDefault())
+private fun formatTime(timestamp: Long): String =
+    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
 
 /**
  * Emote box height, in sp so it tracks the user's font scale. CyTube emotes are
@@ -112,47 +115,37 @@ private fun inlineEmotes(
     if (urls.isEmpty()) return emptyMap()
     val context = LocalContext.current
     val density = LocalDensity.current
-    val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
-    return urls.distinct().associateWith { url ->
-        // Until the real aspect ratio is known a square is the least-wrong
-        // guess; once loaded the true ratio is reused for the whole session so
-        // wide emotes stop being squashed.
-        val ratio = (EmoteAspect.ratios[url] ?: 1f).coerceIn(0.2f, 6f)
-        val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
-        InlineTextContent(
-            Placeholder(
-                width = (emoteHeight * ratio).sp,
-                height = emoteHeight.sp,
-                placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
-            )
-        ) {
-            AsyncImage(
-                model = remember(url, widthPx, heightPx) {
-                    // Emotes render at a fixed, tiny on-screen size. A source
-                    // image bigger than that (some channels host oversized
-                    // emote GIFs) would otherwise get decoded — every frame,
-                    // now that they animate in chat — at full native
-                    // resolution just to be scaled down on every draw.
-                    // Capping the decode target to the actual display size
-                    // fixes exactly the case that got more expensive when
-                    // GIF emotes started animating.
-                    ImageRequest.Builder(context)
+    return remember(urls, emoteHeight, density) {
+        val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
+        urls.distinct().associateWith { url ->
+            val ratio = (EmoteAspect.ratios[url] ?: 1f).coerceIn(0.2f, 6f)
+            val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
+            InlineTextContent(
+                Placeholder(
+                    width = (emoteHeight * ratio).sp,
+                    height = emoteHeight.sp,
+                    placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
+                )
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
                         .data(url)
                         .size(Size(widthPx, heightPx))
-                        .build()
-                },
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(),
-                onSuccess = { state ->
-                    val size = state.painter.intrinsicSize
-                    if (size.width > 0f && size.height > 0f &&
-                        size.width.isFinite() && size.height.isFinite()
-                    ) {
-                        EmoteAspect.ratios[url] = size.width / size.height
+                        .precision(Precision.INEXACT)
+                        .build(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                    onSuccess = { state ->
+                        val size = state.painter.intrinsicSize
+                        if (size.width > 0f && size.height > 0f &&
+                            size.width.isFinite() && size.height.isFinite()
+                        ) {
+                            EmoteAspect.ratios[url] = size.width / size.height
+                        }
                     }
-                }
-            )
+                )
+            }
         }
     }
 }
@@ -418,14 +411,8 @@ internal fun openInBrowser(context: Context, url: String) {
  * time the overlay stays switched on) is what makes the swap invisible.
  */
 
-/** One flying comment's motion, tracked per lane only so [claimSharedLane]
- *  can decide whether a NEW comment may share that lane instead of queuing
- *  behind it. All three fields come from the same spawn-time ESTIMATE the
- *  claim sites already compute (never the more precise width
- *  [FlyingCommentItem] later measures) — deliberately, since that estimate
- *  is built generous (see [NEKO_ESTIMATED_PX_PER_CHAR]) and an overestimate
- *  here can only make a shared claim more conservative, never claim a lane
- *  safe before the real comment has actually cleared it. */
+/** One flying comment's motion, tracked per lane so new comments can trail
+ *  safely behind earlier ones without colliding. */
 class LaneOccupant(
     val spawnAtMs: Long,
     val speedPxPerMs: Float,
@@ -437,35 +424,20 @@ class NekoOverlayState {
     val active = mutableStateListOf<FlyingComment>()
     var lastSpawnedSeq = -1L
     var nextId = 0L
-    val laneFreeAtMs = HashMap<Int, Long>()
 
-    /** Who's currently mid-flight in each lane, for [claimSharedLane]'s
-     *  safety checks only — [laneFreeAtMs] above is untouched and still
-     *  governs the plain, one-at-a-time claim every lane gets first (see
-     *  [claimFreeLane]), so nothing about the existing exclusive-claim path
-     *  changes. Stale entries are pruned lazily, the next time a lane is
-     *  looked up here — a lane nobody's contending for costs nothing to
-     *  leave alone. */
+    /** Active occupants per lane, used for constant-velocity collision detection.
+     *  Expired entries are pruned continuously as lanes are evaluated. */
     val laneOccupants = HashMap<Int, MutableList<LaneOccupant>>()
+    var nextLaneIndex = 0
     var hasCaughtUp = false
 
-    /** Messages waiting for a lane to free up — see the drain loop in
-     *  [NekoChatOverlay]. Every message that arrives while the overlay is on
-     *  is queued here and animated as soon as a lane opens, rather than
-     *  being silently skipped the moment it arrives just because all lanes
-     *  happened to be busy that instant; that was making chat look like it
-     *  was dropping messages that had actually just gone through fine.
-     *  Bounded so a genuinely pathological sustained flood can't grow this
-     *  without limit — under that extreme the OLDEST queued message is the
-     *  one given up on, never one already animating or a brand-new arrival. */
+    /** Messages waiting for a lane to free up. Never dropped under flood —
+     *  the continuous trailing lane model provides high throughput at normal,
+     *  comfortable reading speeds. */
     val pending = ArrayDeque<ChatMessage>()
 
     /** Wakes the drain loop in [NekoChatOverlay] the instant something is
-     *  enqueued, instead of it polling on a fixed timer forever while the
-     *  overlay is on. CONFLATED because the loop only ever cares "is there
-     *  something to check again" — any number of enqueues before it next
-     *  receives collapse into one wake, and a send that lands while nobody's
-     *  receiving isn't lost (unlike a rendezvous channel). */
+     *  enqueued, instead of polling on a fixed timer. */
     val wakeSignal = Channel<Unit>(Channel.CONFLATED)
 }
 
@@ -495,105 +467,14 @@ fun NekoChatOverlay(
         val density = LocalDensity.current
         val screenWidthPx = with(density) { maxWidth.toPx() }
         val laneHeightPx = remember(density) { with(density) { NEKO_LANE_HEIGHT.roundToPx() } }
-        // How many lanes the screen can physically fit, independent of
-        // NEKO_MAX_LANES — used below to keep the backlog lane bonus from
-        // ever placing a lane off the bottom of a short window.
+        val gapPx = remember(density) { with(density) { NEKO_MIN_GAP_DP.dp.toPx() } }
         val maxLanesByHeight = remember(maxHeight) {
             (maxHeight / NEKO_LANE_HEIGHT).toInt().coerceAtLeast(1)
         }
         val laneCount = remember(maxLanesByHeight) { maxLanesByHeight.coerceAtMost(NEKO_MAX_LANES) }
 
-        // Real Niconico thins comments under load rather than letting them
-        // pile up — this is that, in miniature. Each lane records when its
-        // current occupant will have finished crossing; a message only
-        // spawns if some lane is actually free, and is dropped (not queued)
-        // otherwise. That's a hard ceiling on how many of these can ever be
-        // animating and drawing at once — never more than laneCount, which
-        // is already capped — instead of a chat flood spawning one more
-        // blurred, independently-animating line per message with no limit,
-        // which is what was eating frames on the video underneath.
-        //
-        // effectiveLaneCount() adds a small, bounded, temporary bonus on top
-        // of that while state.pending is genuinely deep — a flood needs more
-        // throughput than a quiet channel, and a couple of extra lanes for
-        // as long as the backlog is real drains it faster without the "just
-        // keep adding lanes" trap: it's capped by both NEKO_MAX_LANES (via
-        // laneCount) and the screen's real height (maxLanesByHeight), and it
-        // reverts to plain laneCount the moment the backlog clears.
-        fun effectiveLaneCount(): Int {
-            if (state.pending.size < NEKO_BACKLOG_BONUS_LANES_THRESHOLD) return laneCount
-            return (laneCount + NEKO_BACKLOG_BONUS_LANES).coerceAtMost(maxLanesByHeight)
-        }
-
-        fun claimFreeLane(now: Long): Int? {
-            val count = effectiveLaneCount()
-            for (lane in 0 until count) {
-                if (now >= (state.laneFreeAtMs[lane] ?: 0L)) return lane
-            }
-            return null
-        }
-
-        // Second-pass claim, tried only once claimFreeLane above has already
-        // found every lane busy (see both call sites below) — a lane already
-        // holding a comment is still safe to hand to a NEW one if, for every
-        // comment currently in it: (1) it has already cleared its own width,
-        // so the newcomer (which always spawns off the right edge) can't
-        // visually overlap it right this instant, and (2) the newcomer is no
-        // faster than it, so the gap between them can only hold steady or
-        // grow for the rest of both their crossings, never shrink back into
-        // an overlap later on. Both are plain constant-velocity checks using
-        // numbers already known at claim time — no per-frame tracking, and
-        // no cost at all for the common case where every lane is free and
-        // this never even runs. Capped at NEKO_LANE_SHARE_CAP occupants per
-        // lane so this is strictly "a bit more throughput per row while it's
-        // genuinely needed", never unbounded stacking, and gated on
-        // NEKO_LANE_SHARE_MIN_PENDING so a lighter, ordinary backlog never
-        // pays for the extra check.
-        // candidateSpeedPxPerMs is the only thing about the new comment that
-        // matters here — its own width only matters once IT is the occupant
-        // being checked against by whatever tries to claim behind it.
-        fun claimSharedLane(now: Long, candidateSpeedPxPerMs: Float): Int? {
-            if (state.pending.size < NEKO_LANE_SHARE_MIN_PENDING) return null
-            val count = effectiveLaneCount()
-            for (lane in 0 until count) {
-                val occupants = state.laneOccupants[lane] ?: continue
-                occupants.removeAll { now >= it.clearAtMs }
-                if (occupants.isEmpty()) {
-                    state.laneOccupants.remove(lane)
-                    continue
-                }
-                if (occupants.size >= NEKO_LANE_SHARE_CAP) continue
-                val safe = occupants.all { occ ->
-                    candidateSpeedPxPerMs <= occ.speedPxPerMs &&
-                        (now - occ.spawnAtMs) * occ.speedPxPerMs >= occ.widthPx + NEKO_LANE_SHARE_MARGIN_PX
-                }
-                if (safe) return lane
-            }
-            return null
-        }
-
-        // Records a just-claimed lane's new occupant for claimSharedLane
-        // above, and extends laneFreeAtMs to the LATER of its current value
-        // and this occupant's own clear time — never simply overwritten,
-        // since a shared claim must not let claimFreeLane consider the lane
-        // exclusively free again before the earlier occupant it shares with
-        // has actually cleared too.
-        fun recordLaneOccupant(lane: Int, now: Long, speedPxPerMs: Float, widthPx: Float, durationMs: Int) {
-            state.laneFreeAtMs[lane] = maxOf(state.laneFreeAtMs[lane] ?: 0L, now + durationMs)
-            val list = state.laneOccupants.getOrPut(lane) { mutableListOf() }
-            list.removeAll { now >= it.clearAtMs }
-            list.add(LaneOccupant(spawnAtMs = now, speedPxPerMs = speedPxPerMs, widthPx = widthPx, clearAtMs = now + durationMs))
-        }
-
-        // Baseline for "what's new" (see the effect below), set exactly once
-        // per on-cycle. This runs during composition — strictly before either
-        // effect below gets a chance to start — so there is no race between
-        // this and the catch-up effect over who reads `messages` first. A
-        // fullscreen/windowed remount re-enters this same block, but by then
-        // hasCaughtUp is already true (set on the very first mount, well
-        // before a later fullscreen toggle), so it's skipped.
-        remember(state) {
-            if (!state.hasCaughtUp) {
+        SideEffect {
+            if (!state.hasCaughtUp && state.lastSpawnedSeq == -1L) {
                 state.lastSpawnedSeq = messages.lastOrNull()?.seq ?: -1L
             }
         }
@@ -609,56 +490,17 @@ fun NekoChatOverlay(
             if (state.hasCaughtUp) return@LaunchedEffect
             state.hasCaughtUp = true
             val catchUp = messages.filterNot { it.isServerMessage }.takeLast(NEKO_CATCHUP_COUNT)
-            catchUp.forEach { msg ->
-                val now = System.currentTimeMillis()
-                val pendingSize = state.pending.size
-                val estimatedWidthPx = msg.html.length * NEKO_ESTIMATED_PX_PER_CHAR
-                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
-                val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
-                val lane = claimFreeLane(now) ?: claimSharedLane(now, speedPxPerMs)
-                if (lane != null) {
-                    recordLaneOccupant(lane, now, speedPxPerMs, estimatedWidthPx, durationMs)
-                    state.active.add(
-                        FlyingComment(
-                            id = state.nextId++,
-                            msg = msg,
-                            lane = lane,
-                            durationMs = durationMs,
-                            spawnPendingSize = pendingSize
-                        )
-                    )
-                } else {
-                    // Every lane already busy the instant this one wanted to
-                    // spawn — queue it instead of dropping it; the drain
-                    // loop below picks it up the moment a lane opens.
-                    state.pending.addLast(msg)
-                    state.wakeSignal.trySend(Unit)
-                }
-                delay(350)
+            for (msg in catchUp) {
+                state.pending.addLast(msg)
+            }
+            if (catchUp.isNotEmpty()) {
+                state.wakeSignal.trySend(Unit)
             }
         }
 
-        // Fresh arrivals are only ever enqueued here, never spawned
-        // directly — claiming a lane and actually animating a message is
-        // entirely the drain loop's job below. That way a message that
-        // arrives the same instant every lane happens to be busy is simply
-        // queued, not skipped: previously this dropped it outright the
-        // moment claimFreeLane came back empty, which is exactly what made
-        // some typed messages look like they "didn't go through" on the
-        // overlay even though they were always in the real chat panel.
+        // Fresh arrivals are enqueued here and drained smoothly. All messages
+        // are preserved and displayed without dropping.
         LaunchedEffect(messages) {
-            // Walk backward from the tail instead of filtering the WHOLE
-            // message buffer (up to MAX_CHAT_MESSAGES) on every single
-            // arrival — that full-list scan, repeated once per incoming
-            // message, is exactly what made a burst of posts (a bunch of
-            // emotes landing in quick succession, say) feel like the overlay
-            // was working through the entire chat history instead of just
-            // the new lines: on a channel that already has hundreds of
-            // messages buffered, every new one paid for re-scanning all of
-            // them just to find itself. Stopping the instant a seq we've
-            // already spawned is reached costs exactly as much as there are
-            // NEW messages this time — 1 in the common case, however many
-            // arrived in a flood, never the size of the whole buffer.
             val fresh = ArrayList<ChatMessage>()
             for (i in messages.indices.reversed()) {
                 val m = messages[i]
@@ -667,73 +509,56 @@ fun NekoChatOverlay(
             }
             fresh.reverse()
             for (msg in fresh) {
-                if (state.pending.size >= NEKO_MAX_PENDING) state.pending.removeFirstOrNull()
                 state.pending.addLast(msg)
             }
             if (fresh.isNotEmpty()) state.wakeSignal.trySend(Unit)
             if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
         }
 
-        // Drains the queue as lanes free up, for as long as the overlay is
-        // on. Event-driven rather than a fixed-interval poll: with nothing
-        // queued it suspends on state.wakeSignal instead of waking up
-        // several times a second to check an empty deque (the common case —
-        // most of a session is quiet chat, not a flood). With something
-        // queued but every lane still busy, it sleeps exactly until the
-        // soonest lane is due to free (from laneFreeAtMs) rather than
-        // polling — a short timeout still bounds that wait so a claim is
-        // never overslept by more than a beat, and a fresh enqueue in the
-        // meantime (wakeSignal) can cut it short too.
-        LaunchedEffect(state) {
+        // Drains the queue using continuous non-collision lane allocation.
+        // Multiple comments naturally trail each other in each lane with
+        // guaranteed safe margins, producing high throughput at a steady,
+        // comfortable reading pace without chaotic speed jumps or text walls.
+        LaunchedEffect(state, laneCount, screenWidthPx) {
             while (true) {
                 if (state.pending.isEmpty()) {
                     state.wakeSignal.receive()
                     continue
                 }
                 val now = System.currentTimeMillis()
-                // Captured before removeFirst() (peeked below, only actually
-                // removed once a lane is confirmed) so it reflects the real
-                // backlog depth this message spawned out of (including
-                // itself) — the same figure both the lane-booking estimate
-                // here and FlyingCommentItem's real-duration recompute key
-                // off, so a lane never frees at a different moment than the
-                // comment it's timing.
-                val pendingSize = state.pending.size
                 val msg = state.pending.first()
-                val estimatedWidthPx = msg.html.length * NEKO_ESTIMATED_PX_PER_CHAR
-                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx, pendingSize)
+                val estimatedWidthPx = estimateCommentWidthPx(msg, showEmotes, emotes, density)
+                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx)
                 val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
-                val lane = claimFreeLane(now) ?: claimSharedLane(now, speedPxPerMs)
+
+                val lane = findBestLane(
+                    now = now,
+                    candidateWidthPx = estimatedWidthPx,
+                    candidateSpeedPxPerMs = speedPxPerMs,
+                    laneCount = laneCount,
+                    gapPx = gapPx,
+                    screenWidthPx = screenWidthPx,
+                    state = state
+                )
+
                 if (lane != null) {
                     state.pending.removeFirst()
-                    recordLaneOccupant(lane, now, speedPxPerMs, estimatedWidthPx, durationMs)
+                    val clearAtMs = now + durationMs
+                    val list = state.laneOccupants.getOrPut(lane) { mutableListOf() }
+                    list.add(LaneOccupant(spawnAtMs = now, speedPxPerMs = speedPxPerMs, widthPx = estimatedWidthPx, clearAtMs = clearAtMs))
                     state.active.add(
                         FlyingComment(
                             id = state.nextId++,
                             msg = msg,
                             lane = lane,
-                            durationMs = durationMs,
-                            spawnPendingSize = pendingSize
+                            widthPx = estimatedWidthPx,
+                            durationMs = durationMs
                         )
                     )
-                    // Loop straight back around in case another lane is
-                    // also free right now (e.g. several expired at once) —
-                    // no wait needed, claimFreeLane below will just say no
-                    // once none are left.
+                    // Gentle stagger so consecutive comments stream in with pleasant pacing
+                    delay(NEKO_SPAWN_STAGGER_MS)
                 } else {
-                    val nextFreeAt = state.laneFreeAtMs.values.minOrNull() ?: (now + 150L)
-                    // A tighter poll ceiling once lane-sharing could plausibly
-                    // help (pending already deep enough that claimSharedLane
-                    // stops early-returning) — a shared claim can open up well
-                    // before laneFreeAtMs's exclusive-clear estimate does, and
-                    // the plain 1s ceiling was tuned for a world without that
-                    // possibility.
-                    val pollCeilingMs = if (state.pending.size >= NEKO_LANE_SHARE_MIN_PENDING) {
-                        NEKO_LANE_SHARE_POLL_MS
-                    } else {
-                        1_000L
-                    }
-                    val waitMs = (nextFreeAt - now).coerceIn(16L, pollCeilingMs)
+                    val waitMs = calculateNextSafeWaitMs(now, laneCount, gapPx, state)
                     withTimeoutOrNull(waitMs) { state.wakeSignal.receive() }
                 }
             }
@@ -761,21 +586,8 @@ data class FlyingComment(
     val id: Long,
     val msg: ChatMessage,
     val lane: Int,
-    /** Spawn-time estimate (computed via [nekoDurationMs] against an
-     *  estimated width, see [NEKO_ESTIMATED_PX_PER_CHAR]) — used only to book
-     *  [NekoOverlayState.laneFreeAtMs] before the real text width is known,
-     *  and as the very first frame's animation target before that.
-     *  FlyingCommentItem recomputes the real value from the real measured
-     *  width via the same [nekoDurationMs] formula once it has one. */
-    val durationMs: Int,
-    /** How deep [NekoOverlayState.pending] was at the moment this comment
-     *  claimed its lane — frozen here rather than re-read live so the real
-     *  duration FlyingCommentItem recomputes from the measured width uses
-     *  the exact same backlog-speed factor as the estimate that already
-     *  booked the lane. Re-reading a live, still-changing pending size at
-     *  measurement time would let the two durations disagree and free the
-     *  lane before or after the comment actually finishes crossing. */
-    val spawnPendingSize: Int = 0
+    val widthPx: Float,
+    val durationMs: Int
 )
 
 /**
@@ -787,186 +599,165 @@ data class FlyingComment(
  * "duration_marquee" window, never a length-dependent one. That fixed window
  * is exactly why a longer comment visibly moves FASTER on the real site —
  * it has farther to travel in the very same time — which is the "traditional
- * nico speed" this now emulates, per user request, in place of the constant-
- * speed model tried right before this (which kept every message at the same
- * pace and read as too slow for a long one by comparison).
- *
- * 4s (the literal traditional-nico figure) still read as a bit fast overall
- * once this was actually on a phone screen — scaled to 5s per follow-up user
- * feedback. NEKO_MAX_SPEED_PX_PER_MS and NEKO_MAX_DURATION_MS below are
- * scaled by the same 5/4 factor alongside it, so the relationship between
- * them — where the speed ceiling starts overriding the baseline — lands in
- * the same place relative to message length as before, just uniformly 25%
- * slower throughout instead of only for short messages.
+ * nico speed" this emulates.
  */
-private const val NEKO_BASELINE_DURATION_MS = 5_000
+private const val NEKO_BASELINE_DURATION_MS = 3_755
 
 /**
- * Speed ceiling — a safety net the real site doesn't need. Niconico itself
- * caps a single comment at a modest character count, so its fixed duration
- * above never has to cover more than a bounded distance. CyTube chat has no
- * such cap, so without this, a genuinely long message would still be
- * squeezed into the same fixed window and end up racing past unreadably
- * fast — the original "long messages get cut off" complaint this whole
- * thing started from. Anything within roughly niconico's own real-world
- * comment length crosses at the traditional fixed duration above,
- * untouched; only messages longer than that get a stretched-out (slower)
- * duration to stay legible.
+ * Speed ceiling — a safety net so exceptionally long messages (which CyTube
+ * permits without length caps) cross at a readable, stretched-out duration
+ * rather than speeding past unreadably.
  */
-private const val NEKO_MAX_SPEED_PX_PER_MS = 0.72f
+private const val NEKO_MAX_SPEED_PX_PER_MS = 0.95634f
 
-/** Absolute upper bound alongside the speed ceiling above — belt-and-braces
- *  against something pathological (a pasted wall of text) camping a lane for
- *  the better part of a minute; ordinary chat, even a long message, never
- *  comes close to this. */
-private const val NEKO_MAX_DURATION_MS = 15_000
+/** Absolute upper bound alongside the speed ceiling above. */
+private const val NEKO_MAX_DURATION_MS = 11_265
 
-/**
- * Floor a comment's duration can be scaled down to while [NekoOverlayState]'s
- * pending queue is deep — see [backlogSpeedFactor]/[nekoDurationMs]. This is
- * the OTHER lever against flood stalls, alongside claimFreeLane's bonus
- * lanes: more lanes raises how many comments can be in flight at once, and
- * this raises how fast the queue actually drains once they are. Chosen well
- * above zero — legibility still matters under a flood, it just matters less
- * than not falling further behind.
- */
-private const val NEKO_MIN_DURATION_MS = 2_500
+/** Minimum horizontal clearance in dp between consecutive comments in the same lane. */
+private const val NEKO_MIN_GAP_DP = 24
 
-/** [NekoOverlayState.pending] depth at which comments start speeding up
- *  toward [NEKO_MIN_DURATION_MS]. Below this, an ordinary handful of queued
- *  messages plays at the normal traditional-nico pace — only once the queue
- *  is genuinely backing up does trading a little legibility for throughput
- *  start to pay off. */
-private const val NEKO_BACKLOG_SPEEDUP_START = 5
+/** Inter-spawn stagger delay in ms to prevent simultaneous multi-lane vertical walls. */
+private const val NEKO_SPAWN_STAGGER_MS = 75L
 
-/** [NekoOverlayState.pending] depth at which the speed-up above is already
- *  maxed out (every comment spawning at [NEKO_MIN_DURATION_MS]-scaled pace).
- *  Well under [NEKO_MAX_PENDING], so the queue is never left to grow toward
- *  its hard cap before throughput is already at its fastest. */
-private const val NEKO_BACKLOG_SPEEDUP_MAX = 40
-
-/** Extra lanes [NekoChatOverlay]'s effectiveLaneCount() grants on top of the
- *  screen-fit [NEKO_MAX_LANES]-capped baseline while backlog is deep — see
- *  [NEKO_BACKLOG_BONUS_LANES_THRESHOLD]. Small and temporary by design: more
- *  in-flight lanes plus faster-draining comments (see [NEKO_MIN_DURATION_MS])
- *  clears a flood quickly without permanently crowding the screen the rest
- *  of the time a channel is merely a little chatty. */
-private const val NEKO_BACKLOG_BONUS_LANES = 2
-
-/** [NekoOverlayState.pending] depth at which the bonus lanes above kick in.
- *  Set above [NEKO_MAX_LANES] itself — bonus lanes are for when the queue is
- *  backing up faster than even a full set of lanes can drain it, not for the
- *  ordinary case of a few lanes being briefly busy. */
-private const val NEKO_BACKLOG_BONUS_LANES_THRESHOLD = 15
-
-/** Rough px-per-character (deliberately a bit generous for NEKO_TEXT_STYLE's
- *  20sp bold) used only to ESTIMATE a not-yet-measured message's width at
- *  spawn time, so [NekoOverlayState.laneFreeAtMs] is booked for roughly the
- *  right length of time before FlyingCommentItem has actually measured it.
- *  Overestimating here means a lane frees a little later than strictly
- *  needed, never earlier while the real message is still on screen — this
- *  estimate never affects what's drawn, only how long a lane is
- *  provisionally held. */
-private const val NEKO_ESTIMATED_PX_PER_CHAR = 16f
-
-/** 0f = no backlog speed-up at all, 1f = fully scaled to [NEKO_MIN_DURATION_MS].
- *  Linear ramp between [NEKO_BACKLOG_SPEEDUP_START] and
- *  [NEKO_BACKLOG_SPEEDUP_MAX] rather than a hard cutover, so throughput
- *  climbs smoothly as a flood builds instead of visibly lurching from one
- *  pace to another mid-message. */
-private fun backlogSpeedFactor(pendingSize: Int): Float {
-    if (pendingSize <= NEKO_BACKLOG_SPEEDUP_START) return 0f
-    if (pendingSize >= NEKO_BACKLOG_SPEEDUP_MAX) return 1f
-    val span = (NEKO_BACKLOG_SPEEDUP_MAX - NEKO_BACKLOG_SPEEDUP_START).toFloat()
-    return (pendingSize - NEKO_BACKLOG_SPEEDUP_START) / span
-}
-
-/** The actual traditional-nico duration formula: fixed baseline duration,
- *  stretched out only once the message is long enough that holding the
- *  speed ceiling would otherwise require less than that baseline.
- *
- *  [pendingSize] additionally scales the whole result down toward
- *  [NEKO_MIN_DURATION_MS] as [NekoOverlayState.pending] backs up (see
- *  [backlogSpeedFactor]) — a long message under a flood still crosses
- *  proportionally slower than a short one, it just does so faster overall
- *  than it would in ordinary, unhurried chat. Defaults to 0 (no speed-up)
- *  for call sites that don't have a backlog figure to hand. */
-private fun nekoDurationMs(distancePx: Float, pendingSize: Int = 0): Int {
-    val base = (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
-        .coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
-    val factor = backlogSpeedFactor(pendingSize)
-    if (factor <= 0f) return base
-    val scaled = base - ((base - NEKO_MIN_DURATION_MS) * factor).roundToInt()
-    return scaled.coerceAtLeast(NEKO_MIN_DURATION_MS)
-}
-
-/** Extra concurrent occupants [claimSharedLane] may place in a single lane —
- *  1 means "no sharing", so this is really "how many EXTRA comments" on top
- *  of the one a lane already holds. Kept small and fixed rather than scaling
- *  with backlog depth: sharing is meant to relieve a flood a little further
- *  once bonus lanes and backlog speed-up are already both maxed out, not to
- *  become the primary mechanism — a taller stack per lane would also start
- *  costing more per claim (more occupants to safety-check). */
-private const val NEKO_LANE_SHARE_CAP = 2
-
-/** [NekoOverlayState.pending] depth at which [claimSharedLane] starts being
- *  tried at all. Set low relative to [NEKO_BACKLOG_BONUS_LANES_THRESHOLD] —
- *  a shared claim only ever fires when every lane is already busy anyway
- *  (it's strictly a fallback after [claimFreeLane] fails), so trying it a
- *  little early costs nothing extra on a quiet channel; this just skips the
- *  attempt entirely for the common case of a handful of lanes being briefly
- *  busy with perfectly ordinary chat. */
-private const val NEKO_LANE_SHARE_MIN_PENDING = 6
-
-/** Extra clearance beyond a lane occupant's own estimated width before a new
- *  comment may spawn behind it — a small fixed buffer against estimation
- *  noise and the two comments' outline glows visibly touching, not a
- *  meaningfully-sized gap on a screen this wide. */
-private const val NEKO_LANE_SHARE_MARGIN_PX = 12f
-
-/** Tighter poll ceiling the drain loop falls back to once
- *  [NEKO_LANE_SHARE_MIN_PENDING] is met — see its call site. A shared claim
- *  can become safe well before any lane's exclusive [NekoOverlayState.laneFreeAtMs]
- *  estimate elapses, so the plain 1s ceiling (tuned for a world without
- *  sharing) would otherwise sit on a newly-safe shared lane for up to a
- *  second before noticing. */
-private const val NEKO_LANE_SHARE_POLL_MS = 200L
-
-/** Vertical space each flying line gets — tall enough for NEKO_TEXT_STYLE's
- *  20sp bold plus a little breathing room between lines. */
+/** Vertical space each flying line gets. */
 private val NEKO_LANE_HEIGHT = 34.dp
 
-/** However tall the video is, don't spread comments thinner than this —
- *  Niconico itself only ever uses a modest number of rows regardless of
- *  screen size. */
-private const val NEKO_MAX_LANES = 10
-
-/** Hard cap on [NekoOverlayState.pending] — protects against unbounded
- *  growth under a genuinely pathological sustained flood. Ordinary chat,
- *  even a busy one, never comes close: at ~150ms drain ticks and up to
- *  NEKO_MAX_LANES spawning per tick, the queue drains far faster than it
- *  could realistically fill. */
-private const val NEKO_MAX_PENDING = 200
+/** Maximum number of concurrent comment lanes on screen. */
+private const val NEKO_MAX_LANES = 12
 
 /** How many already-buffered messages replay immediately when the overlay
- *  is turned on — enough to feel alive right away without dumping the
- *  entire backlog across the video at once. */
+ *  is turned on. */
 private const val NEKO_CATCHUP_COUNT = 5
 
 private val NEKO_LINK_COLOR = Color(0xFF80D8FF)
 
-/** White with a soft black glow instead of a background box — legible over
- *  arbitrary video without ever needing to darken it. Bold for the same
- *  reason Niconico's own comments are bold: thin strokes wash out fastest
- *  against a bright, busy frame. Blur is deliberately modest — it's the
- *  single most expensive thing about redrawing one of these lines every
- *  frame while it moves, and now that the lane cap bounds how many can be
- *  on screen at once, it's the next easiest lever if it's still not smooth. */
+/** White with a soft black glow instead of a background box. */
 private val NEKO_TEXT_STYLE = TextStyle(
     fontSize = 20.sp,
     fontWeight = FontWeight.Bold,
     shadow = Shadow(color = Color.Black, offset = Offset.Zero, blurRadius = 6f)
 )
+
+/** Computes duration based on travel distance and speed ceiling. */
+private fun nekoDurationMs(distancePx: Float): Int {
+    val durationFromSpeedLimit = (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
+    return durationFromSpeedLimit.coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
+}
+
+/** Accurately estimates comment width using ChatHtml's cached parse. */
+private fun estimateCommentWidthPx(
+    msg: ChatMessage,
+    showEmotes: Boolean,
+    emotes: EmoteSet,
+    density: Density
+): Float {
+    val rendered = ChatHtml.render(msg.html, msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
+    val soloEmotePx = with(density) { SOLO_EMOTE_HEIGHT.sp.toPx() }
+    val emotePx = with(density) { EMOTE_HEIGHT.sp.toPx() }
+    val charWidthPx = with(density) { 13.dp.toPx() }
+
+    return if (rendered.soloEmoteCount > 0) {
+        rendered.soloEmoteCount * soloEmotePx + with(density) { 8.dp.toPx() }
+    } else {
+        val textWidth = rendered.text.length * charWidthPx
+        val emoteWidth = rendered.imageUrls.size * (emotePx + with(density) { 4.dp.toPx() })
+        (textWidth + emoteWidth + with(density) { 16.dp.toPx() }).coerceAtLeast(with(density) { 24.dp.toPx() })
+    }
+}
+
+/** Finds the best available lane using constant-velocity non-collision physics
+ *  and anti-clustering load balancing. */
+private fun findBestLane(
+    now: Long,
+    candidateWidthPx: Float,
+    candidateSpeedPxPerMs: Float,
+    laneCount: Int,
+    gapPx: Float,
+    screenWidthPx: Float,
+    state: NekoOverlayState
+): Int? {
+    for (lane in 0 until laneCount) {
+        val occupants = state.laneOccupants[lane] ?: continue
+        occupants.removeAll { now >= it.clearAtMs }
+        if (occupants.isEmpty()) {
+            state.laneOccupants.remove(lane)
+        }
+    }
+
+    val safeEmptyLanes = ArrayList<Int>()
+    val safeOccupiedLanes = ArrayList<Pair<Int, Float>>()
+
+    for (lane in 0 until laneCount) {
+        val occupants = state.laneOccupants[lane]
+        if (occupants.isNullOrEmpty()) {
+            safeEmptyLanes.add(lane)
+            continue
+        }
+
+        val last = occupants.last()
+        val elapsed = now - last.spawnAtMs
+        val distanceTraveled = elapsed * last.speedPxPerMs
+
+        // 1. Entry clearance: has previous occupant cleared the right edge by at least gapPx?
+        if (distanceTraveled < last.widthPx + gapPx) {
+            continue
+        }
+
+        // 2. Overtake check: if candidate is faster than previous occupant, will it catch up before previous exits?
+        if (candidateSpeedPxPerMs > last.speedPxPerMs) {
+            val remainMs = last.clearAtMs - now
+            val candidateTravel = remainMs * candidateSpeedPxPerMs
+            if (candidateTravel > screenWidthPx + candidateWidthPx - gapPx) {
+                continue
+            }
+        }
+
+        safeOccupiedLanes.add(lane to distanceTraveled)
+    }
+
+    if (safeEmptyLanes.isNotEmpty()) {
+        val chosen = safeEmptyLanes.minByOrNull { (it - state.nextLaneIndex + laneCount) % laneCount } ?: safeEmptyLanes.first()
+        state.nextLaneIndex = (chosen + 1) % laneCount
+        return chosen
+    }
+
+    if (safeOccupiedLanes.isNotEmpty()) {
+        val chosen = safeOccupiedLanes.maxByOrNull { it.second }!!.first
+        state.nextLaneIndex = (chosen + 1) % laneCount
+        return chosen
+    }
+
+    return null
+}
+
+/** Calculates the shortest time in ms until any lane could satisfy entry clearance. */
+private fun calculateNextSafeWaitMs(
+    now: Long,
+    laneCount: Int,
+    gapPx: Float,
+    state: NekoOverlayState
+): Long {
+    var minWaitMs = Long.MAX_VALUE
+    for (lane in 0 until laneCount) {
+        val occupants = state.laneOccupants[lane]
+        if (occupants.isNullOrEmpty()) return 0L
+        val last = occupants.last()
+        val neededDistance = last.widthPx + gapPx
+        val elapsed = now - last.spawnAtMs
+        val distanceTraveled = elapsed * last.speedPxPerMs
+        if (distanceTraveled >= neededDistance) {
+            return 16L
+        }
+        val remainingDist = neededDistance - distanceTraveled
+        if (last.speedPxPerMs > 0f) {
+            val waitMs = (remainingDist / last.speedPxPerMs).toLong()
+            if (waitMs in 1 until minWaitMs) {
+                minWaitMs = waitMs
+            }
+        }
+    }
+    return if (minWaitMs != Long.MAX_VALUE) minWaitMs.coerceIn(16L, 250L) else 150L
+}
 
 @Composable
 private fun FlyingCommentItem(
@@ -980,37 +771,17 @@ private fun FlyingCommentItem(
     val rendered = remember(comment.id) {
         ChatHtml.render(comment.msg.html, comment.msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
     }
-    // Same solo-emote sizing rule as the real chat panel — a message that's
-    // nothing but emotes still gets to be seen at a glance here too.
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight)
 
-    // How far past the left edge counts as "fully off-screen" depends on the
-    // message's own width, not just the screen's. This used to always be a
-    // flat -screenWidthPx: fine for a short message, but a message wider
-    // than the screen would still have its tail end visible at that point —
-    // onFinished (below) removed it from the overlay right then anyway, so a
-    // long comment visibly vanished mid-flight instead of sliding fully off.
-    // 0f until the first layout pass below reports the real width, which
-    // happens on the very first frame, before the comment has travelled any
-    // visible distance — so retargeting the animation the moment it's known
-    // isn't seen as a stutter.
-    var textWidthPx by remember(comment.id) { mutableStateOf(0f) }
+    var measuredWidthPx by remember(comment.id) { mutableFloatStateOf(comment.widthPx) }
 
     val x = remember(comment.id) { Animatable(screenWidthPx) }
-    LaunchedEffect(comment.id, screenWidthPx, textWidthPx) {
-        // Duration is recomputed here from the REAL measured width via the
-        // same nekoDurationMs formula, not read off comment.durationMs — that
-        // field is only the spawn-time estimate used to book
-        // NekoOverlayState.laneFreeAtMs before this layout pass happened, and
-        // (being a bit generous by design, see NEKO_ESTIMATED_PX_PER_CHAR) it
-        // frees the lane at or after this real duration finishes, never
-        // before.
-        val distance = screenWidthPx + textWidthPx
-        val durationMs = nekoDurationMs(distance, comment.spawnPendingSize)
+    LaunchedEffect(comment.id, screenWidthPx) {
+        val targetX = -maxOf(measuredWidthPx, comment.widthPx)
         x.animateTo(
-            targetValue = -distance,
-            animationSpec = tween(durationMillis = durationMs, easing = LinearEasing)
+            targetValue = targetX,
+            animationSpec = tween(durationMillis = comment.durationMs, easing = LinearEasing)
         )
         onFinished()
     }
@@ -1023,9 +794,10 @@ private fun FlyingCommentItem(
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Visible,
-        onTextLayout = { layout -> textWidthPx = layout.size.width.toFloat() },
-        modifier = Modifier.offset {
-            IntOffset(x.value.roundToInt(), laneHeightPx * comment.lane)
+        onTextLayout = { layout -> measuredWidthPx = layout.size.width.toFloat() },
+        modifier = Modifier.graphicsLayer {
+            translationX = x.value
+            translationY = (laneHeightPx * comment.lane).toFloat()
         }
     )
 }
@@ -1056,12 +828,6 @@ private fun EmotePicker(
     var visibleCount by remember(query) { mutableStateOf(EMOTE_PAGE_SIZE) }
     val page = remember(shown, visibleCount) { shown.take(visibleCount) }
     val context = LocalContext.current
-    // The app's ImageLoader has an animated-GIF decoder registered globally
-    // (see CyTubeApp) so chat emotes animate. This picker opts back out of
-    // that per-request — decoding every visible tile's first frame only —
-    // because a whole grid of emotes animating at once, just to pick one, is
-    // decode/CPU cost with no benefit.
-    val staticGifDecoder = remember { BitmapFactoryDecoder.Factory() }
     val tilePx = with(LocalDensity.current) { 48.dp.roundToPx() }.coerceAtLeast(1)
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -1086,7 +852,7 @@ private fun EmotePicker(
                 contentPadding = PaddingValues(12.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                gridItems(page, key = { it.name }) { emote ->
+                gridItems(page, key = { "${it.name}_${it.image}" }) { emote ->
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
@@ -1099,8 +865,8 @@ private fun EmotePicker(
                             model = remember(emote.image) {
                                 ImageRequest.Builder(context)
                                     .data(emote.image)
-                                    .decoderFactory(staticGifDecoder)
                                     .size(Size(tilePx, tilePx))
+                                    .precision(Precision.INEXACT)
                                     .build()
                             },
                             contentDescription = emote.name,
@@ -1205,7 +971,7 @@ private fun ChatRow(
                     .padding(vertical = 4.dp, horizontal = 2.dp)
             )
             Text(
-                TIME_FMT.format(Date(msg.timestamp)),
+                formatTime(msg.timestamp),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1341,7 +1107,7 @@ fun PlaylistPanel(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                items(filtered, key = { it.uid }) { item ->
+                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}_$idx" else "pos_${idx}_${item.mediaId}" }) { _, item ->
                     val personallyResolvable = MediaTypes.canResolveIndependently(item.type)
                     val isCurrent = if (syncEnabled) item.uid == currentUid else item.uid == personalPickUid
                     val rowEnabled = if (syncEnabled) canControl else personallyResolvable
@@ -1471,7 +1237,7 @@ fun PollPanel(
                 if (!poll.isObscured) {
                     Spacer(Modifier.height(6.dp))
                     LinearProgressIndicator(
-                        progress = fraction,
+                        progress = { fraction.coerceIn(0f, 1f) },
                         modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp))
                     )
                 }
@@ -1486,7 +1252,9 @@ fun UsersPanel(users: ImmutableList<ChannelUser>, modifier: Modifier = Modifier)
         EmptyPanel("No users listed.", modifier)
         return
     }
-    val sorted = remember(users) { users.sortedWith(compareByDescending<ChannelUser> { it.rank }.thenBy { it.name.lowercase() }) }
+    val sorted = remember(users) {
+        users.distinctBy { it.name }.sortedWith(compareByDescending<ChannelUser> { it.rank }.thenBy { it.name.lowercase() })
+    }
 
     LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
         items(sorted, key = { it.name }) { user ->
