@@ -24,10 +24,13 @@ interface PlayerHandle {
     /** True for native ExoPlayer backend, false for WebView embed controllers. */
     val isNative: Boolean get() = true
 
+    /** Estimated throughput in bits per second, if available from the backend. */
+    val estimatedBitrate: Long? get() = null
+
     /** [qualityIndex] indexes into media.direct (already sorted
      *  highest-to-lowest — see DirectSource.parse), for the NATIVE backend's
      *  own lightweight quality auto-adaptation (see ChannelViewModel's
-     *  onPlaybackStall/maybeUpgradeQuality). Out of range, or a media with
+     *  onPlaybackStall). Out of range, or a media with
      *  no [MediaFrame.direct] entries at all, falls back to
      *  [MediaFrame.bestSource] exactly like before this parameter existed —
      *  callers that don't care just pass 0. */

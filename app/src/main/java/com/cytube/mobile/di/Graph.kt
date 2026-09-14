@@ -61,6 +61,7 @@ object Graph {
     val mediaHttp: OkHttpClient by lazy {
         http.newBuilder()
             .readTimeout(60, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .connectionPool(ConnectionPool(8, 2, TimeUnit.MINUTES))
             .build()
     }

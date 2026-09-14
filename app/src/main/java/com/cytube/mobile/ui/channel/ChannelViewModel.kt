@@ -17,6 +17,7 @@ import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class ConnectionState { CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, FAILED }
 
@@ -100,8 +102,9 @@ data class ChannelUiState(
      *  highest-to-lowest — see DirectSource.parse) the NATIVE backend should
      *  load; 0 is the default, matching MediaFrame.bestSource exactly, same
      *  as before this field existed. Stepped by onPlaybackStall (down, on a
-     *  real mid-playback stall) and maybeUpgradeQuality (back up, after a
-     *  stall-free stretch) — see PlayerSurface's own qualityIndex param.
+     *  real mid-playback stall) — see PlayerSurface's own qualityIndex param.
+     *  Latches to the stable lower resolution for the duration of the media
+     *  item to avoid mid-stream decoder reset flapping.
      *  Reset to 0 on every genuine item change (onMediaChanged/pickPersonal/
      *  stopPersonalPick) so a downgrade never outlives the item that caused
      *  it. Meaningless for any player type other than NATIVE. */
@@ -153,14 +156,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  reportPlaybackFailure's silent fallback); meaningless otherwise. */
     private var embedClockAnchorAtMs: Long = 0L
     private var embedClockAnchorSeconds: Double = 0.0
-    /** elapsedRealtime() of the last quality step (either direction) — the
-     *  debounce for onPlaybackStall and the recheck interval for
-     *  maybeUpgradeQuality both measure against this. Reset to 0 whenever
+    /** elapsedRealtime() of the last quality step — the debounce for
+     *  onPlaybackStall measures against this. Reset to 0 whenever
      *  ChannelUiState.nativeQualityIndex itself resets (a genuine item
      *  change), so a fresh item's first stall isn't held back by a cooldown
      *  that belonged to the previous video. */
     private var lastQualityChangeAtMs: Long = 0L
     private var qualityUpgradeAttempts: Int = 0
+    /** Session-remembered preferred resolution height (e.g. 720, 480).
+     *  Maintains a realistic quality ceiling across playlist items so the player
+     *  doesn't re-stall on every item on a bandwidth-constrained connection. */
+    private var sessionPreferredQualityHeight: Int? = null
+    /** Timestamp when the current quality level started playing stall-free. */
+    private var qualityStableSinceMs: Long = 0L
     private var settings: Settings = Settings(syncAccuracy = defaultSyncAccuracy(app))
     private var leaderTicker: Job? = null
     private var syncTicker: Job? = null
@@ -379,6 +387,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
                             seenChatFingerprints.remove(seenChatFingerprints.first())
                         }
+                        val currentEmotes = _state.value.emotes
+                        val currentShowEmotes = _state.value.showEmotes
+                        // Pre-warm parsing/sanitization on Dispatchers.Default so
+                        // expensive HTML parsing & regex matching are kept off the Main thread.
+                        withContext(Dispatchers.Default) {
+                            ChatHtml.prewarm(
+                                raw = event.message.html,
+                                greentext = event.message.addClass == "greentext",
+                                showImages = currentShowEmotes,
+                                emotes = currentEmotes
+                            )
+                        }
                         update { s ->
                             // Shadow-muted messages are only meant for moderators; the
                             // server already filters delivery, but drop them defensively.
@@ -461,7 +481,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // itself) cares about, not whatever's personally on screen.
         val current = _state.value.channelCurrentMedia
         if (current != null && current.id == media.id && current.type == media.type) {
-            lastServerTimeSeconds = media.currentTime
+            val rttCompSeconds = if (media.paused || media.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
+            val compensatedTime = if (media.seconds > 0 && media.currentTime + rttCompSeconds > media.seconds) media.seconds.toDouble() else (media.currentTime + rttCompSeconds)
+            lastServerTimeSeconds = compensatedTime
             lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
             isServerPaused = media.paused
             update {
@@ -485,12 +507,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(TAG, "changeMedia type=${media.type} player=$chosen " +
             "seconds=${media.seconds} sources=${media.direct.size} id=${media.id}")
         if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(media.currentTime)
-        // A genuinely new item — any quality step taken for whatever was
-        // playing before has no bearing on this one. See
-        // ChannelUiState.nativeQualityIndex's own doc comment.
+        val initialQualityIndex = resolveInitialQualityIndex(media)
         lastQualityChangeAtMs = 0L
-        qualityUpgradeAttempts = 0
-        lastServerTimeSeconds = media.currentTime
+        qualityStableSinceMs = SystemClock.elapsedRealtime()
+        val rttCompSeconds = if (media.paused || media.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
+        val compensatedTime = if (media.seconds > 0 && media.currentTime + rttCompSeconds > media.seconds) media.seconds.toDouble() else (media.currentTime + rttCompSeconds)
+        lastServerTimeSeconds = compensatedTime
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = media.paused
         // Player selection is re-run on every changeMedia, so a playlist moving
@@ -503,12 +525,69 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 playing = !media.paused,
                 playbackOffer = null,
                 compatOffer = offer,
-                nativeQualityIndex = 0
+                nativeQualityIndex = initialQualityIndex
             )
         }
         evaluateSync()
         // The player composable observes state.media and rebuilds the backend;
         // once it is ready it calls playerReady() below.
+    }
+
+    /**
+     * Resolves the starting quality index for a new item.
+     * Respects the session's adapted quality ceiling if bandwidth previously degraded,
+     * but safely and unnoticeably tests the next higher quality tier at item boundaries
+     * if previous items played smoothly without stalls for a sustained duration (>120s)
+     * and measured bandwidth is sufficient. Mid-item auto-upgrades are avoided to prevent
+     * decoder flushing and rebuffering loops during active playback.
+     */
+    private fun resolveInitialQualityIndex(media: MediaFrame): Int {
+        val preferredHeight = sessionPreferredQualityHeight ?: return 0
+        if (media.direct.isEmpty()) return 0
+
+        val now = SystemClock.elapsedRealtime()
+        val stableDuration = if (qualityStableSinceMs > 0) now - qualityStableSinceMs else 0L
+        var effectiveCap = preferredHeight
+
+        // If playback has been stable for >2 minutes across items, cautiously test
+        // the next tier up at the natural item boundary — but only if measured throughput
+        // supports it with a safety margin.
+        if (stableDuration > 120_000L && qualityUpgradeAttempts > 0) {
+            val candidateCap = when {
+                preferredHeight < 480 -> 480
+                preferredHeight < 720 -> 720
+                preferredHeight < 1080 -> 1080
+                else -> preferredHeight
+            }
+            val requiredBps = requiredBitrateForHeight(candidateCap)
+            val currentBitrate = player?.estimatedBitrate
+            // Only bump if bandwidth estimate is absent (unknown) or satisfies target with 30% headroom
+            val bandwidthOk = currentBitrate == null || currentBitrate >= (requiredBps * 1.3).toLong()
+            if (bandwidthOk) {
+                qualityUpgradeAttempts = (qualityUpgradeAttempts - 1).coerceAtLeast(0)
+                effectiveCap = candidateCap
+                sessionPreferredQualityHeight = effectiveCap
+                qualityStableSinceMs = now
+                Log.i(TAG, "quality: network stable for ${stableDuration / 1000}s (estBitrate=${currentBitrate?.let { "${it / 1000}kbps" } ?: "unknown"}); stepped initial quality cap up to ${effectiveCap}p for new item")
+            } else {
+                Log.i(TAG, "quality: network stable but estimated bandwidth (${currentBitrate / 1000}kbps) insufficient for ${candidateCap}p (needs ${requiredBps / 1000}kbps); holding at ${preferredHeight}p")
+            }
+        }
+
+        val matchIndex = media.direct.indexOfFirst { src ->
+            val h = src.quality.toIntOrNull() ?: Int.MAX_VALUE
+            h <= effectiveCap
+        }
+        return if (matchIndex >= 0) matchIndex else 0
+    }
+
+    private fun requiredBitrateForHeight(height: Int): Long {
+        return when {
+            height >= 1080 -> 4_500_000L  // 4.5 Mbps
+            height >= 720 -> 2_200_000L   // 2.2 Mbps
+            height >= 480 -> 1_000_000L   // 1.0 Mbps
+            else -> 500_000L              // 500 kbps
+        }
     }
 
     private fun startSyncTicker() {
@@ -523,7 +602,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun evaluateSync() {
         val s = _state.value
-        maybeUpgradeQuality(s)
         val p = player ?: return
         if (s.effectiveMode == CompatMode.WEB) return   // the web page syncs itself
         if (s.personalPickActive) return
@@ -556,36 +634,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTimeUpdate(update: TimeUpdate) {
-        lastServerTimeSeconds = update.currentTime
+        val rttCompSeconds = if (update.paused || update.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
+        val length = _state.value.media?.seconds ?: 0
+        val compensatedTime = if (length > 0 && update.currentTime + rttCompSeconds > length) length.toDouble() else (update.currentTime + rttCompSeconds)
+        lastServerTimeSeconds = compensatedTime
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = update.paused
         evaluateSync()
-    }
-
-    /**
-     * The gentle half of the NATIVE backend's lightweight quality
-     * auto-adaptation — see [onPlaybackStall] for the step down this climbs
-     * back from. Piggybacks on onTimeUpdate's own ~1/s cadence (CyTube's own
-     * currentTime broadcasts) rather than a dedicated ticker: after a
-     * stall-free stretch at a downgraded quality, try stepping back up one
-     * level. If that turns out to still be too much for the connection,
-     * onPlaybackStall steps right back down again on the next real stall —
-     * [QUALITY_CHANGE_COOLDOWN_MS] just keeps the two from fighting each
-     * other on every single tick, and [QUALITY_UPGRADE_RECHECK_MS] keeps an
-     * upgrade attempt itself rare rather than eager.
-     */
-    private fun maybeUpgradeQuality(s: ChannelUiState) {
-        if (s.nativeQualityIndex == 0) return   // already at the default (highest) — nothing to climb back to
-        if (s.player != MediaTypes.Player.NATIVE) return
-        val media = s.media ?: return
-        if (media.direct.size <= 1) return
-        val now = SystemClock.elapsedRealtime()
-        val backoffMs = QUALITY_UPGRADE_RECHECK_MS * (1 shl qualityUpgradeAttempts.coerceAtMost(4))
-        if (now - lastQualityChangeAtMs < backoffMs) return
-        val next = s.nativeQualityIndex - 1
-        lastQualityChangeAtMs = now
-        Log.i(TAG, "quality: trying back up to ${media.direct[next].quality}p after a stall-free window")
-        reloadAtQuality(next)
     }
 
     /**
@@ -599,7 +654,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * No amount of LoadControl/buffer-size
      * tuning can fix a SUSTAINED throughput shortfall (a bigger buffer only
      * buys more runway to absorb a short dip) — this is the actual lever for
-     * that case. See [maybeUpgradeQuality] for the way back up.
+     * that case. Quality stays latched at this lower level for the rest of the
+     * current media item to prevent mid-stream decoder reset flapping.
      */
     fun onPlaybackStall(stalledMs: Long) {
         if (stalledMs < QUALITY_DOWNGRADE_STALL_THRESHOLD_MS) return
@@ -613,12 +669,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val next = s.nativeQualityIndex + 1
         qualityUpgradeAttempts++
         lastQualityChangeAtMs = now
-        Log.i(TAG, "quality: stepping down to ${media.direct[next].quality}p after a ${stalledMs}ms stall")
+        qualityStableSinceMs = now
+        val nextQuality = media.direct[next]
+        sessionPreferredQualityHeight = nextQuality.quality.toIntOrNull()
+        Log.i(TAG, "quality: stepping down to ${nextQuality.quality}p after a ${stalledMs}ms stall")
         reloadAtQuality(next)
     }
 
     /**
-     * Shared by [onPlaybackStall] and [maybeUpgradeQuality]: updates
+     * Shared by quality step-downs: updates
      * [ChannelUiState.nativeQualityIndex] so PlayerSurface can switch quality
      * in place on the existing player without tearing down ExoPlayer or bumping
      * playerEpoch.
@@ -1012,10 +1071,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val (chosen, offer) = choosePlayerAndOffer(frame)
         Log.i(TAG, "personal pick type=${frame.type} player=$chosen id=${frame.id} uid=${item.uid}")
         if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(frame.currentTime)
+        val initialQualityIndex = resolveInitialQualityIndex(frame)
         // A genuinely different item from whatever was loaded before — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
-        qualityUpgradeAttempts = 0
+        qualityStableSinceMs = SystemClock.elapsedRealtime()
         update {
             it.copy(
                 media = frame,
@@ -1025,7 +1085,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 compatOffer = offer,
                 personalPickActive = true,
                 personalPickUid = item.uid,
-                nativeQualityIndex = 0
+                nativeQualityIndex = initialQualityIndex
             )
         }
     }
@@ -1047,11 +1107,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
         val (chosen, offer) = choosePlayerAndOffer(channelMedia)
         if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(channelMedia.currentTime)
+        val initialQualityIndex = resolveInitialQualityIndex(channelMedia)
         // Snapping back to the channel's own item is also a genuine item
         // change from whatever was personally loaded — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
-        qualityUpgradeAttempts = 0
+        qualityStableSinceMs = SystemClock.elapsedRealtime()
         lastServerTimeSeconds = channelMedia.currentTime
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = channelMedia.paused
@@ -1064,7 +1125,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 compatOffer = offer,
                 personalPickActive = false,
                 personalPickUid = -1,
-                nativeQualityIndex = 0
+                nativeQualityIndex = initialQualityIndex
             )
         }
         evaluateSync()
@@ -1193,19 +1254,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  rebuffer after an ordinary seek (a manual scrub, or SyncEngine's
          *  own hard-seek correction) settles in well under this on a fine
          *  connection. */
-        const val QUALITY_DOWNGRADE_STALL_THRESHOLD_MS = 1_500L
+        const val QUALITY_DOWNGRADE_STALL_THRESHOLD_MS = 3_000L
 
-        /** Minimum time between quality downgrades — short enough to allow
-         *  stepping down consecutively (e.g. 720p -> 480p -> 360p) without
-         *  prolonged freezes when a stream is unplayable. */
-        const val QUALITY_CHANGE_COOLDOWN_MS = 4_000L
-
-        /** How long a downgraded quality has to stay stall-free before
-         *  [maybeUpgradeQuality] cautiously tries stepping back up. Long
-         *  enough to be a real signal the connection recovered, not just a
-         *  lull between stalls; short enough that a genuinely-improved
-         *  connection doesn't stay stuck at a lower quality for the rest of
-         *  the video. */
-        const val QUALITY_UPGRADE_RECHECK_MS = 90_000L
+        /** Minimum time between quality downgrades — gives the player enough
+         *  time to establish a stable buffer on the new quality before evaluating
+         *  whether another step down is needed. */
+        const val QUALITY_CHANGE_COOLDOWN_MS = 20_000L
     }
 }

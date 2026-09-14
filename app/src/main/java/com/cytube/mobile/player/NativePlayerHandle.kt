@@ -12,6 +12,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import com.cytube.mobile.di.Graph
@@ -51,6 +52,12 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
 
     override val isNative: Boolean get() = true
 
+    override val estimatedBitrate: Long?
+        get() = if (isReleased) null else runCatching {
+            val estimate = DefaultBandwidthMeter.getSingletonInstance(appContext).bitrateEstimate
+            if (estimate > 0) estimate else null
+        }.getOrNull()
+
     /**
      * Every byte fetched for playback — whether the raw source straight off
      * CyTube's playlist (load()) or a resolver-supplied URL (loadUrl()) —
@@ -69,13 +76,18 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             Graph.DEFAULT_USER_AGENT
         }
         val requestHeaders = headers.filterKeys { it != "User-Agent" && it.isNotBlank() }
+        val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(appContext)
         val upstream = OkHttpDataSource.Factory(Graph.mediaHttp)
             .setUserAgent(userAgent)
+            .setTransferListener(bandwidthMeter)
             .apply { if (requestHeaders.isNotEmpty()) setDefaultRequestProperties(requestHeaders) }
         return CacheDataSource.Factory()
             .setCache(Graph.mediaCache(appContext))
             .setUpstreamDataSourceFactory(upstream)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+            .setFlags(
+                CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or
+                CacheDataSource.FLAG_IGNORE_CACHE_FOR_UNSET_LENGTH_REQUESTS
+            )
     }
 
     private fun createMediaSourceFactory(headers: Map<String, String> = emptyMap()): DefaultMediaSourceFactory {
@@ -102,13 +114,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     fun loadUrl(media: MediaFrame, url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
         if (isReleased) return
-        val sameMedia = (mediaId == media.id)
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
         Log.i("CyTubePlayer", "load type=${media.type} via=resolved mime=$mimeType headers=${headers.keys}")
         runCatching {
             val item = MediaItem.Builder().setUri(url)
+                .setCustomCacheKey("${media.type}:${media.id}")
                 .apply { if (!mimeType.isNullOrBlank()) setMimeType(mimeType) }
                 // Read by the MediaSession (see PlayerSurface's ExoSurface) to
                 // populate whatever system Now Playing UI is showing — without
@@ -123,11 +135,10 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                val currentPosMs = if (sameMedia && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
-                exo.setMediaSource(mediaSource, currentPosMs)
+                exo.setMediaSource(mediaSource, startPositionMs(media))
             }
             exo.prepare()
-            exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
+            exo.playWhenReady = !media.paused
         }.onFailure { e ->
             Log.w("CyTubePlayer", "loadUrl failed in NativePlayerHandle: ${e.message}", e)
         }
@@ -141,7 +152,9 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     override fun load(media: MediaFrame, qualityIndex: Int) {
         if (isReleased) return
-        val sameMedia = (mediaId == media.id)
+        val isQualityChange = (mediaId == media.id &&
+            exo.playbackState != Player.STATE_ENDED &&
+            exo.playbackState != Player.STATE_IDLE)
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
@@ -186,11 +199,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                val currentPosMs = if (sameMedia && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
+                val currentPosMs = if (isQualityChange && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
                 exo.setMediaSource(mediaSource, currentPosMs)
             }
             exo.prepare()
-            exo.playWhenReady = (!media.paused) && (media.currentTime >= 0)
+            exo.playWhenReady = !media.paused
         }.onFailure { e ->
             Log.w("CyTubePlayer", "load failed in NativePlayerHandle: ${e.message}", e)
         }

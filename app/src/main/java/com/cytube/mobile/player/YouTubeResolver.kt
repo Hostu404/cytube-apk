@@ -18,6 +18,7 @@ import org.schabi.newpipe.extractor.downloader.Response
 import org.schabi.newpipe.extractor.localization.ContentCountry
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.schabi.newpipe.extractor.stream.VideoStream
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -95,11 +96,17 @@ object YouTubeResolver {
             // separate video-only and audio tracks that would have to be merged
             // with a MergingMediaSource; that is a worthwhile follow-up but it
             // is not what this does today, so quality caps at the best muxed
-            // stream YouTube offers (usually 360p).
+            // stream YouTube offers (usually 360p). Prefer mp4 (H.264) over webm
+            // for hardware-accelerated playback on Android TV / low-end devices.
             val stream = info.videoStreams
                 .filter { !it.isVideoOnly && !it.url.isNullOrBlank() }
-                .maxByOrNull { it.resolution?.filter(Char::isDigit)?.toIntOrNull() ?: 0 }
-                ?: throw IllegalStateException("No muxed stream for $videoId")
+                .maxWithOrNull(
+                    compareBy<VideoStream> {
+                        it.resolution?.filter(Char::isDigit)?.toIntOrNull() ?: 0
+                    }.thenBy {
+                        if (it.format?.mimeType?.contains("mp4", ignoreCase = true) == true) 1 else 0
+                    }
+                ) ?: throw IllegalStateException("No muxed stream for $videoId")
 
             // getUrl() is @Nullable, and the isNullOrBlank() filter above does
             // not smart-cast across the lambda, so re-check it here.

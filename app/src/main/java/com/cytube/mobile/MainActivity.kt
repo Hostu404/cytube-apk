@@ -18,12 +18,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -96,7 +96,9 @@ class MainActivity : ComponentActivity() {
                 // screen re-reading SettingsStore on its own.
                 val appContext = LocalContext.current
                 val settingsStore = remember { SettingsStore(appContext) }
-                val settings by settingsStore.settings.collectAsState(initial = Settings(syncAccuracy = defaultSyncAccuracy(appContext)))
+                val settings by settingsStore.settings.collectAsStateWithLifecycle(
+                    initialValue = Settings(syncAccuracy = defaultSyncAccuracy(appContext))
+                )
                 val isDark = when (settings.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
