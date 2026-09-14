@@ -31,6 +31,8 @@ object MediaTypes {
         GDRIVE,
         /** Media3 on a URL StreamableResolver resolves first. */
         STREAMABLE,
+        /** Media3 on a URL PeerTubeResolver resolves first. */
+        PEERTUBE,
         /**
          * A single-video WebView — just the video surface, with chat,
          * playlist and sync all staying native around it. This is what
@@ -108,6 +110,7 @@ object MediaTypes {
         type == "yt" -> Player.NEWPIPE
         type == "gd" -> Player.GDRIVE
         type == "sb" -> Player.STREAMABLE
+        type == "pt" -> Player.PEERTUBE
         !embedPlayableSrc.isNullOrBlank() -> Player.EMBED
         else -> Player.WEB
     }
@@ -231,5 +234,5 @@ object MediaTypes {
      * fine to probe with.
      */
     fun canResolveIndependently(type: String): Boolean =
-        type in PLAYABLE_ID || type == "yt" || type == "gd" || type == "sb" || knownEmbedUrl(type, "x") != null
+        type in PLAYABLE_ID || type == "yt" || type == "gd" || type == "sb" || type == "pt" || knownEmbedUrl(type, "x") != null
 }

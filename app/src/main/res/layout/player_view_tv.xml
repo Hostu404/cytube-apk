@@ -1,12 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Standard SurfaceView layout for mobile devices.
+  TextureView layout for Android TV / Fire TV devices to fix emulator color
+  distortion / codec tint issues.
 -->
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/player_view"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    app:surface_type="surface_view"
+    app:surface_type="texture_view"
     app:show_buffering="never"
     app:use_artwork="false" />

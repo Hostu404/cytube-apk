@@ -60,12 +60,14 @@ import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
+import com.cytube.mobile.player.PeerTubeResolver
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.StreamableResolver
 import com.cytube.mobile.player.YouTubeResolver
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import com.cytube.mobile.R
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.webview.BLANK_EMBED_HTML
@@ -186,6 +188,8 @@ fun PlayerSurface(
                 GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.STREAMABLE ->
                 StreamableSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
+            player == MediaTypes.Player.PEERTUBE ->
+                PeerTubeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
                 // Deliberately NOT wired to the backgrounded signal
                 // ExoSurface uses for audioOnly — see EmbedSurface's own
@@ -776,11 +780,66 @@ private fun StreamableSurface(
     }
 }
 
+/** Resolves a PeerTube video id (domain;shortId) to a stream URL (preferring HLS), then hands over to the normal player. */
+@Composable
+private fun PeerTubeSurface(
+    media: MediaFrame,
+    showControls: Boolean,
+    onHandle: (PlayerHandle?) -> Unit,
+    onFailed: (String) -> Unit,
+    epoch: Int,
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    audioOnly: Boolean = false,
+    onEnded: (() -> Unit)? = null
+) {
+    var resolved by remember(media.id, epoch) {
+        mutableStateOf<PeerTubeResolver.Resolved?>(null)
+    }
+    var adjustedMedia by remember(media.id, epoch) {
+        mutableStateOf(media)
+    }
+    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(media.id, epoch) {
+        resolved = null
+        error = null
+        val startResolveMs = SystemClock.elapsedRealtime()
+        PeerTubeResolver.resolve(Graph.http, media.id)
+            .onSuccess {
+                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
+                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
+                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
+                    else (media.currentTime + elapsedSec)
+                } else {
+                    media.currentTime
+                }
+                adjustedMedia = media.copy(currentTime = targetTime)
+                resolved = it
+            }
+            .onFailure {
+                val why = "PeerTube extraction failed: ${it.message ?: it.javaClass.simpleName}"
+                Log.w("CyTubePlayer", "PeerTube lookup failed id=${media.id}", it)
+                error = why
+                onFailed(why)
+            }
+    }
+
+    when {
+        error != null -> Message(error!!)
+        resolved == null -> CircularProgressIndicator()
+        else -> ExoSurface(
+            adjustedMedia,
+            ResolvedSource(resolved!!.url, resolved!!.mimeType),
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
+        )
+    }
+}
+
 /**
  * Just what ExoSurface actually needs from a resolved stream. YouTubeResolver,
- * GoogleDriveResolver, and StreamableResolver each keep their own richer `Resolved`
+ * GoogleDriveResolver, StreamableResolver, and PeerTubeResolver each keep their own richer `Resolved`
  * (with a quality label used only for logging) — this is the common shape they
- * boil down to before playback. `headers` is empty for YouTube and Streamable;
+ * boil down to before playback. `headers` is empty for YouTube, Streamable, and PeerTube;
  * NewPipe's resolved googlevideo.com URLs don't need any.
  */
 private data class ResolvedSource(
@@ -825,7 +884,11 @@ private fun ExoSurface(
                     .setAudioTrackBufferSizeProvider(bufferSizeProvider)
                     .build()
             }
-        }.setEnableDecoderFallback(true)
+        }.apply {
+            if (isTv) {
+                setEnableDecoderFallback(true)
+            }
+        }
 
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
@@ -842,25 +905,42 @@ private fun ExoSurface(
             }
         }
 
+        val loadControl = DefaultLoadControl.Builder().run {
+            if (isTv) {
+                setAllocator(DefaultAllocator(true, 64 * 1024))
+                    .setTargetBufferBytes(64 * 1024 * 1024)
+                    .setBufferDurationsMs(
+                        /* minBufferMs = */ 15_000,
+                        /* maxBufferMs = */ 30_000,
+                        /* bufferForPlaybackMs = */ 1_500,
+                        /* bufferForPlaybackAfterRebufferMs = */ 3_000
+                    )
+                    .setBackBuffer(
+                        /* backBufferDurationMs = */ 0,
+                        /* retainBackBufferFromKeyframe = */ false
+                    )
+                    .setPrioritizeTimeOverSizeThresholds(false)
+            } else {
+                setBufferDurationsMs(
+                    DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
+                    LOAD_CONTROL_MAX_BUFFER_MS,
+                    LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS,
+                    LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
+                )
+                    .setBackBuffer(LOAD_CONTROL_BACK_BUFFER_MS, true)
+                    .setTargetBufferBytes(128 * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(true)
+            }
+            build()
+        }
+
         ExoPlayer.Builder(context, renderersFactory)
             .setTrackSelector(trackSelector)
             .setBandwidthMeter(bandwidthMeter)
             .setAudioAttributes(audioAttributes, true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
-            .setLoadControl(
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(
-                        DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
-                        LOAD_CONTROL_MAX_BUFFER_MS,
-                        LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS,
-                        LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
-                    )
-                    .setBackBuffer(LOAD_CONTROL_BACK_BUFFER_MS, true)
-                    .setTargetBufferBytes(if (isTv) 64 * 1024 * 1024 else 128 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build()
-            )
+            .setLoadControl(loadControl)
             .build()
     }
     val handle = remember(exo) { NativePlayerHandle(exo, context) }
@@ -1172,16 +1252,12 @@ private fun ExoSurface(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                // Inflated from res/layout/player_view.xml rather than
-                // `PlayerView(ctx)` so it gets a TextureView instead of the
-                // default SurfaceView — see that file for why: a SurfaceView's
-                // Surface is destroyed and recreated whenever this view is
-                // reparented, which is exactly what happens on every fullscreen
-                // and PiP transition now that the player is hoisted with
-                // movableContentOf. That teardown/rebuild is what showed up as a
-                // stutter right at the moment fullscreen or PiP toggled.
+                // Dynamically inflated: SurfaceView on standard mobile devices (player_view.xml),
+                // TextureView on Android TV / Fire TV (player_view_tv.xml) to prevent emulator/device
+                // codec tint and color distortion issues.
+                val layoutId = if (isTv) R.layout.player_view_tv else R.layout.player_view
                 val view = LayoutInflater.from(ctx)
-                    .inflate(R.layout.player_view, null, false) as PlayerView
+                    .inflate(layoutId, null, false) as PlayerView
                 view.apply {
                     this.player = exo
                     useController = showControls
