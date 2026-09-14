@@ -50,6 +50,8 @@ fun LoginScreen(onBack: () -> Unit) {
     }
 
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Account") },
