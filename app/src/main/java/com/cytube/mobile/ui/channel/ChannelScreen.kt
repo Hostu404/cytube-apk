@@ -1399,6 +1399,7 @@ private fun backendNote(state: ChannelUiState): String {
         com.cytube.mobile.net.MediaTypes.Player.NEWPIPE -> "Playing $label natively via NewPipe."
         com.cytube.mobile.net.MediaTypes.Player.GDRIVE -> "Playing $label natively via Google Drive."
         MediaTypes.Player.STREAMABLE -> "Playing $label natively via Streamable."
+        MediaTypes.Player.PEERTUBE -> "Playing $label natively via PeerTube."
         com.cytube.mobile.net.MediaTypes.Player.EMBED ->
             "$label plays via the provider's own embed. Chat, playlist and sync stay native."
         com.cytube.mobile.net.MediaTypes.Player.WEB ->

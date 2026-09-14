@@ -2,6 +2,7 @@ package com.cytube.mobile
 
 import android.app.Application
 import android.os.Build
+import android.graphics.Bitmap
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
@@ -10,6 +11,7 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.player.YouTubeResolver
+import com.cytube.mobile.ui.isTvDevice
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import java.util.concurrent.TimeUnit
@@ -28,8 +30,9 @@ class CyTubeApp : Application(), ImageLoaderFactory {
         YouTubeResolver.init(Graph.http)
     }
 
-    override fun newImageLoader(): ImageLoader =
-        ImageLoader.Builder(this)
+    override fun newImageLoader(): ImageLoader {
+        val isTv = isTvDevice(this)
+        return ImageLoader.Builder(this)
             // A client built off Graph.http, not Graph.http itself — but
             // deliberately NOT sharing its Dispatcher/ConnectionPool.
             // `newBuilder()` copies those by reference by default, which
@@ -96,16 +99,24 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             .allowRgb565(true)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.15)
+                    // Restrict TV memory cache to 10% of app heap (15% on mobile)
+                    .maxSizePercent(if (isTv) 0.10 else 0.15)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("emote_cache"))
-                    .maxSizeBytes(128L * 1024 * 1024)
+                    .maxSizeBytes(if (isTv) 64L * 1024 * 1024 else 128L * 1024 * 1024)
                     .build()
+            }
+            .apply {
+                if (isTv) {
+                    bitmapConfig(Bitmap.Config.RGB_565)
+                    allowHardware(false)
+                }
             }
             .respectCacheHeaders(false)   // emote URLs are effectively immutable
             .crossfade(false)             // no animation cost in a scrolling list
             .build()
+    }
 }

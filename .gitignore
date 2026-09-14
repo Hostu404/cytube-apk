@@ -9,7 +9,6 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-app/src/main/java/com/cytube/mobile/webview/
 app/src/test/
 
 # Release signing — never committed. Copy keystore.properties.example to get
