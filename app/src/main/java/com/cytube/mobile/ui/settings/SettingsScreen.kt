@@ -37,6 +37,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     LaunchedEffect(Unit) { store.settings.collect { settings = it } }
 
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = { Text("Settings") },

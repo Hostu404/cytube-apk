@@ -65,6 +65,8 @@ fun HomeScreen(
     }
 
     Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             // A plain TopAppBar, not LargeTopAppBar — the large variant's
             // whole point is a tall, expanded title area meant to collapse

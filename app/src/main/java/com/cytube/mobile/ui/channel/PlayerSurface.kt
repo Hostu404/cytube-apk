@@ -1252,9 +1252,8 @@ private fun ExoSurface(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                // Dynamically inflated: SurfaceView on standard mobile devices (player_view.xml),
-                // TextureView on Android TV / Fire TV (player_view_tv.xml) to prevent emulator/device
-                // codec tint and color distortion issues.
+                // Dynamically inflated: TextureView on standard mobile devices (player_view.xml)
+                // and Android TV / Fire TV (player_view_tv.xml) for smooth transitions and frame capture.
                 val layoutId = if (isTv) R.layout.player_view_tv else R.layout.player_view
                 val view = LayoutInflater.from(ctx)
                     .inflate(layoutId, null, false) as PlayerView

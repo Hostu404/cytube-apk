@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Standard SurfaceView layout for mobile devices.
+  Standard TextureView layout for mobile devices to support smooth navigation
+  transitions, alpha blending, clipping, and video frame snapshots without
+  SurfaceView punch-through artifacts.
 -->
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/player_view"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    app:surface_type="surface_view"
+    app:surface_type="texture_view"
     app:show_buffering="never"
     app:use_artwork="false" />
