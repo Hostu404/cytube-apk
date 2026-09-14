@@ -34,9 +34,11 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.content.Context
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -44,6 +46,11 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
@@ -54,7 +61,13 @@ import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
+import com.cytube.mobile.player.StreamableResolver
 import com.cytube.mobile.player.YouTubeResolver
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import com.cytube.mobile.R
+import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.webview.BLANK_EMBED_HTML
 import com.cytube.mobile.webview.EMBED_DEFENSIVE_SHIM_JS
 import com.cytube.mobile.webview.EMBED_ENDED_SENTINEL
@@ -84,19 +97,16 @@ import org.json.JSONObject
  *  LoadControl. Media3's own default (DefaultLoadControl.DEFAULT_MAX_BUFFER_MS)
  *  is 50s; raised here to give a large, high-bitrate file more runway to
  *  absorb a bandwidth dip before it ever has to enter STATE_BUFFERING. */
-private const val LOAD_CONTROL_MAX_BUFFER_MS = 90_000
+private const val LOAD_CONTROL_MAX_BUFFER_MS = 120_000
 
-/** How much ExoPlayer buffers before initially starting playback. Lowered to
- *  500ms so channel joins and seeks start playback almost instantly without
- *  waiting for a large initial buffer to fill. Background loader immediately
- *  fills toward DEFAULT_MIN_BUFFER_MS / LOAD_CONTROL_MAX_BUFFER_MS once
- *  playback begins. */
-private const val LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS = 500
+/** How much ExoPlayer buffers before initially starting playback. Set to
+ *  2,000ms so playback starts reliably with enough initial runway. */
+private const val LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS = 2_000
 
 /** How much ExoPlayer gathers before resuming playback after an actual
- *  stall — lowered to 2,000ms so stalls recover quickly instead of pausing
- *  playback for extended periods. */
-private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 2_000
+ *  stall — set to 4,000ms so the player has a stable cushion before resuming
+ *  and avoids immediate repeat rebuffers on struggling connections. */
+private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 4_000
 
 /** Retain 30s of decoded/buffered media behind the playback position.
  *  Enables instant backwards seeks and smooth backward SyncEngine speed
@@ -104,8 +114,9 @@ private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 2_000
 private const val LOAD_CONTROL_BACK_BUFFER_MS = 30_000
 
 /** Rolling window for tracking frequent short rebuffers so repeated stalls
- *  under 1.5s accumulate toward quality adaptation rather than being lost. */
+ *  under 3.0s accumulate toward quality adaptation rather than being lost. */
 private const val RECENT_STALL_WINDOW_MS = 10_000L
+private const val STALL_TRIGGER_MS = 3_000L
 
 @Composable
 fun PlayerSurface(
@@ -173,6 +184,8 @@ fun PlayerSurface(
                 NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.GDRIVE ->
                 GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
+            player == MediaTypes.Player.STREAMABLE ->
+                StreamableSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
                 // Deliberately NOT wired to the backgrounded signal
                 // ExoSurface uses for audioOnly — see EmbedSurface's own
@@ -600,13 +613,27 @@ private fun NewPipeSurface(
     var resolved by remember(media.id, epoch) {
         mutableStateOf<YouTubeResolver.Resolved?>(null)
     }
+    var adjustedMedia by remember(media.id, epoch) {
+        mutableStateOf(media)
+    }
     var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(media.id, epoch) {
         resolved = null
         error = null
+        val startResolveMs = SystemClock.elapsedRealtime()
         YouTubeResolver.resolve(media.id)
-            .onSuccess { resolved = it }
+            .onSuccess {
+                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
+                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
+                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
+                    else (media.currentTime + elapsedSec)
+                } else {
+                    media.currentTime
+                }
+                adjustedMedia = media.copy(currentTime = targetTime)
+                resolved = it
+            }
             .onFailure {
                 val why = "YouTube extraction failed (${it.javaClass.simpleName})"
                 error = why
@@ -618,7 +645,8 @@ private fun NewPipeSurface(
         error != null -> Message(error!!)
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
-            media, ResolvedSource(resolved!!.url, resolved!!.mimeType),
+            adjustedMedia,
+            ResolvedSource(resolved!!.url, resolved!!.mimeType),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
@@ -654,13 +682,27 @@ private fun GDriveSurface(
     var resolved by remember(media.id, epoch) {
         mutableStateOf<GoogleDriveResolver.Resolved?>(null)
     }
+    var adjustedMedia by remember(media.id, epoch) {
+        mutableStateOf(media)
+    }
     var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(media.id, epoch) {
         resolved = null
         error = null
+        val startResolveMs = SystemClock.elapsedRealtime()
         GoogleDriveResolver.resolve(Graph.http, media.id)
-            .onSuccess { resolved = it }
+            .onSuccess {
+                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
+                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
+                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
+                    else (media.currentTime + elapsedSec)
+                } else {
+                    media.currentTime
+                }
+                adjustedMedia = media.copy(currentTime = targetTime)
+                resolved = it
+            }
             .onFailure {
                 val why = "Google Drive extraction failed: ${it.message ?: it.javaClass.simpleName}"
                 Log.w("CyTubePlayer", "GDrive lookup failed id=${media.id}", it)
@@ -673,18 +715,73 @@ private fun GDriveSurface(
         error != null -> Message(error!!)
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
-            media, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
+            adjustedMedia, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
+            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
+        )
+    }
+}
+
+/** Resolves a Streamable video id to a direct MP4 stream URL, then hands over to the normal player. */
+@Composable
+private fun StreamableSurface(
+    media: MediaFrame,
+    showControls: Boolean,
+    onHandle: (PlayerHandle?) -> Unit,
+    onFailed: (String) -> Unit,
+    epoch: Int,
+    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
+    audioOnly: Boolean = false,
+    onEnded: (() -> Unit)? = null
+) {
+    var resolved by remember(media.id, epoch) {
+        mutableStateOf<StreamableResolver.Resolved?>(null)
+    }
+    var adjustedMedia by remember(media.id, epoch) {
+        mutableStateOf(media)
+    }
+    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(media.id, epoch) {
+        resolved = null
+        error = null
+        val startResolveMs = SystemClock.elapsedRealtime()
+        StreamableResolver.resolve(Graph.http, media.id)
+            .onSuccess {
+                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
+                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
+                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
+                    else (media.currentTime + elapsedSec)
+                } else {
+                    media.currentTime
+                }
+                adjustedMedia = media.copy(currentTime = targetTime)
+                resolved = it
+            }
+            .onFailure {
+                val why = "Streamable extraction failed: ${it.message ?: it.javaClass.simpleName}"
+                Log.w("CyTubePlayer", "Streamable lookup failed id=${media.id}", it)
+                error = why
+                onFailed(why)
+            }
+    }
+
+    when {
+        error != null -> Message(error!!)
+        resolved == null -> CircularProgressIndicator()
+        else -> ExoSurface(
+            adjustedMedia,
+            ResolvedSource(resolved!!.url, resolved!!.mimeType),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
 }
 
 /**
- * Just what ExoSurface actually needs from a resolved stream. YouTubeResolver
- * and GoogleDriveResolver each keep their own richer `Resolved` (with a
- * quality label used only for logging) — this is the common shape they both
- * boil down to before playback. `headers` is empty for YouTube; NewPipe's
- * resolved googlevideo.com URLs don't need any.
+ * Just what ExoSurface actually needs from a resolved stream. YouTubeResolver,
+ * GoogleDriveResolver, and StreamableResolver each keep their own richer `Resolved`
+ * (with a quality label used only for logging) — this is the common shape they
+ * boil down to before playback. `headers` is empty for YouTube and Streamable;
+ * NewPipe's resolved googlevideo.com URLs don't need any.
  */
 private data class ResolvedSource(
     val url: String,
@@ -708,25 +805,50 @@ private fun ExoSurface(
     qualityIndex: Int = 0
 ) {
     val context = LocalContext.current
-    val exo = remember(epoch) {
-        val renderersFactory = DefaultRenderersFactory(context)
-            .setEnableDecoderFallback(true)
+    val isTv = remember { isTvDevice(context) }
+    val exo = remember(epoch, isTv) {
+        val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(context)
+        val renderersFactory = object : DefaultRenderersFactory(context) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink? {
+                val bufferSizeProvider = DefaultAudioTrackBufferSizeProvider.Builder()
+                    .setMinPcmBufferDurationUs(500_000)
+                    .setMaxPcmBufferDurationUs(2_000_000)
+                    .setPcmBufferMultiplicationFactor(6)
+                    .build()
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioTrackBufferSizeProvider(bufferSizeProvider)
+                    .build()
+            }
+        }.setEnableDecoderFallback(true)
 
         val audioAttributes = AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
             .setUsage(C.USAGE_MEDIA)
             .build()
 
+        val trackSelector = DefaultTrackSelector(context).apply {
+            if (isTv) {
+                parameters = buildUponParameters()
+                    .setPreferredVideoMimeType(MimeTypes.VIDEO_H264)
+                    .setMaxVideoSize(1920, 1080)
+                    .setMaxVideoFrameRate(60)
+                    .build()
+            }
+        }
+
         ExoPlayer.Builder(context, renderersFactory)
+            .setTrackSelector(trackSelector)
+            .setBandwidthMeter(bandwidthMeter)
             .setAudioAttributes(audioAttributes, true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
             .setLoadControl(
-                // Steady-state target (min) is left at Media3's default (50s);
-                // bufferForPlayback is tuned down to 500ms to start playback
-                // faster on network-resolved items (Google Drive, NewPipe);
-                // max buffer is raised to give more runway on high-bitrate files;
-                // rebuffer target demands enough to resume safely after a stall.
                 DefaultLoadControl.Builder()
                     .setBufferDurationsMs(
                         DefaultLoadControl.DEFAULT_MIN_BUFFER_MS,
@@ -735,6 +857,7 @@ private fun ExoSurface(
                         LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
                     )
                     .setBackBuffer(LOAD_CONTROL_BACK_BUFFER_MS, true)
+                    .setTargetBufferBytes(if (isTv) 64 * 1024 * 1024 else 128 * 1024 * 1024)
                     .setPrioritizeTimeOverSizeThresholds(true)
                     .build()
             )
@@ -792,6 +915,16 @@ private fun ExoSurface(
     // recompose when it changes; the listener just wants whatever the
     // current view is at the moment a frame renders.
     val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
+    var ambientBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var transitionFreezeFrame by remember { mutableStateOf<Bitmap?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            ambientBitmap?.recycle()
+            ambientBitmap = null
+            transitionFreezeFrame?.recycle()
+            transitionFreezeFrame = null
+        }
+    }
 
     val scope = rememberCoroutineScope()
     DisposableEffect(exo) {
@@ -823,19 +956,24 @@ private fun ExoSurface(
             // video for the rest of that item's runtime, rather than this
             // one-shot being the only update it ever gets.
             override fun onRenderedFirstFrame() {
+                transitionFreezeFrame?.recycle()
+                transitionFreezeFrame = null
                 val snapshot = onFrameSnapshot ?: return
                 val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
-                // TextureView.getBitmap(w, h) downsamples internally rather
-                // than copying the full-resolution frame out first — this is
-                // already about as cheap as a frame grab gets. This call site
-                // only fires once per item (right as it starts); the
-                // periodic resample loop below is the separate, ongoing one.
-                runCatching { textureView.getBitmap(AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE) }
+                if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
+                    ambientBitmap = Bitmap.createBitmap(
+                        AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
+                    )
+                }
+                val target = ambientBitmap ?: return
+                runCatching { textureView.getBitmap(target) }
                     .getOrNull()
                     ?.let(snapshot)
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                transitionFreezeFrame?.recycle()
+                transitionFreezeFrame = null
                 // ERROR_CODE_IO_BAD_HTTP_STATUS alone doesn't say WHICH status,
                 // and that's the difference between "fixable" (wrong header)
                 // and "not fixable from here" (403 on a private file). Walk the
@@ -899,9 +1037,9 @@ private fun ExoSurface(
                             recentStalls.add(now to stalledMs)
                             recentStalls.removeAll { now - it.first > RECENT_STALL_WINDOW_MS }
                             val totalStalledMs = recentStalls.sumOf { it.second }
-                            if (totalStalledMs >= 1_500L || recentStalls.size >= 2) {
+                            if (totalStalledMs >= STALL_TRIGGER_MS || (recentStalls.size >= 2 && totalStalledMs >= 2_000L)) {
                                 recentStalls.clear()
-                                onStall?.invoke(totalStalledMs.coerceAtLeast(1_500L))
+                                onStall?.invoke(totalStalledMs.coerceAtLeast(STALL_TRIGGER_MS))
                             }
                         }
                     }
@@ -916,11 +1054,11 @@ private fun ExoSurface(
                             stallJob = scope.launch {
                                 recentStalls.removeAll { start - it.first > RECENT_STALL_WINDOW_MS }
                                 val priorStalled = recentStalls.sumOf { it.second }
-                                val threshold = (1_500L - priorStalled).coerceIn(300L, 1_500L)
+                                val threshold = (STALL_TRIGGER_MS - priorStalled).coerceIn(500L, STALL_TRIGGER_MS)
                                 delay(threshold)
                                 if (stallStartedAtMs == start) {
                                     recentStalls.clear()
-                                    onStall?.invoke(1_500L)
+                                    onStall?.invoke(STALL_TRIGGER_MS)
                                 }
                             }
                         }
@@ -948,23 +1086,19 @@ private fun ExoSurface(
     // (ambient glow can't be shown for this surface, e.g. EMBED/WEB).
     LaunchedEffect(exo, onFrameSnapshot) {
         val snapshot = onFrameSnapshot ?: return@LaunchedEffect
-        var sampleBitmap: Bitmap? = null
-        try {
-            while (true) {
-                delay(AMBIENT_RESAMPLE_INTERVAL_MS)
-                val isPlaying = runCatching { exo.isPlaying }.getOrDefault(false)
-                if (!isPlaying) continue
-                val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
-                if (sampleBitmap == null || sampleBitmap.isRecycled) {
-                    sampleBitmap = Bitmap.createBitmap(
-                        AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
-                    )
-                }
-                val bitmap = runCatching { textureView.getBitmap(sampleBitmap) }.getOrNull() ?: continue
-                snapshot(bitmap)
+        while (true) {
+            delay(AMBIENT_RESAMPLE_INTERVAL_MS)
+            val isPlaying = runCatching { exo.isPlaying }.getOrDefault(false)
+            if (!isPlaying) continue
+            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
+            if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
+                ambientBitmap = Bitmap.createBitmap(
+                    AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
+                )
             }
-        } finally {
-            sampleBitmap?.recycle()
+            val target = ambientBitmap ?: continue
+            val bitmap = runCatching { textureView.getBitmap(target) }.getOrNull() ?: continue
+            snapshot(bitmap)
         }
     }
 
@@ -1011,6 +1145,21 @@ private fun ExoSurface(
     // included so automatic quality adaptation switches streams directly on
     // the existing handle without tearing down the player.
     LaunchedEffect(media.id, media.type, resolved, epoch, qualityIndex) {
+        // When adapting quality in place for the same media item, capture the last
+        // rendered video frame so it stays displayed as an overlay while the decoder
+        // flushes and buffers the new stream, preventing a black screen flash.
+        if (handle.mediaId == media.id) {
+            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView
+            if (textureView != null && textureView.isAvailable) {
+                runCatching {
+                    val bmp = textureView.bitmap
+                    if (bmp != null) {
+                        transitionFreezeFrame?.recycle()
+                        transitionFreezeFrame = bmp
+                    }
+                }
+            }
+        }
         if (resolved != null) {
             handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers)
         } else {
@@ -1019,44 +1168,55 @@ private fun ExoSurface(
         onHandle(handle)
     }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { ctx ->
-            // Inflated from res/layout/player_view.xml rather than
-            // `PlayerView(ctx)` so it gets a TextureView instead of the
-            // default SurfaceView — see that file for why: a SurfaceView's
-            // Surface is destroyed and recreated whenever this view is
-            // reparented, which is exactly what happens on every fullscreen
-            // and PiP transition now that the player is hoisted with
-            // movableContentOf. That teardown/rebuild is what showed up as a
-            // stutter right at the moment fullscreen or PiP toggled.
-            val view = LayoutInflater.from(ctx)
-                .inflate(com.cytube.mobile.R.layout.player_view, null, false) as PlayerView
-            view.apply {
-                this.player = exo
-                useController = showControls
-                // Media3's own default is 3s — shares ChannelScreen's
-                // CONTROLS_AUTO_HIDE_MS instead so this controller's
-                // scrubber/play-pause bar fades on the same schedule as
-                // ChannelScreen's own overlay icons rather than lingering
-                // noticeably longer than everything else on screen.
-                controllerShowTimeoutMs = CONTROLS_AUTO_HIDE_MS.toInt()
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            }.also { playerViewRef[0] = it }
-        },
-        update = { view ->
-            if (view.player !== exo) {
-                view.player = exo
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                // Inflated from res/layout/player_view.xml rather than
+                // `PlayerView(ctx)` so it gets a TextureView instead of the
+                // default SurfaceView — see that file for why: a SurfaceView's
+                // Surface is destroyed and recreated whenever this view is
+                // reparented, which is exactly what happens on every fullscreen
+                // and PiP transition now that the player is hoisted with
+                // movableContentOf. That teardown/rebuild is what showed up as a
+                // stutter right at the moment fullscreen or PiP toggled.
+                val view = LayoutInflater.from(ctx)
+                    .inflate(R.layout.player_view, null, false) as PlayerView
+                view.apply {
+                    this.player = exo
+                    useController = showControls
+                    // Media3's own default is 3s — shares ChannelScreen's
+                    // CONTROLS_AUTO_HIDE_MS instead so this controller's
+                    // scrubber/play-pause bar fades on the same schedule as
+                    // ChannelScreen's own overlay icons rather than lingering
+                    // noticeably longer than everything else on screen.
+                    controllerShowTimeoutMs = CONTROLS_AUTO_HIDE_MS.toInt()
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                }.also { playerViewRef[0] = it }
+            },
+            update = { view ->
+                if (view.player !== exo) {
+                    view.player = exo
+                }
+                view.useController = showControls
+                playerViewRef[0] = view
+            },
+            onRelease = { view ->
+                view.player = null
             }
-            view.useController = showControls
-            playerViewRef[0] = view
-        },
-        onRelease = { view ->
-            view.player = null
+        )
+        val freezeFrame = transitionFreezeFrame
+        if (freezeFrame != null && !freezeFrame.isRecycled) {
+            Image(
+                bitmap = freezeFrame.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
         }
-    )
+    }
 }
 
 /** Side length (px) of the TextureView snapshot used for the ambient glow —

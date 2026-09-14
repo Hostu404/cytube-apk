@@ -38,6 +38,13 @@ class CyTubeClient(
 
     private var socket: Socket? = null
 
+    @Volatile
+    private var lastPingSentMs: Long = 0L
+
+    @Volatile
+    var estimatedRttMs: Long = 100L
+        private set
+
     // Replayed on every reconnect.
     private var channelName: String? = null
     private var channelPassword: String? = null
@@ -95,9 +102,25 @@ class CyTubeClient(
             emit(CyTubeEvent.Connected)
             replaySession()
         }
-        s.on(Socket.EVENT_DISCONNECT) { emit(CyTubeEvent.Disconnected) }
+        s.on(Socket.EVENT_DISCONNECT) {
+            lastPingSentMs = 0L
+            emit(CyTubeEvent.Disconnected)
+        }
         s.on(Socket.EVENT_CONNECT_ERROR) { args ->
             emit(CyTubeEvent.ConnectionFailed(args.firstOrNull()?.toString() ?: "connect error"))
+        }
+        s.io().on(Manager.EVENT_TRANSPORT) { args ->
+            val engine = args.firstOrNull() as? io.socket.engineio.client.Socket ?: return@on
+            engine.on(io.socket.engineio.client.Socket.EVENT_PING) {
+                lastPingSentMs = System.nanoTime() / 1_000_000L
+            }
+            engine.on(io.socket.engineio.client.Socket.EVENT_PONG) {
+                val now = System.nanoTime() / 1_000_000L
+                if (lastPingSentMs > 0L) {
+                    val sample = (now - lastPingSentMs).coerceIn(10L, 2000L)
+                    estimatedRttMs = if (estimatedRttMs == 100L) sample else (estimatedRttMs * 7 + sample) / 8
+                }
+            }
         }
         s.io().on(Manager.EVENT_RECONNECT_ATTEMPT) { args ->
             emit(CyTubeEvent.Reconnecting((args.firstOrNull() as? Int) ?: 0))

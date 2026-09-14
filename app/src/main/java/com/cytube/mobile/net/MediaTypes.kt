@@ -29,6 +29,8 @@ object MediaTypes {
         NEWPIPE,
         /** Media3 on a URL GoogleDriveResolver resolves first. */
         GDRIVE,
+        /** Media3 on a URL StreamableResolver resolves first. */
+        STREAMABLE,
         /**
          * A single-video WebView — just the video surface, with chat,
          * playlist and sync all staying native around it. This is what
@@ -105,6 +107,7 @@ object MediaTypes {
         type == "yt" && isLive && !embedPlayableSrc.isNullOrBlank() -> Player.EMBED
         type == "yt" -> Player.NEWPIPE
         type == "gd" -> Player.GDRIVE
+        type == "sb" -> Player.STREAMABLE
         !embedPlayableSrc.isNullOrBlank() -> Player.EMBED
         else -> Player.WEB
     }
@@ -228,5 +231,5 @@ object MediaTypes {
      * fine to probe with.
      */
     fun canResolveIndependently(type: String): Boolean =
-        type in PLAYABLE_ID || type == "yt" || type == "gd" || knownEmbedUrl(type, "x") != null
+        type in PLAYABLE_ID || type == "yt" || type == "gd" || type == "sb" || knownEmbedUrl(type, "x") != null
 }

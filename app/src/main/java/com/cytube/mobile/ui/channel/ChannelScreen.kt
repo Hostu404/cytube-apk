@@ -71,6 +71,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import kotlinx.coroutines.delay
@@ -1397,6 +1398,7 @@ private fun backendNote(state: ChannelUiState): String {
         com.cytube.mobile.net.MediaTypes.Player.NATIVE -> "Playing $label natively."
         com.cytube.mobile.net.MediaTypes.Player.NEWPIPE -> "Playing $label natively via NewPipe."
         com.cytube.mobile.net.MediaTypes.Player.GDRIVE -> "Playing $label natively via Google Drive."
+        MediaTypes.Player.STREAMABLE -> "Playing $label natively via Streamable."
         com.cytube.mobile.net.MediaTypes.Player.EMBED ->
             "$label plays via the provider's own embed. Chat, playlist and sync stay native."
         com.cytube.mobile.net.MediaTypes.Player.WEB ->

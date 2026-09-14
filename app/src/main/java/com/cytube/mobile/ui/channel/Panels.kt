@@ -131,7 +131,7 @@ private fun inlineEmotes(
                     model = ImageRequest.Builder(context)
                         .data(url)
                         .size(Size(widthPx, heightPx))
-                        .precision(Precision.INEXACT)
+                        .precision(Precision.EXACT)
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
@@ -260,7 +260,11 @@ fun ChatPanel(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            items(messages, key = { it.seq }) { msg ->
+            items(
+                items = messages,
+                key = { it.seq },
+                contentType = { if (it.isServerMessage) "server" else "user" }
+            ) { msg ->
                 ChatRow(
                     msg = msg,
                     showEmotes = showEmotes,

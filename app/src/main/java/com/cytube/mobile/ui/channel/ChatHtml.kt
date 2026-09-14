@@ -109,6 +109,27 @@ object ChatHtml {
 
     private val renderCache = LruCache<RenderCacheKey, Rendered>(300)
 
+    /**
+     * Pre-computes and caches message rendering on a background dispatcher (e.g. Dispatchers.Default)
+     * so that heavy Jsoup parsing, regex matching, and tokenization occur off the main UI thread.
+     */
+    fun prewarm(
+        raw: String,
+        greentext: Boolean,
+        showImages: Boolean,
+        emotes: EmoteSet = EmoteSet.EMPTY
+    ) {
+        // Pre-parse using Unspecified link color; ChatHtml.render will hit cache
+        // or fast path with zero contention on UI layout passes.
+        render(
+            raw = raw,
+            greentext = greentext,
+            linkColor = Color.Unspecified,
+            showImages = showImages,
+            emotes = emotes
+        )
+    }
+
     fun render(
         raw: String,
         greentext: Boolean,
