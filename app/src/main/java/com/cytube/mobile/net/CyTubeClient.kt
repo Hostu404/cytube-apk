@@ -3,6 +3,7 @@ package com.cytube.mobile.net
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -37,6 +38,8 @@ class CyTubeClient(
     val events: SharedFlow<CyTubeEvent> = _events.asSharedFlow()
 
     private var socket: Socket? = null
+    private var reconnectJob: Job? = null
+    private var reconnectAttempts: Int = 0
 
     @Volatile
     private var lastPingSentMs: Long = 0L
@@ -71,6 +74,9 @@ class CyTubeClient(
 
     suspend fun connect(channel: String, credential: Credential?, password: String? = null) {
         disconnect()
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts = 0
         channelName = channel
         channelPassword = password
         this.credential = credential
@@ -80,11 +86,10 @@ class CyTubeClient(
         val opts = IO.Options().apply {
             transports = arrayOf("websocket", "polling")
             reconnection = true
-            reconnectionDelay = 1_000
-            reconnectionDelayMax = 15_000
-            // Unbounded: a channel is a long-lived session and users expect it
-            // to come back after a tunnel or a lift.
-            reconnectionAttempts = Int.MAX_VALUE
+            reconnectionDelay = 1_000L
+            reconnectionDelayMax = 30_000L
+            randomizationFactor = 0.5
+            reconnectionAttempts = 10
             timeout = 20_000
             (credential as? Credential.Cookie)?.let {
                 extraHeaders = mapOf("Cookie" to listOf("auth=${it.authCookie}"))
@@ -293,28 +298,28 @@ class CyTubeClient(
     }
 
     /**
-     * Called from ChannelViewModel.onAppBackgroundChanged (itself driven by
-     * MainActivity's onStop/onStart) so a dropped connection doesn't retry
-     * as eagerly while nobody's watching. `reconnectionAttempts` is left
-     * uncapped either way — giving up after N tries would mean a channel
-     * left open overnight never reconnects on its own even once the user is
-     * back, which is worse than a slower retry cadence — only the delay
-     * between attempts changes. Foregrounding restores the snappy default
-     * immediately. No-op if nothing is connected yet; the next connect()
-     * picks up whichever policy is current via the same io()/Manager.
+     * Pauses or resumes reconnection attempts based on application background state.
+     * When backgrounded, reconnection is disabled to prevent battery drain and server hammering.
+     * When foregrounded, reconnection is re-enabled and an active reconnect is triggered if disconnected.
      */
     fun setBackgrounded(backgrounded: Boolean) {
-        val manager = socket?.io() ?: return
+        val s = socket ?: return
+        val manager = s.io()
         if (backgrounded) {
-            manager.reconnectionDelay(5_000)
-            manager.reconnectionDelayMax(60_000)
+            manager.reconnection(false)
         } else {
-            manager.reconnectionDelay(1_000)
-            manager.reconnectionDelayMax(15_000)
+            manager.reconnection(true)
+            if (!s.connected()) {
+                s.connect()
+            }
         }
     }
 
     fun disconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+        reconnectAttempts = 0
+
         socket?.let {
             it.off()
             it.disconnect()
@@ -322,6 +327,11 @@ class CyTubeClient(
         }
         socket = null
         leaderName = null
+        channelName = null
+        channelPassword = null
+        credential = null
+        localUsername = null
+        localRank = 0.0
     }
 
     // ---- helpers ----
