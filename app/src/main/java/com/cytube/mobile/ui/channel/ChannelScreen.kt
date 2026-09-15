@@ -16,6 +16,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -58,6 +59,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -144,8 +146,13 @@ fun ChannelScreen(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     val activity = context as? Activity
     val isTv = remember { isTvDevice(context) }
+
+    LaunchedEffect(Unit) {
+        focusManager.clearFocus()
+    }
 
     var fullscreen by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
@@ -559,6 +566,7 @@ fun ChannelScreen(
         }
         LaunchedEffect(Unit) {
             onFullscreenChange(true)
+            runCatching { videoFocusRequester.requestFocus() }
             runCatching {
                 activity?.window?.let { window ->
                     val controller = WindowCompat.getInsetsController(window, window.decorView)
@@ -592,6 +600,7 @@ fun ChannelScreen(
             Box(
                 Modifier
                     .fillMaxSize()
+                    .focusGroup()
                     .focusRequester(videoFocusRequester)
                     .focusable()
                     .onPreviewKeyEvent { event ->

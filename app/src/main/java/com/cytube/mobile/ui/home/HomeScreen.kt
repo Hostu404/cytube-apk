@@ -18,6 +18,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -47,6 +49,8 @@ fun HomeScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val isTv = remember { isTvDevice(context) }
+    val focusManager = LocalFocusManager.current
+    val initialFocusRequester = remember { FocusRequester() }
 
     // Fires every time this composable is (re)composed -- which, under
     // Navigation-Compose, is every time the homepage is actually navigated
@@ -60,6 +64,11 @@ fun HomeScreen(
     // channel doesn't hammer the scrape every time -- the manual Refresh
     // button (force = true) is what's left for "no, really, right now".
     LaunchedEffect(Unit) {
+        if (isTv) {
+            runCatching { initialFocusRequester.requestFocus() }
+        } else {
+            focusManager.clearFocus()
+        }
         vm.refreshSession()
         vm.refresh()
     }
@@ -88,7 +97,10 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onOpenLogin) {
+                    TextButton(
+                        onClick = onOpenLogin,
+                        modifier = Modifier.focusRequester(initialFocusRequester)
+                    ) {
                         Text(state.loggedInAs ?: "Log in", maxLines = 1)
                     }
                     IconButton(onClick = onOpenSettings) {

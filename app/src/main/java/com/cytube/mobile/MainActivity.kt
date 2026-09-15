@@ -1,6 +1,7 @@
 package com.cytube.mobile
 
 import android.app.PictureInPictureParams
+import android.app.UiModeManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -213,6 +214,15 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         appInBackground = true
+
+        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? UiModeManager
+        val isTv = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
+                packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+
+        if (isTv) {
+            finishAndRemoveTask()
+            System.exit(0)
+        }
     }
 
     override fun onStart() {
