@@ -256,6 +256,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun connect(channel: String) {
+        playerAttachedAtMs = SystemClock.elapsedRealtime()
         _state.value = _state.value.copy(connection = ConnectionState.CONNECTING)
         guestRetries = 0
         val credential = Graph.auth(getApplication()).credentialForSession()
@@ -510,6 +511,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val initialQualityIndex = resolveInitialQualityIndex(media)
         lastQualityChangeAtMs = 0L
         qualityStableSinceMs = SystemClock.elapsedRealtime()
+        playerAttachedAtMs = SystemClock.elapsedRealtime()
         val rttCompSeconds = if (media.paused || media.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
         val compensatedTime = if (media.seconds > 0 && media.currentTime + rttCompSeconds > media.seconds) media.seconds.toDouble() else (media.currentTime + rttCompSeconds)
         lastServerTimeSeconds = compensatedTime

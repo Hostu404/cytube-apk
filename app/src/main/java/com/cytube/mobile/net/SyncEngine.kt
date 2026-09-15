@@ -95,7 +95,8 @@ class SyncEngine {
         if (withinGracePeriod) return Result()
 
         val local = player.currentTimeSeconds()
-        if (local.isNaN() || local.isInfinite() || local < 0.0) return Result()
+        // Ignore uninitialized (0.0) or invalid local player positions while player is spinning up
+        if (local.isNaN() || local.isInfinite() || local <= 0.0) return Result()
         val diff = if (currentTime - local != 0.0) currentTime - local else 0.0
 
         // Non-native / external players (WebView embeds: YouTube IFrame API, Vimeo SDK,

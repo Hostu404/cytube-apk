@@ -99,7 +99,6 @@ object ChatHtml {
     private data class RenderCacheKey(
         val raw: String,
         val greentext: Boolean,
-        val linkColorVal: ULong,
         val showImages: Boolean,
         val emotesHash: Int,
         val dropImages: Boolean,
@@ -165,7 +164,6 @@ object ChatHtml {
         val cacheKey = RenderCacheKey(
             raw = raw,
             greentext = greentext,
-            linkColorVal = linkColor.value,
             showImages = showImages,
             emotesHash = System.identityHashCode(emotes),
             dropImages = dropImages,
@@ -173,7 +171,7 @@ object ChatHtml {
             revealedSpoilers = revealedSpoilers
         )
         synchronized(renderCache) {
-            renderCache.get(cacheKey)?.let { return it }
+            renderCache.get(cacheKey)?.let { return it.withLinkColor(linkColor) }
         }
 
         // Emote substitution happens here, exactly as the official client does
@@ -215,6 +213,23 @@ object ChatHtml {
             renderCache.put(cacheKey, result)
         }
         return result
+    }
+
+    private fun Rendered.withLinkColor(linkColor: Color): Rendered {
+        if (linkColor == Color.Unspecified) return this
+        val linkAnnotations = text.getStringAnnotations(LINK_TAG, 0, text.length)
+        if (linkAnnotations.isEmpty()) return this
+        val styled = buildAnnotatedString {
+            append(text)
+            for (span in linkAnnotations) {
+                addStyle(
+                    SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
+                    span.start,
+                    span.end
+                )
+            }
+        }
+        return copy(text = styled)
     }
 
     /** See [Rendered.soloEmoteCount]: nonzero only when every bit of visible
