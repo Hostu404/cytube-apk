@@ -27,7 +27,7 @@ This is a **native Android application**, not simply the CyTube website wrapped 
 
 ---
 
-## Why is Cytube APK?
+## Why is CyTube APK?
 
 https://youtube.com/watch?v=5hLWTEFZLZM
 
