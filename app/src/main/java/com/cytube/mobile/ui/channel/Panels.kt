@@ -105,6 +105,17 @@ private const val SOLO_EMOTE_HEIGHT = 56f
  */
 private object EmoteAspect {
     val ratios = mutableStateMapOf<String, Float>()
+    // Unbounded before this — every distinct emote URL seen all session (across
+    // every channel visited) stayed in memory forever. A long session across a
+    // few busy channels can rack up thousands of distinct emote URLs; this
+    // caps it with a blunt but simple full-clear once it's clearly grown past
+    // any single channel's real emote set. Losing cached ratios just means a
+    // brief re-measure flicker next time those emotes render, not a crash.
+    private const val MAX_ENTRIES = 500
+    fun record(url: String, ratio: Float) {
+        if (ratios.size >= MAX_ENTRIES && url !in ratios) ratios.clear()
+        ratios[url] = ratio
+    }
 }
 
 @Composable
@@ -141,7 +152,7 @@ private fun inlineEmotes(
                         if (size.width > 0f && size.height > 0f &&
                             size.width.isFinite() && size.height.isFinite()
                         ) {
-                            EmoteAspect.ratios[url] = size.width / size.height
+                            EmoteAspect.record(url, size.width / size.height)
                         }
                     }
                 )
@@ -1111,7 +1122,13 @@ fun PlaylistPanel(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}_$idx" else "pos_${idx}_${item.mediaId}" }) { _, item ->
+                // uid is already unique and stable once assigned — appending idx
+                // on top of it defeated Compose's recomposition-avoidance, since
+                // any playlist mutation shifts every downstream idx and so
+                // changes every key below it, forcing a full rebuild instead of
+                // reusing existing item composition state. uid < 0 (no id yet)
+                // is the one case idx is still needed for.
+                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { _, item ->
                     val personallyResolvable = MediaTypes.canResolveIndependently(item.type)
                     val isCurrent = if (syncEnabled) item.uid == currentUid else item.uid == personalPickUid
                     val rowEnabled = if (syncEnabled) canControl else personallyResolvable

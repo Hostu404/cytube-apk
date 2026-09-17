@@ -7,7 +7,6 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Layer 4b: the Google Drive player implementation.
@@ -56,21 +55,14 @@ object GoogleDriveResolver {
 
     // Same reasoning as YouTubeResolver's cache: these URLs are signed and
     // time-limited, so this only needs to survive a player-surface rebuild.
-    private val cache = ConcurrentHashMap<String, Pair<Long, Resolved>>()
-    private const val CACHE_MS = 5 * 60 * 1000L
+    private val cache = TimedCache<String, Resolved>(ttlMs = 5 * 60 * 1000L, evictAboveSize = 20)
 
     suspend fun resolve(http: OkHttpClient, fileId: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_FILE_ID_REGEX.matches(fileId)) {
             Log.w(TAG, "rejected malformed Google Drive file id (len=${fileId.length})")
             return@withContext Result.failure(IllegalArgumentException("Invalid Google Drive file id"))
         }
-        val now = System.currentTimeMillis()
-        if (cache.size > 20) {
-            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
-        }
-        cache[fileId]?.let { (at, r) ->
-            if (now - at < CACHE_MS) return@withContext Result.success(r)
-        }
+        cache.get(fileId)?.let { return@withContext Result.success(it) }
         runCatching {
             val req = Request.Builder()
                 .url("$PLAYBACK_API/$fileId/playback?key=$API_KEY")
@@ -103,7 +95,7 @@ object GoogleDriveResolver {
                 ?: throw IllegalStateException("No muxed stream for this Google Drive video")
 
             Log.i(TAG, "resolved $fileId -> ${resolved.label} ${resolved.mimeType}")
-            cache[fileId] = System.currentTimeMillis() to resolved
+            cache.put(fileId, resolved)
             resolved
         }.onFailure {
             Log.w(TAG, "resolve failed for $fileId: ${it.javaClass.simpleName} - ${it.message}", it)

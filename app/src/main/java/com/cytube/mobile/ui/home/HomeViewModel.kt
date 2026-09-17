@@ -22,12 +22,22 @@ data class HomeUiState(
     val loggedInAs: String? = null,
     val indexUnavailable: Boolean = false
 ) {
-    val filtered: List<PublicChannel>
-        get() = if (query.isBlank()) channels else channels.filter {
+    // Was a plain `get()`, recomputing the full filter pass over `channels`
+    // on every single read. HomeScreen reads this 3 separate times per
+    // recomposition (the direct-entry check below, the list itself, the
+    // empty-state check) and `query` changes on every keystroke, so that was
+    // the whole channel list scanned 3x per keystroke instead of once. `by
+    // lazy` computes it once per HomeUiState instance instead — still
+    // recomputes whenever query/channels actually change (each `copy()` is a
+    // new instance with its own fresh lazy), just not 3 times for the same
+    // instance.
+    val filtered: List<PublicChannel> by lazy {
+        if (query.isBlank()) channels else channels.filter {
             it.name.contains(query, true) ||
                 it.pageTitle.contains(query, true) ||
                 it.nowPlaying.contains(query, true)
         }
+    }
 
     /** Direct entry, mirroring the "Enter Channel" box on the CyTube homepage. */
     val directEntryName: String?

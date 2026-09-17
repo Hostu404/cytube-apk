@@ -12,6 +12,7 @@ import android.webkit.CookieManager
 import android.webkit.PermissionRequest
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -242,6 +243,7 @@ private fun EmbedSurface(
         media = media,
         embedSrc = embedSrc,
         onHandle = onHandle,
+        onFailed = onFailed,
         onEnded = onEnded
     )
 }
@@ -278,6 +280,13 @@ private class InProcessEmbedPlayerHandle(
     }
 
     override fun play() {
+        // Set immediately rather than waiting for the JS report() tick (see
+        // the EMBED_STATE_SENTINEL watcher below) to echo it back — that's a
+        // once-a-second poll, so SyncEngine/ChannelViewModel reading isPaused
+        // right after calling play() could see up to ~1s of stale "still
+        // paused" state. The JS side will confirm this on its next report()
+        // regardless; this just stops this handle from lying in the meantime.
+        isPaused = false
         webView?.evaluateJavascript(
             "if (window.__cytubeEmbed && window.__cytubeEmbed.play) window.__cytubeEmbed.play();",
             null
@@ -285,6 +294,7 @@ private class InProcessEmbedPlayerHandle(
     }
 
     override fun pause() {
+        isPaused = true
         webView?.evaluateJavascript(
             "if (window.__cytubeEmbed && window.__cytubeEmbed.pause) window.__cytubeEmbed.pause();",
             null
@@ -292,6 +302,7 @@ private class InProcessEmbedPlayerHandle(
     }
 
     override fun seekTo(seconds: Double) {
+        lastCurrentTime = seconds
         webView?.evaluateJavascript(
             "if (window.__cytubeEmbed && window.__cytubeEmbed.seekTo) window.__cytubeEmbed.seekTo($seconds);",
             null
@@ -317,10 +328,12 @@ private fun InProcessEmbedSurface(
     media: MediaFrame,
     embedSrc: String,
     onHandle: (PlayerHandle?) -> Unit,
+    onFailed: ((String) -> Unit)? = null,
     onEnded: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val currentOnHandle by rememberUpdatedState(onHandle)
+    val currentOnFailed by rememberUpdatedState(onFailed)
     val currentOnEnded by rememberUpdatedState(onEnded)
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
     val type = media.type
@@ -404,6 +417,37 @@ private fun InProcessEmbedSurface(
                             )
                         }
                         return null
+                    }
+
+                    // Previously nothing here ever called onFailed — a generic
+                    // embed (dm/yt/vi/pt/sb/custom cu-bc-bn iframe) that failed
+                    // to load at all (dead link, offline instance, DNS
+                    // failure...) just sat on a black screen forever with no
+                    // fallback offered, unlike every other surface in this file
+                    // (NewPipeSurface/GDriveSurface/StreamableSurface/
+                    // PeerTubeSurface), which all report failures so
+                    // ChannelViewModel can offer Compatibility View. Only the
+                    // main-frame navigation matters here — sub-resource errors
+                    // (ads/trackers/analytics the embed page itself loads) are
+                    // not this surface failing.
+                    override fun onReceivedError(
+                        view: WebView,
+                        request: WebResourceRequest,
+                        error: WebResourceError
+                    ) {
+                        if (request.isForMainFrame) {
+                            currentOnFailed?.invoke("Embed failed to load (${error.description})")
+                        }
+                    }
+
+                    override fun onReceivedHttpError(
+                        view: WebView,
+                        request: WebResourceRequest,
+                        errorResponse: android.webkit.WebResourceResponse
+                    ) {
+                        if (request.isForMainFrame) {
+                            currentOnFailed?.invoke("Embed failed to load (HTTP ${errorResponse.statusCode})")
+                        }
                     }
 
                     override fun onPageFinished(view: WebView, url: String?) {
@@ -937,7 +981,13 @@ private fun ExoSurface(
         ExoPlayer.Builder(context, renderersFactory)
             .setTrackSelector(trackSelector)
             .setBandwidthMeter(bandwidthMeter)
-            .setAudioAttributes(audioAttributes, true)
+            // handleAudioFocus=false: don't request AUDIOFOCUS_GAIN. With it
+            // true (the old behavior), starting a video silences/pauses
+            // whatever else is playing (Spotify, etc). false means CyTube
+            // just plays without asking for exclusive audio rights, so it
+            // coexists instead — at the cost of not auto-pausing itself for
+            // interruptions like a phone call ringtone.
+            .setAudioAttributes(audioAttributes, false)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
             .setLoadControl(loadControl)
@@ -1119,7 +1169,17 @@ private fun ExoSurface(
                             val totalStalledMs = recentStalls.sumOf { it.second }
                             if (totalStalledMs >= STALL_TRIGGER_MS || (recentStalls.size >= 2 && totalStalledMs >= 2_000L)) {
                                 recentStalls.clear()
-                                onStall?.invoke(totalStalledMs.coerceAtLeast(STALL_TRIGGER_MS))
+                                // Was coerceAtLeast(STALL_TRIGGER_MS) — always
+                                // reported at least 3000ms even when the real
+                                // accumulated stall (the 2-small-stalls branch
+                                // above) was as little as 2000ms. That inflated
+                                // number went straight into the "stepping down
+                                // ... after a Xms stall" log, and also happened
+                                // to always clear ChannelViewModel's own
+                                // QUALITY_DOWNGRADE_STALL_THRESHOLD_MS check —
+                                // see that constant's updated comment. Report
+                                // what was actually measured.
+                                onStall?.invoke(totalStalledMs)
                             }
                         }
                     }

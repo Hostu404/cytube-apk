@@ -37,8 +37,7 @@ object YouTubeResolver {
 
     // Stream URLs are signed and time-limited, so this is a short-lived cache
     // to survive a rebuild of the player surface, not a long-term store.
-    private val cache = ConcurrentHashMap<String, Pair<Long, Resolved>>()
-    private const val CACHE_MS = 5 * 60 * 1000L
+    private val cache = TimedCache<String, Resolved>(ttlMs = 5 * 60 * 1000L, evictAboveSize = 20)
 
     @Volatile private var initialised = false
 
@@ -79,13 +78,7 @@ object YouTubeResolver {
             Log.w(TAG, "rejected malformed YouTube video id: $videoId")
             return@withContext Result.failure(IllegalArgumentException("Invalid YouTube video id"))
         }
-        val now = System.currentTimeMillis()
-        if (cache.size > 20) {
-            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
-        }
-        cache[videoId]?.let { (at, r) ->
-            if (now - at < CACHE_MS) return@withContext Result.success(r)
-        }
+        cache.get(videoId)?.let { return@withContext Result.success(it) }
         runCatching {
             val info = StreamInfo.getInfo(
                 ServiceList.YouTube,
@@ -119,7 +112,7 @@ object YouTubeResolver {
                 label = stream.resolution ?: "unknown"
             )
             Log.i(TAG, "resolved $videoId -> ${resolved.label} ${resolved.mimeType}")
-            cache[videoId] = System.currentTimeMillis() to resolved
+            cache.put(videoId, resolved)
             resolved
         }.onFailure { Log.w(TAG, "resolve failed for $videoId: ${it.javaClass.simpleName} - ${it.message}", it) }
     }
