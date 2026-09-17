@@ -7,7 +7,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Native Streamable player resolver.
@@ -27,21 +26,14 @@ object StreamableResolver {
 
     data class Resolved(val url: String, val mimeType: String?, val label: String)
 
-    private val cache = ConcurrentHashMap<String, Pair<Long, Resolved>>()
-    private const val CACHE_MS = 10 * 60 * 1000L
+    private val cache = TimedCache<String, Resolved>(ttlMs = 10 * 60 * 1000L, evictAboveSize = 50)
 
     suspend fun resolve(http: OkHttpClient, id: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_ID_REGEX.matches(id)) {
             Log.w(TAG, "rejected malformed Streamable video id ($id)")
             return@withContext Result.failure(IllegalArgumentException("Invalid Streamable video id"))
         }
-        val now = System.currentTimeMillis()
-        if (cache.size > 50) {
-            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
-        }
-        cache[id]?.let { (at, r) ->
-            if (now - at < CACHE_MS) return@withContext Result.success(r)
-        }
+        cache.get(id)?.let { return@withContext Result.success(it) }
         runCatching {
             val req = Request.Builder()
                 .url("$API_BASE/$id")
@@ -68,7 +60,7 @@ object StreamableResolver {
                 ?: throw IllegalStateException("No playable MP4 found for Streamable video")
 
             Log.i(TAG, "resolved $id -> ${resolved.label} (${resolved.url})")
-            cache[id] = System.currentTimeMillis() to resolved
+            cache.put(id, resolved)
             resolved
         }.onFailure {
             Log.w(TAG, "resolve failed for $id: ${it.javaClass.simpleName} - ${it.message}", it)

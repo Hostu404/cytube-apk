@@ -174,7 +174,10 @@ object MediaTypes {
      *  hostname (an "@" that would smuggle in userinfo, a "/" that would
      *  smuggle in a path, a scheme, etc.) must be rejected outright rather
      *  than passed through. */
-    private val HOSTNAME_REGEX =
+    // internal, not private: PeerTubeResolver validates a "domain;shortUUID" pt
+    // id against this exact same pattern before ever building a request URL
+    // from it, and used to keep its own byte-for-byte duplicate of this regex.
+    internal val HOSTNAME_REGEX =
         Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
     /** PeerTube's own short-UUID charset (base58-ish, no separators) — see

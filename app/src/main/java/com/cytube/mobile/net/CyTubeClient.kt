@@ -3,7 +3,6 @@ package com.cytube.mobile.net
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -38,8 +37,6 @@ class CyTubeClient(
     val events: SharedFlow<CyTubeEvent> = _events.asSharedFlow()
 
     private var socket: Socket? = null
-    private var reconnectJob: Job? = null
-    private var reconnectAttempts: Int = 0
 
     @Volatile
     private var lastPingSentMs: Long = 0L
@@ -74,9 +71,6 @@ class CyTubeClient(
 
     suspend fun connect(channel: String, credential: Credential?, password: String? = null) {
         disconnect()
-        reconnectJob?.cancel()
-        reconnectJob = null
-        reconnectAttempts = 0
         channelName = channel
         channelPassword = password
         this.credential = credential
@@ -316,10 +310,6 @@ class CyTubeClient(
     }
 
     fun disconnect() {
-        reconnectJob?.cancel()
-        reconnectJob = null
-        reconnectAttempts = 0
-
         socket?.let {
             it.off()
             it.disconnect()

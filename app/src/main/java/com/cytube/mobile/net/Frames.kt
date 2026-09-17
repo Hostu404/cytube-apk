@@ -187,7 +187,11 @@ data class TimeUpdate(val currentTime: Double, val paused: Boolean) {
 @Immutable
 data class ChatMessage(
     val username: String,
-    /** Sanitized HTML, not plain text — filters and emotes rewrite it server-side. */
+    /** Sanitized HTML, not plain text — filters rewrite it server-side, but
+     *  NOT emotes: the server sends message text as-is and every client
+     *  (this one included) has to run its own emote substitution — see
+     *  Emotes.kt's own header comment for why. This field arrives with no
+     *  emote <img> tags in it yet. */
     val html: String,
     val timestamp: Long,
     val addClass: String?,

@@ -59,8 +59,15 @@ class SyncEngine {
         }
 
         if (waiting) {
-            player.seekTo(0.0)
-            player.pause()
+            // Same "already there, don't re-correct" guard as the update.paused
+            // branch just below — without it this fired the seek+pause on every
+            // ~1s server tick for the whole lead-in countdown, which is exactly
+            // the kind of redundant correction the comment above isBuffering
+            // warns causes skip/jitter.
+            if (!player.isPaused) {
+                player.seekTo(0.0)
+                player.pause()
+            }
             return Result(waiting = true)
         }
 

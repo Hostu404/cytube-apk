@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -1617,9 +1618,28 @@ private fun TvPlaylistView(
     modifier: Modifier = Modifier
 ) {
     val searchFocusRequester = remember { FocusRequester() }
+    val firstRowFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
     var searchFocused by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { runCatching { searchFocusRequester.requestFocus() } }
+    // Was searchFocusRequester here, unlike TvChatView's own equivalent
+    // LaunchedEffect(Unit) (see its comment), which deliberately focuses the
+    // non-text Nico toggle first rather than the chat input field. Focusing a
+    // text field pops Android TV's on-screen keyboard immediately — before
+    // the user has navigated anywhere — and that overlay then eats D-pad
+    // input itself: Down moves across keyboard keys instead of scrolling the
+    // list below, and Up/Back presses meant for this screen's own exit
+    // handling never reach it either, since the keyboard consumes them first.
+    // Focusing the first row instead means the keyboard only appears when the
+    // user deliberately navigates Up into search — exactly when they want it.
+    LaunchedEffect(Unit) {
+        if (state.playlist.isNotEmpty()) {
+            runCatching { firstRowFocusRequester.requestFocus() }
+        } else {
+            // Nothing to scroll to — search is the only focusable thing here.
+            runCatching { searchFocusRequester.requestFocus() }
+        }
+    }
 
     val filtered = remember(state.playlist, query) {
         if (query.isBlank()) state.playlist
@@ -1670,6 +1690,26 @@ private fun TvPlaylistView(
                 .padding(horizontal = 16.dp)
                 .focusRequester(searchFocusRequester)
                 .onFocusChanged { searchFocused = it.isFocused }
+                // If the user does deliberately navigate up into search (or
+                // this is the empty-playlist fallback above), the on-screen
+                // keyboard shows and — same problem as the auto-focus case —
+                // a soft keyboard's own Down normally just moves across its
+                // keys rather than reaching this handler at all. That part
+                // can't be fixed here; what this handles is the keyboard
+                // NOT eating Down, which does happen (physical/TV-remote
+                // D-pad presses reach Compose even while the IME is up,
+                // unlike Back — see the LaunchedEffect comment above for why
+                // Back can't be handled the same way). Explicitly hiding the
+                // keyboard here means Down always dismisses it and continues
+                // on to the first row in one press, rather than leaving the
+                // keyboard sitting open on screen after focus has already
+                // moved past it.
+                .onKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                        keyboardController?.hide()
+                    }
+                    false
+                }
         )
         Spacer(Modifier.height(8.dp))
 
@@ -1687,7 +1727,11 @@ private fun TvPlaylistView(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
-                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}_$idx" else "pos_${idx}_${item.mediaId}" }) { _, item ->
+                // Same stable-key fix as PlaylistPanel in Panels.kt — see that
+                // file's comment. On TV this one matters even more: rowFocused
+                // is per-row remembered state, and an idx-suffixed key reset it
+                // (losing the focus highlight) on every playlist mutation.
+                itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { idx, item ->
                     val personallyResolvable =
                         com.cytube.mobile.net.MediaTypes.canResolveIndependently(item.type)
                     val isPick = item.uid == state.personalPickUid
@@ -1695,6 +1739,12 @@ private fun TvPlaylistView(
                     Row(
                         Modifier
                             .fillMaxWidth()
+                            // Only the very first row — this is purely the
+                            // initial-focus target the LaunchedEffect above
+                            // requests focus on when the screen opens; every
+                            // other row is a completely ordinary focus target
+                            // reached by normal D-pad navigation.
+                            .then(if (idx == 0) Modifier.focusRequester(firstRowFocusRequester) else Modifier)
                             .background(
                                 if (isPick) MaterialTheme.colorScheme.surfaceContainerHigh
                                 else Color.Transparent

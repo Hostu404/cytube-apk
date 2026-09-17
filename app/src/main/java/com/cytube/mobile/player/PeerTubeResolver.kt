@@ -2,13 +2,13 @@ package com.cytube.mobile.player
 
 import android.util.Log
 import androidx.media3.common.MimeTypes
+import com.cytube.mobile.net.MediaTypes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Native PeerTube player resolver.
@@ -24,14 +24,13 @@ object PeerTubeResolver {
 
     private const val TAG = "CyTubePeerTube"
 
-    private val HOSTNAME_REGEX =
-        Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+    // Shared with MediaTypes.knownEmbedUrl's own pt-id validation — this used
+    // to be its own byte-for-byte duplicate of that regex.
     private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
 
     data class Resolved(val url: String, val mimeType: String?, val label: String)
 
-    private val cache = ConcurrentHashMap<String, Pair<Long, Resolved>>()
-    private const val CACHE_MS = 10 * 60 * 1000L
+    private val cache = TimedCache<String, Resolved>(ttlMs = 10 * 60 * 1000L, evictAboveSize = 50)
 
     suspend fun resolve(http: OkHttpClient, id: String): Result<Resolved> = withContext(Dispatchers.IO) {
         val parts = id.split(";", limit = 2)
@@ -41,18 +40,12 @@ object PeerTubeResolver {
         }
         val domain = parts[0]
         val videoId = parts[1]
-        if (!HOSTNAME_REGEX.matches(domain) || !SAFE_ID_REGEX.matches(videoId)) {
+        if (!MediaTypes.HOSTNAME_REGEX.matches(domain) || !SAFE_ID_REGEX.matches(videoId)) {
             Log.w(TAG, "rejected malformed PeerTube video id ($id)")
             return@withContext Result.failure(IllegalArgumentException("Invalid PeerTube domain or video id"))
         }
 
-        val now = System.currentTimeMillis()
-        if (cache.size > 50) {
-            cache.entries.removeIf { now - it.value.first >= CACHE_MS }
-        }
-        cache[id]?.let { (at, r) ->
-            if (now - at < CACHE_MS) return@withContext Result.success(r)
-        }
+        cache.get(id)?.let { return@withContext Result.success(it) }
 
         runCatching {
             val req = Request.Builder()
@@ -71,7 +64,7 @@ object PeerTubeResolver {
                 ?: throw IllegalStateException("No playable streams found for PeerTube video")
 
             Log.i(TAG, "resolved $id -> ${resolved.label} (${resolved.url})")
-            cache[id] = System.currentTimeMillis() to resolved
+            cache.put(id, resolved)
             resolved
         }.onFailure {
             Log.w(TAG, "resolve failed for $id: ${it.javaClass.simpleName} - ${it.message}", it)
@@ -90,6 +83,13 @@ object PeerTubeResolver {
 
     private fun bestHls(playlists: JSONArray?, domain: String): Resolved? {
         if (playlists == null) return null
+        // Was: return on the first non-blank playlistUrl. A PeerTube instance
+        // can list multiple streamingPlaylists (e.g. one per resolution
+        // ladder variant); taking the first meant we could hand ExoPlayer a
+        // lower-resolution playlist even when a better one was later in the
+        // array. Now compares maxResolution across all of them.
+        var best: Resolved? = null
+        var bestResolution = -1
         for (i in 0 until playlists.length()) {
             val playlist = playlists.optJSONObject(i) ?: continue
             val rawUrl = playlist.optString("playlistUrl").trim()
@@ -106,14 +106,17 @@ object PeerTubeResolver {
                 }
             }
 
-            val label = if (maxResolution > 0) "HLS (${maxResolution}p)" else "HLS"
-            return Resolved(
-                url = url,
-                mimeType = MimeTypes.APPLICATION_M3U8,
-                label = label
-            )
+            if (maxResolution > bestResolution || best == null) {
+                bestResolution = maxResolution
+                val label = if (maxResolution > 0) "HLS (${maxResolution}p)" else "HLS"
+                best = Resolved(
+                    url = url,
+                    mimeType = MimeTypes.APPLICATION_M3U8,
+                    label = label
+                )
+            }
         }
-        return null
+        return best
     }
 
     private fun bestDirectFile(files: JSONArray?, domain: String): Resolved? {

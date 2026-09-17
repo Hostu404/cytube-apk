@@ -466,6 +466,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- media ----
 
+    /** RTT-compensated server time, consolidated: onMediaChanged (both of its
+     *  call sites) and onTimeUpdate each used to hand-roll this exact same
+     *  two-line calculation independently — three copies that could (and had
+     *  started to) quietly drift apart. */
+    private fun compensatedTime(paused: Boolean, currentTime: Double, lengthSeconds: Int): Double {
+        val rttCompSeconds = if (paused || currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
+        return if (lengthSeconds > 0 && currentTime + rttCompSeconds > lengthSeconds) lengthSeconds.toDouble()
+        else currentTime + rttCompSeconds
+    }
+
     private fun onMediaChanged(media: MediaFrame) {
         // CyTube re-announces the current item verbatim sometimes (e.g. to
         // resync a client) — not just when the item actually changes. A real
@@ -482,9 +492,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // itself) cares about, not whatever's personally on screen.
         val current = _state.value.channelCurrentMedia
         if (current != null && current.id == media.id && current.type == media.type) {
-            val rttCompSeconds = if (media.paused || media.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
-            val compensatedTime = if (media.seconds > 0 && media.currentTime + rttCompSeconds > media.seconds) media.seconds.toDouble() else (media.currentTime + rttCompSeconds)
-            lastServerTimeSeconds = compensatedTime
+            lastServerTimeSeconds = compensatedTime(media.paused, media.currentTime, media.seconds)
             lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
             isServerPaused = media.paused
             update {
@@ -512,9 +520,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         lastQualityChangeAtMs = 0L
         qualityStableSinceMs = SystemClock.elapsedRealtime()
         playerAttachedAtMs = SystemClock.elapsedRealtime()
-        val rttCompSeconds = if (media.paused || media.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
-        val compensatedTime = if (media.seconds > 0 && media.currentTime + rttCompSeconds > media.seconds) media.seconds.toDouble() else (media.currentTime + rttCompSeconds)
-        lastServerTimeSeconds = compensatedTime
+        lastServerTimeSeconds = compensatedTime(media.paused, media.currentTime, media.seconds)
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = media.paused
         // Player selection is re-run on every changeMedia, so a playlist moving
@@ -636,10 +642,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTimeUpdate(update: TimeUpdate) {
-        val rttCompSeconds = if (update.paused || update.currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
         val length = _state.value.media?.seconds ?: 0
-        val compensatedTime = if (length > 0 && update.currentTime + rttCompSeconds > length) length.toDouble() else (update.currentTime + rttCompSeconds)
-        lastServerTimeSeconds = compensatedTime
+        lastServerTimeSeconds = compensatedTime(update.paused, update.currentTime, length)
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = update.paused
         evaluateSync()
@@ -1255,8 +1259,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         /** [onPlaybackStall] ignores anything shorter than this — a quick
          *  rebuffer after an ordinary seek (a manual scrub, or SyncEngine's
          *  own hard-seek correction) settles in well under this on a fine
-         *  connection. */
-        const val QUALITY_DOWNGRADE_STALL_THRESHOLD_MS = 3_000L
+         *  connection.
+         *
+         *  2_000L, not PlayerSurface's own 3_000L STALL_TRIGGER_MS: PlayerSurface
+         *  calls onStall for two different reasons — one sustained stall of at
+         *  least 3s, OR 2+ smaller stalls in its recent window totaling at
+         *  least 2s — and now reports the true measured duration for either
+         *  (it used to inflate every report to at least 3_000L, which happened
+         *  to always clear whatever floor was set here, silently turning this
+         *  check into a no-op). 2_000L is the true minimum PlayerSurface can
+         *  ever report when it has decided a stall is worth acting on, so this
+         *  still only screens out call sites this function doesn't control. */
+        const val QUALITY_DOWNGRADE_STALL_THRESHOLD_MS = 2_000L
 
         /** Minimum time between quality downgrades — gives the player enough
          *  time to establish a stable buffer on the new quality before evaluating
