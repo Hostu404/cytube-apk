@@ -109,10 +109,10 @@ private val CyTubeChannelScheme = darkColorScheme(
 )
 
 /**
- * Wraps the channel screen (and, on phone, home too — see MainActivity's
- * "home" destination). Settings has its own CyTubeSettingsTheme above instead,
- * which follows the system setting rather than this always-dark palette. This
- * restores itself automatically when it leaves composition.
+ * Wraps the channel screen. Home, settings and account (on phone) use
+ * CyTubeSettingsTheme above instead, which follows the Appearance setting
+ * rather than this always-dark palette. This restores itself automatically
+ * when it leaves composition.
  */
 @Composable
 fun CyTubeChannelTheme(content: @Composable () -> Unit) {

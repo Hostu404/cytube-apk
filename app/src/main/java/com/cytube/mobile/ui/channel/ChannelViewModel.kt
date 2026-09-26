@@ -5,6 +5,7 @@ import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
+import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
@@ -12,12 +13,11 @@ import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
 import com.cytube.mobile.player.BandwidthEstimate
-import com.cytube.mobile.player.GoogleDriveResolver
-import com.cytube.mobile.player.PeerTubeResolver
-import com.cytube.mobile.player.StreamableResolver
-import com.cytube.mobile.player.YouTubeResolver
+import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
+import com.cytube.mobile.player.StreamResolvers
 import com.cytube.mobile.ui.defaultSyncAccuracy
+import com.cytube.mobile.ui.isTvDevice
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
@@ -105,10 +105,10 @@ data class ChannelUiState(
     val messages: PersistentList<ChatMessage> = persistentListOf(),
     val emotes: EmoteSet = EmoteSet.EMPTY,
     val showEmotes: Boolean = true,
-    /** Mirrors the Settings toggle; MainActivity reads this (via PlaybackHost)
-     *  to decide whether leaving the app should float the video in PiP or
-     *  just pause it. */
-    val pipEnabled: Boolean = true,
+    /** Mirrors the Settings toggle (off by default, same as Settings);
+     *  MainActivity reads this (via PlaybackHost) to decide whether leaving
+     *  the app should float the video in PiP. */
+    val pipEnabled: Boolean = false,
     /** Mirrors the Settings toggle for the ambient glow behind the windowed
      *  player (see ChannelScreen's ambient-color capture). */
     val ambientGlowEnabled: Boolean = true,
@@ -138,27 +138,14 @@ data class ChannelUiState(
      *  only for a backend that was actually running and then failed. */
     val compatOffer: String? = null,
     val refreshing: Boolean = false,
-    /** A hook for forcibly rebuilding the player surface from scratch (see
-     *  PlayerSurface's ExoSurface: `remember(epoch) { ... }`), and, for
-     *  NEWPIPE/GDRIVE, re-resolving the stream URL too, since both key their
-     *  resolve step on this same value (see NewPipeSurface/GDriveSurface's
-     *  `LaunchedEffect(media.id, epoch)`). Deliberately never bumped by
-     *  pull-to-refresh — that silently restarted playback on every refresh,
-     *  even when nothing was actually wrong with the player. Now bumped by
-     *  onPlaybackStall/maybeUpgradeQuality (see [nativeQualityIndex]) to
-     *  reload at a new quality in place — still left available for a future
-     *  "the player is genuinely stuck" recovery action too. */
-    val playerEpoch: Int = 0,
     /** Which entry of the current item's MediaFrame.direct (already sorted
      *  highest-to-lowest — see DirectSource.parse) the NATIVE backend should
-     *  load; 0 is the default, matching MediaFrame.bestSource exactly, same
-     *  as before this field existed. Stepped by onPlaybackStall (down, on a
-     *  real mid-playback stall) — see PlayerSurface's own qualityIndex param.
-     *  Latches to the stable lower resolution for the duration of the media
-     *  item to avoid mid-stream decoder reset flapping.
-     *  Reset to 0 on every genuine item change (onMediaChanged/pickPersonal/
-     *  stopPersonalPick) so a downgrade never outlives the item that caused
-     *  it. Meaningless for any player type other than NATIVE. */
+     *  load; 0 matches MediaFrame.bestSource. Stepped down by
+     *  onPlaybackStall on a real mid-playback stall, and latched there for
+     *  the rest of the item to avoid decoder-reset flapping. Chosen afresh
+     *  for every genuine item change (resolveInitialQualityIndex, which
+     *  applies the session's quality cap and may step it back up).
+     *  Meaningless for any player type other than NATIVE. */
     val nativeQualityIndex: Int = 0,
     /** The channel's current poll, or the last one after it closes (see
      *  Poll.closed) until the next opens or it's dismissed; null if none. */
@@ -211,22 +198,29 @@ data class ChannelUiState(
 class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
-    private val client = Graph.newClient(app)
+    private val client = Graph.newClient()
     private val sync = SyncEngine()
+    /** TV chat shows spoilers revealed (no tap to reveal them with). */
+    private val isTv = isTvDevice(app)
 
     private val _state = MutableStateFlow(ChannelUiState())
     val state: StateFlow<ChannelUiState> = _state.asStateFlow()
 
+    /**
+     * The player the surface attached last (attachPlayer), or null once that
+     * player has been released. Surfaces never report "detached" as a
+     * separate call: when the player type changes, Compose creates the new
+     * surface (which attaches its player) before it disposes the old one,
+     * so a "set to null on dispose" from the old surface used to wipe out
+     * the new player — every embed shown after any other video had no
+     * handle, and got no sync corrections or mute.
+     */
     private var player: PlayerHandle? = null
+        get() = field?.takeUnless { it.isReleased }
     /** elapsedRealtime() of the last genuinely new player attach, so
-     *  onTimeUpdate can tell SyncEngine "give this one a moment" right after
-     *  a media switch — see SyncEngine.apply's withinGracePeriod doc. */
+     *  evaluateSync can tell SyncEngine to give a fresh item a moment before
+     *  correcting it (see SYNC_GRACE_MS). */
     private var playerAttachedAtMs: Long = 0L
-    /** Anchor for embedSyntheticTimeSeconds() — see its own doc comment. Set
-     *  wherever state.player becomes EMBED (onMediaChanged, setMode,
-     *  reportPlaybackFailure's silent fallback); meaningless otherwise. */
-    private var embedClockAnchorAtMs: Long = 0L
-    private var embedClockAnchorSeconds: Double = 0.0
     /** elapsedRealtime() of the last quality step — the debounce for
      *  onPlaybackStall measures against this. Reset to 0 whenever
      *  ChannelUiState.nativeQualityIndex itself resets (a genuine item
@@ -238,12 +232,23 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  Maintains a realistic quality ceiling across playlist items so the player
      *  doesn't re-stall on every item on a bandwidth-constrained connection. */
     private var sessionPreferredQualityHeight: Int? = null
-    /** Timestamp when the current quality level started playing stall-free. */
+    /** When playback last started running stall-free at the current quality
+     *  cap: set by a stall step-down or a step-up, and on the first item.
+     *  NOT reset on every new item — it used to be, which meant the
+     *  "stable for 2 minutes" step-up check only ever measured the previous
+     *  item, so on a playlist of short videos quality never came back up. */
     private var qualityStableSinceMs: Long = 0L
     private var settings: Settings = Settings(syncAccuracy = defaultSyncAccuracy(app))
     private var leaderTicker: Job? = null
     private var syncTicker: Job? = null
     private var syncJob: Job? = null
+    /** A background load waiting on a resolver — see loadWhileInBackground. */
+    private var backgroundLoadJob: Job? = null
+    /** Socket.IO ran out of reconnection attempts (CyTubeEvent.ReconnectGaveUp)
+     *  and nothing has reconnected since — see onAppVisibilityChanged. */
+    private var reconnectGaveUp = false
+    /** The last announcement shown — see the Announcement branch. */
+    private var lastAnnouncementKey: String? = null
     private var lastServerTimeSeconds: Double = 0.0
     private var lastServerTimeElapsedRealtimeMs: Long = 0L
     private var isServerPaused: Boolean = false
@@ -287,6 +292,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
             settingsStore.noteVisit(channel)
+
+            launch {
+                AppVisibility.inBackground.collect { onAppVisibilityChanged(it) }
+            }
 
             launch {
                 settingsStore.settings.collect {
@@ -348,8 +357,24 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             // channel session (or crash the process outright).
             runCatching {
             when (event) {
-                is CyTubeEvent.Connected ->
-                    update { it.copy(connection = ConnectionState.CONNECTED, statusMessage = null) }
+                is CyTubeEvent.Connected -> {
+                    reconnectGaveUp = false
+                    // Anything the server only announces as it happens may
+                    // have changed while we were disconnected. The join that
+                    // follows re-sends what's still true (setLeader if there
+                    // is a leader, newPoll if a poll is open), but never what
+                    // stopped being true — so forget the leader, and treat an
+                    // open poll as closed until the server says otherwise.
+                    update {
+                        it.copy(
+                            connection = ConnectionState.CONNECTED,
+                            statusMessage = null,
+                            leader = null,
+                            poll = it.poll?.copy(closed = true)
+                        )
+                    }
+                    retuneLeaderTicker()
+                }
 
                 is CyTubeEvent.Disconnected ->
                     update { it.copy(connection = ConnectionState.DISCONNECTED) }
@@ -364,6 +389,20 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.ConnectionFailed ->
                     update { it.copy(connection = ConnectionState.RECONNECTING) }
+
+                // Used to leave the app on "Reconnecting…" for good. Reopening
+                // the app retries (onAppVisibilityChanged); in the meantime,
+                // say how to retry by hand (refresh() reconnects when not
+                // connected).
+                is CyTubeEvent.ReconnectGaveUp -> {
+                    reconnectGaveUp = true
+                    update {
+                        it.copy(
+                            connection = ConnectionState.FAILED,
+                            statusMessage = "Can't reach the channel — tap its name to retry"
+                        )
+                    }
+                }
 
                 is CyTubeEvent.PartitionChanged -> {
                     // The channel moved to a different backend. The old socket
@@ -436,9 +475,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     // meaningless while a personal pick (see pickPersonal) is
                     // what's actually on screen, and applying either would
                     // show/hide the wrong play state or fight the personal
-                    // player's own position. onTimeUpdate has its own,
-                    // separate personalPickActive guard for the same reason.
-                    if (!_state.value.personalPickActive && event.update.paused == _state.value.playing) {
+                    // player's own position. (onTimeUpdate still records the
+                    // time, for when the pick ends; evaluateSync is what
+                    // skips applying it during a pick.)
+                    if (!_state.value.personalPickActive && !pausedByUser &&
+                        event.update.paused == _state.value.playing
+                    ) {
                         update { it.copy(playing = !event.update.paused) }
                     }
                     onTimeUpdate(event.update)
@@ -447,11 +489,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.toPersistentList()) }
                 is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid) }
                 is CyTubeEvent.ItemQueued -> {
-                    update { s ->
-                        val idx = s.playlist.indexOfFirst { it.uid == event.afterUid }
-                        val next = if (idx >= 0) s.playlist.add(idx + 1, event.item) else s.playlist.add(event.item)
-                        s.copy(playlist = next)
-                    }
+                    update { s -> s.copy(playlist = insertAfter(s.playlist, event.item, event.afterUid)) }
                     // Our own add landing. Matched on who queued it rather
                     // than the media id: a YouTube playlist link arrives as
                     // many items, none with the playlist's id.
@@ -461,6 +499,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     ) {
                         finishQueue(QueueStatus("Added: ${event.item.title}"))
                     }
+                }
+                is CyTubeEvent.ItemMoved -> update { s ->
+                    val item = s.playlist.firstOrNull { it.uid == event.uid } ?: return@update s
+                    s.copy(playlist = insertAfter(s.playlist.remove(item), item, event.afterUid))
                 }
                 is CyTubeEvent.ItemDeleted -> update { s ->
                     s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
@@ -492,7 +534,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                                 raw = event.message.html,
                                 greentext = event.message.addClass == "greentext",
                                 showImages = currentShowEmotes,
-                                emotes = currentEmotes
+                                emotes = currentEmotes,
+                                revealSpoilers = isTv
                             )
                         }
                         update { s ->
@@ -515,14 +558,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 is CyTubeEvent.UserLeft -> update { s ->
                     s.copy(users = s.users.removeAll { it.name == event.name })
                 }
-                is CyTubeEvent.UserMetaChanged -> update { s ->
-                    // set(idx, ...) rather than map{} over everyone: a plain
-                    // map would rebuild the whole list (and force a fresh
-                    // PersistentList, defeating the structural sharing this
-                    // type exists for) even though at most one entry ever
-                    // actually changes here.
-                    val idx = s.users.indexOfFirst { it.name == event.user.name }
-                    if (idx < 0) s else s.copy(users = s.users.set(idx, event.user))
+                // set(idx, ...) rather than map{} over everyone: a plain map
+                // would rebuild the whole list (and force a fresh
+                // PersistentList, defeating the structural sharing this type
+                // exists for) even though at most one entry changes here.
+                is CyTubeEvent.UserAfkChanged -> update { s ->
+                    val idx = s.users.indexOfFirst { it.name == event.name }
+                    if (idx < 0) s else s.copy(users = s.users.set(idx, s.users[idx].copy(afk = event.afk)))
+                }
+                is CyTubeEvent.UserRankChanged -> update { s ->
+                    val idx = s.users.indexOfFirst { it.name == event.name }
+                    if (idx < 0) s else s.copy(users = s.users.set(idx, s.users[idx].copy(rank = event.rank)))
                 }
                 is CyTubeEvent.UserCount -> update { it.copy(userCount = event.count) }
 
@@ -586,7 +632,25 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.ErrorMessage -> showTransientStatus(event.message)
 
-                else -> Unit
+                // Site-wide notices from the server's administrators, shown
+                // in chat the way the website shows them above it. The
+                // server re-sends the current one on every (re)connect, so
+                // each is shown once.
+                is CyTubeEvent.Announcement -> {
+                    val key = "${event.title}|${event.html}"
+                    if (key != lastAnnouncementKey) {
+                        lastAnnouncementKey = key
+                        appendLocalNotice(
+                            ChatMessage(
+                                username = "",
+                                html = "<strong>${escapeHtml(event.title.ifBlank { "Announcement" })}</strong>: ${event.html}",
+                                timestamp = System.currentTimeMillis(),
+                                addClass = null,
+                                shadow = false
+                            )
+                        )
+                    }
+                }
             }
             }.onFailure { Log.e("CyTube", "Error handling ${event::class.simpleName}", it) }
         }
@@ -594,15 +658,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- media ----
 
-    /** RTT-compensated server time, consolidated: onMediaChanged (both of its
-     *  call sites) and onTimeUpdate each used to hand-roll this exact same
-     *  two-line calculation independently — three copies that could (and had
-     *  started to) quietly drift apart. */
-    private fun compensatedTime(paused: Boolean, currentTime: Double, lengthSeconds: Int): Double {
-        val rttCompSeconds = if (paused || currentTime < 0) 0.0 else (client.estimatedRttMs / 2000.0).coerceIn(0.0, 0.5)
-        return if (lengthSeconds > 0 && currentTime + rttCompSeconds > lengthSeconds) lengthSeconds.toDouble()
-        else currentTime + rttCompSeconds
-    }
+    /** The server's time for the item, capped at its length. (Used to add
+     *  half a measured round-trip time too, but the measurement never ran —
+     *  it listened on the wrong Socket.IO object — so it was always a fixed
+     *  0.05s.) */
+    private fun serverTime(currentTime: Double, lengthSeconds: Int): Double =
+        if (lengthSeconds > 0 && currentTime > lengthSeconds) lengthSeconds.toDouble() else currentTime
 
     private fun onMediaChanged(media: MediaFrame) {
         // CyTube re-announces the current item verbatim sometimes (e.g. to
@@ -620,12 +681,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // itself) cares about, not whatever's personally on screen.
         val current = _state.value.channelCurrentMedia
         if (current != null && current.id == media.id && current.type == media.type) {
-            lastServerTimeSeconds = compensatedTime(media.paused, media.currentTime, media.seconds)
+            lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
             lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
             isServerPaused = media.paused
             update {
                 if (it.personalPickActive) it.copy(channelCurrentMedia = media)
-                else it.copy(media = media, channelCurrentMedia = media, playing = !media.paused)
+                else it.copy(
+                    media = media,
+                    channelCurrentMedia = media,
+                    playing = if (pausedByUser) it.playing else !media.paused
+                )
             }
             evaluateSync()
             return
@@ -636,6 +701,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // just keep channelCurrentMedia current so stopPersonalPick (a
         // manual clear, or sync flipping back on) lands on the right thing.
         if (_state.value.personalPickActive) {
+            // Still record the new item's time, for when the pick ends (see
+            // stopPersonalPick) — otherwise that starts from the previous
+            // item's clock until the next mediaUpdate.
+            lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
+            lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            isServerPaused = media.paused
             update { it.copy(channelCurrentMedia = media) }
             return
         }
@@ -643,12 +714,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val (chosen, offer) = choosePlayerAndOffer(media)
         Log.i(TAG, "changeMedia type=${media.type} player=$chosen " +
             "seconds=${media.seconds} sources=${media.direct.size} id=${media.id}")
-        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(media.currentTime)
         val initialQualityIndex = resolveInitialQualityIndex(media)
         lastQualityChangeAtMs = 0L
-        qualityStableSinceMs = SystemClock.elapsedRealtime()
+        if (qualityStableSinceMs == 0L) qualityStableSinceMs = SystemClock.elapsedRealtime()
         playerAttachedAtMs = SystemClock.elapsedRealtime()
-        lastServerTimeSeconds = compensatedTime(media.paused, media.currentTime, media.seconds)
+        lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = media.paused
         // Player selection is re-run on every changeMedia, so a playlist moving
@@ -664,9 +734,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 nativeQualityIndex = initialQualityIndex
             )
         }
+        loadWhileInBackground()
         evaluateSync()
-        // The player composable observes state.media and rebuilds the backend;
-        // once it is ready it calls playerReady() below.
+        // In the foreground the player surface sees state.media change, loads
+        // the item and calls attachPlayer.
     }
 
     /**
@@ -790,6 +861,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val s = _state.value
         val p = player ?: return
         if (s.effectiveMode == CompatMode.WEB) return   // the web page syncs itself
+        if (pausedByUser && !p.isPaused) {
+            // Resumed from some other control (in-app controls, a headset).
+            pausedByUser = false
+            holdUntilReopened = false
+            if (!s.personalPickActive) update { it.copy(playing = !isServerPaused) }
+        }
         if (s.personalPickActive) return
         if (s.isLeader || !settings.syncEnabled) {
             // SyncEngine may have left a rate nudge running; don't let the
@@ -797,14 +874,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             sync.stopNudge(p)
             return
         }
-        if (lastServerTimeElapsedRealtimeMs == 0L) return
-
-        val now = SystemClock.elapsedRealtime()
-        val elapsedSeconds = if (isServerPaused) 0.0 else (now - lastServerTimeElapsedRealtimeMs) / 1000.0
-        val currentServerTime = (lastServerTimeSeconds + elapsedSeconds).let { time ->
-            val length = s.media?.seconds ?: 0
-            if (length > 0 && time > length) length.toDouble() else time
+        if (pausedByUser) {
+            sync.stopNudge(p)
+            return
         }
+        val currentServerTime = roomTimeNow(s.media?.seconds ?: 0) ?: return
+        val now = SystemClock.elapsedRealtime()
         val withinGrace = now - playerAttachedAtMs < SYNC_GRACE_MS
         val update = TimeUpdate(currentTime = currentServerTime, paused = isServerPaused)
 
@@ -815,8 +890,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     player = p,
                     update = update,
                     newMediaId = s.media?.id,
-                    isLeader = s.isLeader,
-                    syncEnabled = settings.syncEnabled,
                     accuracySeconds = settings.syncAccuracy,
                     withinGracePeriod = withinGrace
                 )
@@ -825,8 +898,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun onTimeUpdate(update: TimeUpdate) {
-        val length = _state.value.media?.seconds ?: 0
-        lastServerTimeSeconds = compensatedTime(update.paused, update.currentTime, length)
+        // The channel's item, not state.media: during a personal pick
+        // they differ, and this time belongs to the channel's.
+        val length = _state.value.channelCurrentMedia?.seconds ?: 0
+        lastServerTimeSeconds = serverTime(update.currentTime, length)
         lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
         isServerPaused = update.paused
         evaluateSync()
@@ -866,18 +941,20 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Shared by quality step-downs: updates
-     * [ChannelUiState.nativeQualityIndex] so PlayerSurface can switch quality
-     * in place on the existing player without tearing down ExoPlayer or bumping
-     * playerEpoch.
+     * Quality step-down: updates [ChannelUiState.nativeQualityIndex] so
+     * PlayerSurface switches quality in place on the existing player.
      */
     private fun reloadAtQuality(index: Int) {
-        update { st ->
-            val m = st.media
-            if (m == null || st.player != MediaTypes.Player.NATIVE) return@update st
-            st.copy(
-                nativeQualityIndex = index
-            )
+        val st = _state.value
+        val m = st.media ?: return
+        if (st.player != MediaTypes.Player.NATIVE) return
+        update { it.copy(nativeQualityIndex = index) }
+        // The surface does the reload when it sees the new index, but it
+        // can't while the app is in the background (Compose doesn't run),
+        // so do it here; the surface then finds it already loaded.
+        if (AppVisibility.inBackground.value) {
+            val handle = player as? NativePlayerHandle ?: return
+            if (handle.mediaId == m.id) handle.load(m, index)
         }
     }
 
@@ -888,14 +965,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * mute state here so switching items, or falling back to a different
      * player, never silently un-mutes audio the user turned off.
      */
-    fun attachPlayer(handle: PlayerHandle?) {
-        if (handle != null && handle !== player) playerAttachedAtMs = android.os.SystemClock.elapsedRealtime()
+    fun attachPlayer(handle: PlayerHandle) {
+        if (handle !== player) playerAttachedAtMs = SystemClock.elapsedRealtime()
         player = handle
-        if (handle != null) {
-            handle.setVolume(if (_state.value.muted) 0f else 1f)
-            client.signalPlayerReady()
-            evaluateSync()
-        }
+        handle.setVolume(if (_state.value.muted) 0f else 1f)
+        (handle as? NativePlayerHandle)?.setVideoEnabled(!AppVisibility.inBackground.value)
+        client.signalPlayerReady()
+        evaluateSync()
     }
 
     // ---- audio / PiP playback control ----
@@ -914,19 +990,178 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         player?.setVolume(if (next) 0f else 1f)
     }
 
+    /**
+     * Set when the user pauses from the PiP window or closes it. Synced
+     * playback otherwise restarts a paused player within a second (SyncEngine
+     * plays it whenever the room is playing), so the pause button did
+     * nothing and closing the window left the sound playing with no screen.
+     * While set, sync leaves the player alone; it clears as soon as playback
+     * resumes by any means (see evaluateSync), or when the app is reopened.
+     */
+    private var pausedByUser = false
+    /** The hold came from closing the PiP window, so reopening the app lifts
+     *  it. A pause from the PiP button isn't lifted that way (turning the
+     *  screen off and on with the PiP window up also counts as reopening). */
+    private var holdUntilReopened = false
+
     /** Wired to the PiP window's own play/pause action. */
     fun togglePlaybackFromPip() {
         val p = player ?: return
-        if (p.isPaused) p.play() else p.pause()
+        if (p.isPaused) {
+            p.play()
+            releasePauseHold()
+        } else {
+            holdPaused()
+            p.pause()
+        }
     }
 
-    /** Wired to MainActivity's onStop/onStart via ChannelScreen's
-     *  isAppInBackground param. Only touches the socket's reconnect cadence
-     *  (see CyTubeClient.setBackgrounded) — the video-track/audio-only
-     *  switch is handled entirely in ChannelScreen/PlayerSurface, since this
-     *  ViewModel has no reference to the ExoPlayer instance itself. */
-    fun onAppBackgroundChanged(background: Boolean) {
-        client.setBackgrounded(background)
+    /** The PiP window was closed ([closed]) or expanded back into the app.
+     *  Closing stops playback until the app is opened again; expanding
+     *  lifts a pause made from the PiP window (the full-screen view it
+     *  expands into has no play button). See [pausedByUser]. */
+    fun onPipLeft(closed: Boolean) {
+        if (closed) {
+            holdPaused()
+            holdUntilReopened = true
+            backgroundLoadJob?.cancel()
+            player?.pause()
+        } else {
+            releasePauseHold()
+        }
+    }
+
+    private fun holdPaused() {
+        pausedByUser = true
+        // Also what the PiP window's play/pause icon shows.
+        update { if (it.playing) it.copy(playing = false) else it }
+    }
+
+    private fun releasePauseHold() {
+        if (!pausedByUser) return
+        pausedByUser = false
+        holdUntilReopened = false
+        if (!_state.value.personalPickActive) update { it.copy(playing = !isServerPaused) }
+        evaluateSync()
+    }
+
+    /**
+     * Loads the current item into the existing player while the app is in
+     * the background.
+     *
+     * Normally the player surface loads each new item, but Compose doesn't
+     * run while the app is out of sight, so a playlist advance in the
+     * background used to leave the finished video sitting in the player.
+     * This does the surface's job for that case, on the same player: a
+     * plain file directly; YouTube, Drive, Streamable and PeerTube after
+     * resolving the stream (cached, so the surface finds it already
+     * resolved when the app comes back, and the handle's loadedKey tells it
+     * not to load it again). Items that can only play in a WebView (Vimeo,
+     * Dailymotion, YouTube live…) can't be loaded without the UI, so the
+     * old video is just paused and the new one loads when the app is
+     * reopened.
+     */
+    private fun loadWhileInBackground() {
+        if (!AppVisibility.inBackground.value) return
+        if (pausedByUser) return   // the PiP window was closed: stay stopped
+        val s = _state.value
+        if (s.effectiveMode == CompatMode.WEB) return   // the web page runs its own player
+        val media = s.media ?: return
+        val current = player ?: return
+        if (current.mediaId == media.id && current.mediaType == media.type) return
+        backgroundLoadJob?.cancel()
+        val handle = current as? NativePlayerHandle
+        if (handle == null) {
+            current.pause()
+            return
+        }
+        when (val kind = s.player) {
+            MediaTypes.Player.NATIVE -> {
+                Log.i(TAG, "background: loading next item type=${media.type} id=${media.id}")
+                handle.load(media.copy(currentTime = backgroundStartTime(media)), s.nativeQualityIndex)
+                playerAttachedAtMs = SystemClock.elapsedRealtime()
+            }
+            else -> {
+                if (!StreamResolvers.handles(kind)) {
+                    current.pause()
+                    return
+                }
+                backgroundLoadJob = viewModelScope.launch {
+                    val stream = StreamResolvers.resolve(kind, media.id).getOrNull()
+                    // Still the item, player and situation this was started for?
+                    val now = _state.value
+                    if (now.media?.id != media.id || now.media?.type != media.type ||
+                        now.player != kind || player !== handle ||
+                        !AppVisibility.inBackground.value
+                    ) return@launch
+                    if (stream == null) {
+                        // The surface will try again (and report the error)
+                        // when the app is reopened.
+                        handle.pause()
+                        return@launch
+                    }
+                    Log.i(TAG, "background: loading next item type=${media.type} id=${media.id} (${stream.variant})")
+                    handle.loadUrl(
+                        media.copy(currentTime = backgroundStartTime(media)),
+                        stream.url, stream.mimeType, stream.headers, stream.variant
+                    )
+                    playerAttachedAtMs = SystemClock.elapsedRealtime()
+                }
+            }
+        }
+    }
+
+    /** Where [media] should start when loaded in the background: where the
+     *  room is now for the channel's item (the changeMedia frame's own time
+     *  goes stale while a stream resolves), or the frame's own start for a
+     *  personal pick, which the server's clock has nothing to do with. */
+    private fun backgroundStartTime(media: MediaFrame): Double {
+        if (_state.value.personalPickActive) return media.currentTime
+        return roomTimeNow(media.seconds) ?: media.currentTime
+    }
+
+    /** Where the channel's item is now: the last server time plus however
+     *  long it's been playing since. Null before any time has arrived. */
+    private fun roomTimeNow(lengthSeconds: Int): Double? {
+        if (lastServerTimeElapsedRealtimeMs == 0L) return null
+        val elapsed = if (isServerPaused) 0.0
+            else (SystemClock.elapsedRealtime() - lastServerTimeElapsedRealtimeMs) / 1000.0
+        val t = lastServerTimeSeconds + elapsed
+        return if (lengthSeconds > 0) t.coerceAtMost(lengthSeconds.toDouble()) else t
+    }
+
+    /**
+     * The app went out of sight (Home, Recents, screen off — not
+     * picture-in-picture) or came back; from MainActivity via AppVisibility,
+     * because Compose doesn't run while the app is in the background.
+     *
+     * Going: stop decoding video nobody can see (audio carries on), and
+     * load the current item if the channel moved on just before, when the UI
+     * hadn't got to it yet.
+     *
+     * Coming back: video back on, and reconnect if Socket.IO gave up while
+     * we were away (a few minutes without a connection is enough). The
+     * reconnection is a fresh one, the same as refresh() does when not
+     * connected: calling connect() on the old socket mid-backoff can leave
+     * Socket.IO believing it's still reconnecting, after which it never
+     * retries again.
+     */
+    private fun onAppVisibilityChanged(background: Boolean) {
+        (player as? NativePlayerHandle)?.setVideoEnabled(!background)
+        if (background) {
+            loadWhileInBackground()
+            return
+        }
+        if (holdUntilReopened) releasePauseHold()
+        val s = _state.value
+        if (reconnectGaveUp && s.kicked == null && s.effectiveMode != CompatMode.WEB) {
+            reconnectGaveUp = false
+            Log.i(TAG, "reconnecting after Socket.IO gave up while in the background")
+            viewModelScope.launch {
+                client.disconnect()
+                connect(s.channel)
+            }
+        }
     }
 
     /**
@@ -951,63 +1186,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 // torn down when the pick was made). Broadcasting the
                 // personal player's position as the channel's own currentTime
                 // would corrupt sync for everyone else in the room, so this
-                // just sits out each tick instead — same as the existing
-                // "nothing meaningful to broadcast" case below, and no worse
-                // than any other leader going briefly idle between items.
+                // just sits out each tick instead — no worse than any other
+                // leader going briefly idle between items.
                 if (_state.value.personalPickActive) continue
-                val p = player
-                when {
-                    p != null -> client.sendMediaUpdate(p.currentTimeSeconds(), p.isPaused)
-                    // No PlayerHandle, but EMBED is still a real, watched
-                    // item, not a torn-down player — see
-                    // embedSyntheticTimeSeconds's own doc comment for why
-                    // broadcasting an extrapolated position beats leaving
-                    // the whole room's authoritative currentTime frozen for
-                    // as long as this item plays.
-                    _state.value.player == MediaTypes.Player.EMBED ->
-                        client.sendMediaUpdate(embedSyntheticTimeSeconds(), false)
-                    // Otherwise (WEB, or genuinely between items) there is
-                    // nothing meaningful to broadcast — same as before.
-                }
+                val p = player ?: continue
+                val current = _state.value.channelCurrentMedia ?: continue
+                // Only ever the channel's own current item: right after the
+                // playlist moves on, the player can still hold the previous
+                // one, and its time means nothing for the new item. The
+                // server checks the id too and ignores a mismatch.
+                if (p.mediaId != current.id || p.mediaType != current.type) continue
+                client.sendMediaUpdate(current.id, current.type, p.currentTimeSeconds(), p.isPaused)
             }
         }
-    }
-
-    /** Sets the (wall-clock, position) anchor embedSyntheticTimeSeconds()
-     *  extrapolates from. Call whenever state.player is about to become
-     *  EMBED, with the best position already known for that item. */
-    private fun anchorEmbedClock(startSeconds: Double) {
-        embedClockAnchorAtMs = android.os.SystemClock.elapsedRealtime()
-        embedClockAnchorSeconds = startSeconds.coerceAtLeast(0.0)
-    }
-
-    /**
-     * EMBED has no PlayerHandle — no ExoPlayer, no currentTimeSeconds() to
-     * read, since the video is inside a WebView running a provider's own JS
-     * player (YouTube's, Dailymotion's, Vimeo's, or, for a custom cu/bc/bn
-     * embed, whatever arbitrary page a channel operator pasted, with no
-     * consistent API at all). Building a real per-provider JS bridge to read
-     * true position back out isn't something one implementation could cover
-     * for all of them.
-     *
-     * What this does instead, only for the room LEADER's own broadcast (see
-     * retuneLeaderTicker): extrapolate forward from wall-clock time elapsed
-     * since the item's own known starting position (embedClockAnchorSeconds
-     * as of embedClockAnchorAtMs — see anchorEmbedClock), assuming ordinary
-     * 1x playback. That's the common case; the one thing this can't detect
-     * is the far rarer case of the viewer manually pausing the embed by
-     * hand, which is also why retuneLeaderTicker always reports paused=false
-     * here rather than guessing. Anyone actually watching natively already
-     * corrects against small drift via the normal accuracySeconds tolerance
-     * (see SyncEngine), so this costs nothing that slow network/buffering
-     * wasn't already costing elsewhere — the alternative was the room's
-     * authoritative currentTime simply freezing for as long as the leader's
-     * item stayed on EMBED, which is worse for everyone in the channel, not
-     * just the leader.
-     */
-    private fun embedSyntheticTimeSeconds(): Double {
-        val elapsedSeconds = (android.os.SystemClock.elapsedRealtime() - embedClockAnchorAtMs) / 1000.0
-        return embedClockAnchorSeconds + elapsedSeconds
     }
 
     /**
@@ -1090,35 +1281,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // A resolved stream URL that just failed (expired, 403, taken down)
         // would otherwise stay cached for 5-10 minutes, so rejoining or the
         // item coming round again would retry the same dead link.
-        if (m != null) {
-            when (_state.value.player) {
-                MediaTypes.Player.NEWPIPE -> YouTubeResolver.invalidate(m.id)
-                MediaTypes.Player.GDRIVE -> GoogleDriveResolver.invalidate(m.id)
-                MediaTypes.Player.STREAMABLE -> StreamableResolver.invalidate(m.id)
-                MediaTypes.Player.PEERTUBE -> PeerTubeResolver.invalidate(m.id)
-                else -> Unit
-            }
-        }
+        if (m != null) StreamResolvers.invalidate(_state.value.player, m.id)
         if (_state.value.effectiveMode == CompatMode.WEB) return
         val embeddable = m?.embedPlayableSrc
         if (embeddable != null && _state.value.player != MediaTypes.Player.EMBED) {
             Log.d(TAG, "playback fallback: switching to single-video view at $embeddable")
-            // Best-effort: the failed backend's own handle is still readable
-            // right up to this call in the common case, so anchor the
-            // synthetic clock (see embedSyntheticTimeSeconds) from wherever
-            // it actually got to rather than from the item's original,
-            // possibly long-stale, load-time position. currentTimeSeconds()
-            // is suspend, so the handle is captured synchronously now (before
-            // the backend actually switches away under it) and read inside a
-            // coroutine.
-            val failedHandle = player
-            val fallbackSeconds = m?.currentTime ?: 0.0
-            viewModelScope.launch {
-                val bestKnownSeconds = runCatching { failedHandle?.currentTimeSeconds() }.getOrNull()
-                    ?: fallbackSeconds
-                anchorEmbedClock(bestKnownSeconds)
-                update { it.copy(player = MediaTypes.Player.EMBED) }
-            }
+            update { it.copy(player = MediaTypes.Player.EMBED) }
             return
         }
         update { it.copy(playbackOffer = reason) }
@@ -1148,12 +1316,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * Reconcile with the server rather than tearing the connection down.
      * Only re-resolves the socket if we are actually adrift, and never
      * touches the player — requestPlaylist/signalPlayerReady alone re-syncs
-     * playlist and leader state over the existing connection. This used to
-     * also bump playerEpoch, which tears the whole ExoPlayer instance down
-     * and rebuilds it from scratch (see PlayerSurface's ExoSurface:
-     * `remember(epoch) { ExoPlayer.Builder(...).build() }`) — that meant
-     * every refresh silently restarted whatever was already playing fine,
-     * even when nothing was actually wrong with playback.
+     * playlist and leader state over the existing connection. (It used to
+     * rebuild the player too, which restarted whatever was already playing
+     * fine.)
      *
      * Reached by tapping the channel name in the TopAppBar (see
      * ChannelScreen) rather than a pull gesture now — same action, moved
@@ -1199,10 +1364,20 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * is fixed) would load straight into WebView with no explanation and no
      * prompt, indistinguishable from the old "just defaults to WebView" bug
      * this was built to fix.
+     *
+     * Choosing the same mode as the global default (Settings) clears this
+     * channel's own choice instead of saving it, so the channel follows the
+     * default again — there was no other way back, and one visit to the
+     * menu used to pin the channel for good.
      */
     fun setMode(mode: CompatMode, persist: Boolean = true) {
         viewModelScope.launch {
-            if (persist) settingsStore.setChannelCompat(_state.value.channel, mode)
+            if (persist) {
+                settingsStore.setChannelCompat(
+                    _state.value.channel,
+                    mode.takeIf { it != settings.compatMode }
+                )
+            }
             update { it.copy(effectiveMode = mode, compatOffer = null) }
 
             if (mode == CompatMode.WEB) {
@@ -1218,7 +1393,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 if (_state.value.connection != ConnectionState.CONNECTED) connect(_state.value.channel)
                 _state.value.media?.let { m ->
                     val (chosen, offer) = choosePlayerAndOffer(m)
-                    if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(m.currentTime)
                     update { it.copy(player = chosen, compatOffer = offer) }
                 }
             }
@@ -1269,7 +1443,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun submitPassword(pw: String) = client.sendPassword(pw)
-    fun voteSkip() = client.voteSkip()
     fun jumpTo(uid: Int) = client.jumpTo(uid)
     fun deleteItem(uid: Int) = client.deleteItem(uid)
 
@@ -1295,7 +1468,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * defensively here too, in case a stale composition or the auto-advance
      * path below ever calls this with something it shouldn't. Reuses
      * exactly the same player-selection/offer-dialog machinery a real
-     * changeMedia goes through (choosePlayerAndOffer, anchorEmbedClock) so
+     * changeMedia goes through (choosePlayerAndOffer) so
      * a personal pick behaves identically to the channel's own current item
      * in every way except who it's visible to and what drives it forward.
      */
@@ -1305,12 +1478,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val frame = MediaFrame.fromPlaylistItem(item)
         val (chosen, offer) = choosePlayerAndOffer(frame)
         Log.i(TAG, "personal pick type=${frame.type} player=$chosen id=${frame.id} uid=${item.uid}")
-        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(frame.currentTime)
         val initialQualityIndex = resolveInitialQualityIndex(frame)
         // A genuinely different item from whatever was loaded before — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
-        qualityStableSinceMs = SystemClock.elapsedRealtime()
+        if (qualityStableSinceMs == 0L) qualityStableSinceMs = SystemClock.elapsedRealtime()
         update {
             it.copy(
                 media = frame,
@@ -1323,17 +1495,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 nativeQualityIndex = initialQualityIndex
             )
         }
+        // Personal auto-advance (onPlaybackEnded) lands here too, and that
+        // can happen with the app in the background.
+        loadWhileInBackground()
     }
 
     /**
      * Clears a personal pick and snaps back to whatever the channel's real
      * current item actually is (kept up to date the whole time by
-     * onMediaChanged, even while it wasn't what was on screen). Called both
-     * from an explicit user action (e.g. a "back to channel" control) and
-     * automatically when sync is switched back on (see the settings
-     * collector in start()).
+     * onMediaChanged, even while it wasn't what was on screen). Called when
+     * sync is switched back on (see the settings collector in start()).
      */
-    fun stopPersonalPick() {
+    private fun stopPersonalPick() {
         if (!_state.value.personalPickActive) return
         val channelMedia = _state.value.channelCurrentMedia
         if (channelMedia == null) {
@@ -1341,21 +1514,30 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val (chosen, offer) = choosePlayerAndOffer(channelMedia)
-        if (chosen == MediaTypes.Player.EMBED) anchorEmbedClock(channelMedia.currentTime)
         val initialQualityIndex = resolveInitialQualityIndex(channelMedia)
         // Snapping back to the channel's own item is also a genuine item
         // change from whatever was personally loaded — see
         // ChannelUiState.nativeQualityIndex's own doc comment.
         lastQualityChangeAtMs = 0L
-        qualityStableSinceMs = SystemClock.elapsedRealtime()
-        lastServerTimeSeconds = channelMedia.currentTime
-        lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
-        isServerPaused = channelMedia.paused
+        if (qualityStableSinceMs == 0L) qualityStableSinceMs = SystemClock.elapsedRealtime()
+        // The channel's time kept being recorded during the pick
+        // (onTimeUpdate); channelMedia's own currentTime is from its
+        // changeMedia, which can be minutes old. Start where the room is now.
+        val resumeAt = roomTimeNow(channelMedia.seconds)
+        if (resumeAt == null) {
+            lastServerTimeSeconds = channelMedia.currentTime
+            lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            isServerPaused = channelMedia.paused
+        }
+        val resumed = if (resumeAt != null) channelMedia.copy(currentTime = resumeAt) else channelMedia
+        // The same player carries on with a different item, so attachPlayer
+        // won't restart the grace period; do it here.
+        playerAttachedAtMs = SystemClock.elapsedRealtime()
         update {
             it.copy(
-                media = channelMedia,
+                media = resumed,
                 player = chosen,
-                playing = !channelMedia.paused,
+                playing = !isServerPaused,
                 playbackOffer = null,
                 compatOffer = offer,
                 personalPickActive = false,
@@ -1500,6 +1682,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(messages = appendChat(it.messages, message)) }
     }
 
+    /** Puts [item] after the item with uid [afterUid], or at the start / end
+     *  for the PlaylistPosition markers (and at the end for an unknown uid,
+     *  which is what the server's own client does too). */
+    private fun insertAfter(
+        list: PersistentList<PlaylistItem>,
+        item: PlaylistItem,
+        afterUid: Int
+    ): PersistentList<PlaylistItem> {
+        if (afterUid == PlaylistPosition.START) return list.add(0, item)
+        val idx = list.indexOfFirst { it.uid == afterUid }
+        return if (idx >= 0) list.add(idx + 1, item) else list.add(item)
+    }
+
     private fun escapeHtml(text: String): String = text
         .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
@@ -1635,9 +1830,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  a tap that lands mid-refresh. */
         const val REFRESH_COOLDOWN_MS = 4_000L
 
-        /** How long after a new player attaches SyncEngine holds off on
-         *  hard seeks — see SyncEngine.apply's withinGracePeriod
-         *  doc. Long enough to cover Google Drive / NewPipe resolution +
+        /** How long after a new item or player SyncEngine holds off on all
+         *  position correction (seeks and speed nudges) — see
+         *  SyncEngine.apply. Long enough to cover Google Drive / NewPipe resolution +
          *  initial container parsing and buffering; short enough that a
          *  channel that's genuinely out of sync still gets corrected quickly. */
         const val SYNC_GRACE_MS = 3_500L

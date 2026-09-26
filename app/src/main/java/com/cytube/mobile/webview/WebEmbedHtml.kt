@@ -1,5 +1,8 @@
 package com.cytube.mobile.webview
 
+/** Injected into every frame of an embed page: a getCookie stub some embed
+ *  scripts expect, and logging of uncaught page errors (they still reach
+ *  the page as normal; this only makes them visible in Logcat). */
 const val EMBED_DEFENSIVE_SHIM_JS = """
 (function(){
   if (typeof window.getCookie !== 'function') {
@@ -7,7 +10,7 @@ const val EMBED_DEFENSIVE_SHIM_JS = """
   }
   window.addEventListener('error', function(e) {
     try {
-      console.warn('[shim] suppressed page error: ' + (e && e.message));
+      console.warn('[shim] page error: ' + (e && e.message));
     } catch (ignored) {}
   }, true);
 })();
@@ -16,6 +19,14 @@ const val EMBED_DEFENSIVE_SHIM_JS = """
 const val EMBED_PAGE_ORIGIN = "https://example.com"
 const val EMBED_ENDED_SENTINEL = "__CYTUBE_EMBED_ENDED__"
 const val EMBED_STATE_SENTINEL = "__CYTUBE_EMBED_STATE__:"
+/** Logged (followed by a short detail) when a provider's player reports that
+ *  the video can't be played — removed, private, not embeddable, failed to
+ *  load. PlayerSurface turns it into a playback failure. */
+const val EMBED_ERROR_SENTINEL = "__CYTUBE_EMBED_ERROR__:"
+
+/** Media types with their own player page below, as opposed to a link that
+ *  is loaded directly. */
+val PROVIDER_EMBED_TYPES = setOf("dm", "yt", "vi", "pt", "sb")
 
 const val BLANK_EMBED_HTML =
     "<!DOCTYPE html><html><body style=\"background:#000;margin:0;\"></body></html>"
@@ -44,9 +55,6 @@ fun dailymotionSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boo
         <script>
           window.dmAsyncInit = function() {
             var el = document.getElementById('dmplayer');
-            if (window.DM && DM.Player && DM.Player._INSTANCES && DM.Player._INSTANCES[el.id]) {
-              DM.Player.destroy(el.id);
-            }
             var player = DM.Player.create(el, {
               video: '$safeId',
               width: '100%',
@@ -115,6 +123,10 @@ fun dailymotionSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boo
               player.addEventListener('ended', function() {
                 console.log('$EMBED_ENDED_SENTINEL');
               });
+              player.addEventListener('error', function() {
+                var err = player.error || {};
+                console.log('$EMBED_ERROR_SENTINEL' + (err.code || err.title || 'unknown'));
+              });
             }
             setInterval(reportState, 1000);
           };
@@ -160,6 +172,10 @@ fun youtubeIframeApiHtml(id: String, initialTime: Double = 0.0, initialPaused: B
           });
 
           var player = null;
+          // Last volume the app asked for (null: never asked). The player
+          // starts muted so autoplay is allowed and is unmuted once it
+          // plays — but only if the app hasn't asked for silence.
+          var wantVol = null;
           window.onYouTubeIframeAPIReady = function() {
             var unmuted = false;
             player = new YT.Player('ytplayer', {
@@ -189,12 +205,20 @@ fun youtubeIframeApiHtml(id: String, initialTime: Double = 0.0, initialPaused: B
                 onStateChange: function(e) {
                   if (e.data === 1 && !unmuted) {
                     unmuted = true;
-                    e.target.unMute();
+                    if (wantVol === null || wantVol > 0) {
+                      e.target.unMute();
+                      if (wantVol !== null) e.target.setVolume(wantVol * 100);
+                    }
                   }
                   if (e.data === 0) {
                     console.log('$EMBED_ENDED_SENTINEL');
                   }
                   reportState();
+                },
+                // 2 bad id, 5 can't play in HTML5, 100 removed/private,
+                // 101/150 not embeddable — all mean this video won't play.
+                onError: function(e) {
+                  console.log('$EMBED_ERROR_SENTINEL' + 'code ' + e.data);
                 }
               }
             });
@@ -214,6 +238,7 @@ fun youtubeIframeApiHtml(id: String, initialTime: Double = 0.0, initialPaused: B
               pause: function() { if (player && player.pauseVideo) player.pauseVideo(); },
               seekTo: function(s) { if (player && player.seekTo) player.seekTo(s, true); },
               setVolume: function(v) {
+                wantVol = v;
                 if (player) {
                   if (v <= 0 && player.mute) player.mute();
                   else {
@@ -305,7 +330,10 @@ fun vimeoSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boolean =
             } else {
               player.pause().catch(function(){});
             }
-          }).catch(function(){});
+          }).catch(function(e) {
+            // ready() only rejects when the video can't be loaded at all.
+            console.log('$EMBED_ERROR_SENTINEL' + (e && e.name ? e.name : 'not available'));
+          });
           setInterval(reportState, 1000);
         </script>
         </body>
@@ -340,30 +368,22 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
           var player = new PeerTubePlayer(document.getElementById('ptplayer'));
           var lastKnownPaused = ${if (initialPaused) "true" else "false"};
           var lastKnownPosition = $startSeconds;
-          var isBuffering = false;
-          var unmuted = false;
           var ended = false;
 
           window.__cytubeEmbed = {
             play: function() { if (player) player.play().catch(function(e){}); },
             pause: function() { if (player) player.pause().catch(function(e){}); },
             seekTo: function(s) { if (player) player.seek(s).catch(function(e){}); },
-            setVolume: function(v) {
-              if (player) {
-                if (v <= 0 && player.mute) player.mute().catch(function(e){});
-                else {
-                  if (player.unMute) player.unMute().catch(function(e){});
-                  if (player.setVolume) player.setVolume(v).catch(function(e){});
-                }
-              }
-            }
+            setVolume: function(v) { if (player) player.setVolume(v).catch(function(e){}); }
           };
 
+          // PeerTube's embed API reports only playing/paused, so buffering
+          // is always reported as false.
           function reportState() {
             console.log('$EMBED_STATE_SENTINEL' + JSON.stringify({
               paused: lastKnownPaused,
               currentTime: lastKnownPosition,
-              buffering: isBuffering
+              buffering: false
             }));
           }
 
@@ -373,12 +393,6 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
             }
             player.addEventListener('playbackStatusChange', function(status) {
               lastKnownPaused = (status === 'paused');
-              isBuffering = (status === 'buffering');
-              if (status === 'playing' && !unmuted) {
-                unmuted = true;
-                if (player.unMute) player.unMute().catch(function() {});
-                if (player.setVolume) player.setVolume(1).catch(function() {});
-              }
               reportState();
             });
             player.addEventListener('playbackStatusUpdate', function(status) {
@@ -394,7 +408,10 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
             } else {
               player.pause().catch(function(e) {});
             }
-          }).catch(function(e) { console.log('peertube ready rejected: ' + (e && e.message ? e.message : e)); });
+          }).catch(function(e) {
+            // ready() only rejects when the video can't be loaded at all.
+            console.log('$EMBED_ERROR_SENTINEL' + (e && e.message ? e.message : 'not available'));
+          });
           setInterval(reportState, 1000);
         </script>
         </body>
@@ -431,22 +448,35 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
           var player = new playerjs.Player(document.getElementById('sbplayer'));
           var lastKnownPaused = ${if (initialPaused) "true" else "false"};
           var lastKnownTime = $startSeconds;
-          var isBuffering = false;
           var finishing = false;
           var unmuted = false;
+          // Last volume the app asked for (null: never asked) — see the
+          // one-time unmute in the 'play' handler.
+          var wantVol = null;
 
           window.__cytubeEmbed = {
             play: function() { if (player) player.play(); },
             pause: function() { if (player) player.pause(); },
             seekTo: function(s) { if (player) player.setCurrentTime(s); },
-            setVolume: function(v) { if (player) player.setVolume(v * 100); }
+            setVolume: function(v) {
+              wantVol = v;
+              if (!player) return;
+              if (v <= 0) {
+                try { player.mute(); } catch(e){}
+              } else {
+                try { player.unmute(); } catch(e){}
+                try { player.setVolume(v * 100); } catch(e){}
+              }
+            }
           };
 
+          // player.js has no buffering events, so buffering is always
+          // reported as false.
           function reportState() {
             console.log('$EMBED_STATE_SENTINEL' + JSON.stringify({
               paused: lastKnownPaused,
               currentTime: lastKnownTime,
-              buffering: isBuffering
+              buffering: false
             }));
           }
 
@@ -457,11 +487,13 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
             player.on('pause', function() { lastKnownPaused = true; reportState(); });
             player.on('play', function() {
               lastKnownPaused = false;
-              isBuffering = false;
               if (!unmuted && $autoplayParam === 1) {
                 unmuted = true;
-                try { player.unmute(); } catch(e){}
-                try { player.setVolume(100); } catch(e){}
+                // Started muted (&muted=1) so autoplay is allowed.
+                if (wantVol === null || wantVol > 0) {
+                  try { player.unmute(); } catch(e){}
+                  try { player.setVolume(wantVol === null ? 100 : wantVol * 100); } catch(e){}
+                }
               }
               reportState();
             });
@@ -477,8 +509,9 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
               }
               reportState();
             });
-            player.on('buffering', function() { isBuffering = true; reportState(); });
-            player.on('buffered', function() { isBuffering = false; reportState(); });
+            player.on('error', function(e) {
+              console.log('$EMBED_ERROR_SENTINEL' + (e && e.message ? e.message : 'unknown'));
+            });
             if ($autoplayParam === 1) {
               player.play();
             } else {

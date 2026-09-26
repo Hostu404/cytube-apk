@@ -42,7 +42,7 @@ object GoogleDriveResolver {
     // room's playlist/server, not something the user typed. It's spliced
     // directly into a URL path segment below, so it needs the same shape
     // check every other provider id in this app gets (see
-    // PlayerSurface.kt's SAFE_EMBED_ID_REGEX) before it ever reaches
+    // SAFE_EMBED_ID_REGEX in webview/WebEmbedHtml.kt) before it ever reaches
     // Request.Builder: real Drive file ids are URL-safe base64-ish
     // (letters/digits/-/_), so anything outside that charset — a "/", "..",
     // "?", "#", etc. — can only be an attempt to smuggle extra path segments
@@ -53,6 +53,26 @@ object GoogleDriveResolver {
 
     data class Resolved(val url: String, val mimeType: String?, val label: String)
 
+    /**
+     * Headers for fetching the resolved stream itself (not the lookup).
+     *
+     * A previous pass spoofed Referer/Origin/a desktop Chrome User-Agent on
+     * the video-byte request, on the theory that Google's CDN hotlink-checks
+     * it the same way the metadata lookup is checked. Live testing across two
+     * different Drive file ids showed that was wrong — both still came back
+     * HTTP 403 with those headers attached. yt-dlp's GoogleDriveIE (same
+     * endpoint and API key) sends no Referer/Origin/User-Agent override at
+     * all for these formatStreamingData URLs — only the metadata lookup
+     * carries a Referer. Matching that is what fixed it — confirmed live.
+     * The blank User-Agent here means "don't send the app's browser-style
+     * one" (see NativePlayerHandle.cachedDataSourceFactory); OkHttp then
+     * sends its own default "okhttp/…" User-Agent.
+     *
+     * Used by both the player surface and ChannelViewModel's background load,
+     * which is why it lives here rather than in PlayerSurface.
+     */
+    val STREAM_HEADERS: Map<String, String> = mapOf("User-Agent" to "")
+
     // Same reasoning as YouTubeResolver's cache: these URLs are signed and
     // time-limited, so this only needs to survive a player-surface rebuild.
     private val cache = TimedCache<String, Resolved>(ttlMs = 5 * 60 * 1000L, evictAboveSize = 20)
@@ -62,6 +82,12 @@ object GoogleDriveResolver {
      *  fresh one instead of reusing the dead link until the cache expires.
      *  Called from ChannelViewModel.reportPlaybackFailure. */
     fun invalidate(fileId: String) = cache.remove(fileId)
+
+    /** The cached result for [fileId] if there's a fresh one, without any
+     *  network work — lets the player surface show an item straight away
+     *  (and keep its existing player) when it was already resolved, e.g.
+     *  loaded while the app was in the background. */
+    fun cached(fileId: String): Resolved? = cache.get(fileId)
 
     suspend fun resolve(http: OkHttpClient, fileId: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_FILE_ID_REGEX.matches(fileId)) {

@@ -43,8 +43,8 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             // `newBuilder()` copies those by reference by default, which
             // would mean emote-image fetches compete for the exact same
             // connection slots as the video player's own byte-fetching —
-            // NativePlayerHandle's OkHttpDataSource is built on this same
-            // Graph.http instance. A chat-heavy channel's backlog can fire
+            // NativePlayerHandle's OkHttpDataSource uses Graph.mediaHttp,
+            // which is built off Graph.http and shares its Dispatcher. A chat-heavy channel's backlog can fire
             // a real burst of emote image requests right as a video is
             // loading, and OkHttp's default limits (64 total, 5/host) are
             // shared process-wide unless a client explicitly gets its own —

@@ -10,6 +10,9 @@ import androidx.media3.datasource.cache.SimpleCache
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.ChannelIndexRepository
 import com.cytube.mobile.net.CyTubeClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import java.io.File
@@ -82,7 +85,11 @@ object Graph {
         ChannelIndexRepository(http, BASE_URL)
     }
 
-    fun newClient(context: Context): CyTubeClient = CyTubeClient(http, BASE_URL)
+    fun newClient(): CyTubeClient = CyTubeClient(http, BASE_URL)
+
+    /** For small jobs that must finish even if the screen that started them
+     *  goes away (e.g. saving a setting as the user leaves). */
+    val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private var mediaCacheInstance: Cache? = null
 

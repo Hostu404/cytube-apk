@@ -27,10 +27,11 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
-    // Every other setting works the same on TV as on phone; these two are
-    // the sole, explicit exceptions (Ambient glow is never rendered on TV —
-    // see ChannelScreen — and PiP has no meaning without a home-screen
-    // window to float into), so they're the only rows hidden here.
+    // Every other setting works the same on TV as on phone; these are the
+    // explicit exceptions, hidden here: Appearance (the TV screens keep
+    // their own dark palette — see MainActivity), Ambient glow (never
+    // rendered on TV — see ChannelScreen) and PiP (no home-screen window to
+    // float into).
     val isTv = remember { isTvDevice(context) }
     var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
@@ -53,27 +54,29 @@ fun SettingsScreen(onBack: () -> Unit) {
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
         ) {
-            SectionTitle("Appearance")
+            if (!isTv) {
+                SectionTitle("Appearance")
 
-            // Drives CyTubeSettingsTheme for this screen and home (see
-            // MainActivity) — System default just follows the phone's own
-            // light/dark setting, same as before this existed.
-            ThemeMode.entries.forEach { mode ->
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = settings.themeMode == mode,
-                        onClick = { scope.launch { store.setThemeMode(mode) } }
-                    )
-                    Text(
-                        when (mode) {
-                            ThemeMode.SYSTEM -> "System default"
-                            ThemeMode.LIGHT -> "Light"
-                            ThemeMode.DARK -> "Dark"
-                        }
-                    )
+                // Drives CyTubeSettingsTheme for home, this screen and the
+                // account screen (see MainActivity) — System default just
+                // follows the phone's own light/dark setting.
+                ThemeMode.entries.forEach { mode ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = settings.themeMode == mode,
+                            onClick = { scope.launch { store.setThemeMode(mode) } }
+                        )
+                        Text(
+                            when (mode) {
+                                ThemeMode.SYSTEM -> "System default"
+                                ThemeMode.LIGHT -> "Light"
+                                ThemeMode.DARK -> "Dark"
+                            }
+                        )
+                    }
                 }
             }
 
@@ -89,8 +92,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text("Sync tolerance: ${settings.syncAccuracy.roundToInt()}s",
                     style = MaterialTheme.typography.bodyMedium)
                 Text(
-                    "How far the player may drift before it seeks. Lower is tighter but " +
-                        "seeks more often on a slow connection.",
+                    "How far the player may drift before it's corrected — by briefly " +
+                        "speeding up or slowing down, or a seek if it's far out. Lower is " +
+                        "tighter but corrects more often on a slow connection.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

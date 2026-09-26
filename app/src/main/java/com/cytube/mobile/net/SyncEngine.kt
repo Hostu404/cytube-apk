@@ -33,8 +33,6 @@ import kotlin.math.abs
  */
 class SyncEngine {
 
-    data class Result(val didSeek: Boolean = false, val waiting: Boolean = false)
-
     private var lastNonNativeCorrectionMs: Long = 0L
     private var lastNativeCorrectionMs: Long = 0L
 
@@ -54,53 +52,57 @@ class SyncEngine {
     /** True while a playback-rate nudge is in effect. */
     private var nudging = false
 
+    /**
+     * Brings [player] in line with the server's [update]. Only called for
+     * synced, non-leader playback: ChannelViewModel.evaluateSync handles
+     * leaders and sync-off itself. [withinGracePeriod] is true for a few
+     * seconds after a new item or player is attached (SYNC_GRACE_MS), and
+     * holds off all position correction — seeks and nudges — while it lasts.
+     */
     suspend fun apply(
         player: PlayerHandle,
         update: TimeUpdate,
-        newMediaId: String? = null,
-        isLeader: Boolean,
-        syncEnabled: Boolean,
+        newMediaId: String?,
         accuracySeconds: Double,
-        withinGracePeriod: Boolean = false,
+        withinGracePeriod: Boolean,
         nowMs: Long = System.currentTimeMillis()
-    ): Result {
-        var currentTime = update.currentTime
-        if (currentTime.isNaN() || currentTime.isInfinite()) return Result()
+    ) {
+        val currentTime = update.currentTime
+        if (currentTime.isNaN() || currentTime.isInfinite()) return
         val safeAccuracy = if (accuracySeconds.isNaN() || accuracySeconds <= 0.0) 2.0 else accuracySeconds
 
         val length = player.mediaLengthSeconds
         if (length > 0 && currentTime > length) {
             // Past the end of a finite item — the server is about to advance the
             // playlist. Applying this would cause a pointless seek to the tail.
-            return Result()
-        }
-
-        // A leader IS the clock; and a user who has turned sync off is opting
-        // out entirely. In both cases we apply nothing (other than making sure
-        // a nudge in progress doesn't leave the player running fast/slow).
-        if (isLeader || !syncEnabled) {
-            stopNudge(player)
-            return Result()
+            return
         }
 
         // Lead-in: the server counts up from a negative value so clients can
         // buffer before the group actually starts.
         val waiting = currentTime < 0
 
+        // The channel has moved on to a new item, but this player still holds
+        // the previous one (the new one hasn't been loaded into it yet). Do
+        // nothing to it: the server's time belongs to the NEW item, so
+        // "correcting" the old video to it seeks the old video back near its
+        // start, and the lead-in/paused handling below would then play it
+        // again. That was the "video replays instead of moving on" seen when
+        // an item changed while the app was in the background. Syncing
+        // resumes once the new item is loaded and this player reports its id.
         if (newMediaId != null && newMediaId != player.mediaId) {
-            if (currentTime < 0) currentTime = 0.0
             lastNonNativeCorrectionMs = 0L
             lastNativeCorrectionMs = 0L
             playingSinceMs = 0L
             pendingLeadCheck = false
             stopNudge(player)
-            player.play()
+            return
         }
 
         if (waiting) {
             // Same "already there, don't re-correct" guard as the update.paused
             // branch just below — without it this fired the seek+pause on every
-            // ~1s server tick for the whole lead-in countdown, which is exactly
+            // ~1s sync tick for the whole lead-in countdown, which is exactly
             // the kind of redundant correction the comment above isBuffering
             // warns causes skip/jitter.
             stopNudge(player)
@@ -108,7 +110,7 @@ class SyncEngine {
                 player.seekTo(0.0)
                 player.pause()
             }
-            return Result(waiting = true)
+            return
         }
 
         if (update.paused) {
@@ -117,7 +119,7 @@ class SyncEngine {
                 player.seekTo(currentTime)
                 player.pause()
             }
-            return Result()
+            return
         } else if (player.isPaused) {
             player.play()
         }
@@ -133,25 +135,26 @@ class SyncEngine {
         // sync is not, for this kind of media.
         if (player.mediaLengthSeconds <= 0) {
             stopNudge(player)
-            return Result()
+            return
         }
 
         // Something (this apply(), a previous seek, or the user scrubbing) is
         // already mid-rebuffer or loading. Piling a corrective seek on top is exactly
         // what produced the skip/jitter loop on large files — let it finish;
-        // CyTube's own updates arrive about once a second, so drift gets
-        // re-evaluated again almost immediately once buffering clears.
+        // ChannelViewModel re-evaluates every second (its own sync ticker —
+        // the server itself only sends a time every 5s), so drift gets
+        // looked at again almost immediately once buffering clears.
         if (player.isBuffering || !player.isPlaying) {
             playingSinceMs = 0L
-            return Result()
+            return
         }
         if (playingSinceMs == 0L) playingSinceMs = nowMs
 
-        if (withinGracePeriod) return Result()
+        if (withinGracePeriod) return
 
         val local = player.currentTimeSeconds()
         // Ignore uninitialized (0.0) or invalid local player positions while player is spinning up
-        if (local.isNaN() || local.isInfinite() || local <= 0.0) return Result()
+        if (local.isNaN() || local.isInfinite() || local <= 0.0) return
         // Positive = player is BEHIND the server; negative = AHEAD.
         val diff = currentTime - local
 
@@ -163,21 +166,18 @@ class SyncEngine {
         // 3. Ignore drift under 10 seconds and let playback continue normally.
         // 4. At 10+ seconds drift (ahead or behind), allow a corrective seek with a cooldown.
         if (!player.isNative) {
-            if (nowMs - lastNonNativeCorrectionMs < NON_NATIVE_CORRECTION_COOLDOWN_MS) return Result()
-
-            return when {
+            if (nowMs - lastNonNativeCorrectionMs < NON_NATIVE_CORRECTION_COOLDOWN_MS) return
+            when {
                 diff >= NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
                     lastNonNativeCorrectionMs = nowMs
                     player.seekTo(currentTime)
-                    Result(didSeek = true)
                 }
                 diff <= -NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
                     lastNonNativeCorrectionMs = nowMs
                     player.seekTo(currentTime + 1.0)
-                    Result(didSeek = true)
                 }
-                else -> Result()
             }
+            return
         }
 
         // ---- native (ExoPlayer) ----
@@ -186,7 +186,7 @@ class SyncEngine {
         // a moment. Right after a rebuffer, the position is exactly as far
         // behind as the rebuffer was long — correcting that immediately (with
         // another seek, into another unbuffered range) is the loop.
-        if (nowMs - playingSinceMs < SETTLE_MS) return Result()
+        if (nowMs - playingSinceMs < SETTLE_MS) return
 
         // LEAD learning: a forward correction has now settled; whatever drift
         // is left over is what that seek's rebuffer cost beyond the lead we
@@ -202,22 +202,21 @@ class SyncEngine {
 
         // Big drift: a seek is the only sensible fix.
         if (absDiff >= hardSeekThreshold) {
-            if (nowMs - lastNativeCorrectionMs < NATIVE_CORRECTION_COOLDOWN_MS) return Result()
+            if (nowMs - lastNativeCorrectionMs < NATIVE_CORRECTION_COOLDOWN_MS) return
             lastNativeCorrectionMs = nowMs
             stopNudge(player)
             playingSinceMs = 0L
-            return if (diff > 0) {
+            if (diff > 0) {
                 // Behind: land ahead of the server by what a forward seek is
                 // currently costing, so we're on time when it resumes.
                 pendingLeadCheck = true
                 player.seekTo(currentTime + seekLeadSeconds)
-                Result(didSeek = true)
             } else {
                 // Ahead: a backward seek normally lands in the back buffer and
                 // is near-free; keep upstream's +1.
                 player.seekTo(currentTime + 1.0)
-                Result(didSeek = true)
             }
+            return
         }
 
         // Moderate drift: nudge playback rate rather than seek. Starts at the
@@ -226,7 +225,7 @@ class SyncEngine {
         val shouldNudge = if (nudging) absDiff > NUDGE_STOP_SECONDS else absDiff >= safeAccuracy
         if (!shouldNudge) {
             stopNudge(player)
-            return Result()
+            return
         }
 
         val magnitude = (NUDGE_BASE + NUDGE_PER_SECOND * absDiff).coerceAtMost(NUDGE_MAX)
@@ -238,14 +237,13 @@ class SyncEngine {
             val ahead = player.bufferedAheadSeconds
             if (!ahead.isNaN() && ahead < MIN_BUFFER_FOR_SPEEDUP_SECONDS) {
                 stopNudge(player)
-                return Result()
+                return
             }
             player.setPlaybackRate((1.0 + magnitude).toFloat())
         } else {
             player.setPlaybackRate((1.0 - magnitude).toFloat())
         }
         nudging = true
-        return Result()
     }
 
     /** Ends any rate nudge in progress. Also called by ChannelViewModel when it
@@ -255,9 +253,6 @@ class SyncEngine {
         nudging = false
         player.setPlaybackRate(1f)
     }
-
-    /** Drift magnitude for the UI's sync indicator. */
-    fun drift(serverTime: Double, localTime: Double): Double = abs(serverTime - localTime)
 
     private companion object {
         const val NON_NATIVE_DRIFT_THRESHOLD_SECONDS = 10.0

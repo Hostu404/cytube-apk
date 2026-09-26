@@ -48,6 +48,18 @@ fun LoginScreen(onBack: () -> Unit) {
         delay(500)
         settingsStore.setGuestName(guestName)
     }
+    // Leaving within the debounce cancels the save above; finish it on the
+    // way out instead, on a scope that outlives this screen.
+    val latestGuestName by rememberUpdatedState(guestName)
+    val latestGuestNameLoaded by rememberUpdatedState(guestNameLoaded)
+    DisposableEffect(Unit) {
+        onDispose {
+            if (latestGuestNameLoaded) {
+                val name = latestGuestName
+                Graph.appScope.launch { settingsStore.setGuestName(name) }
+            }
+        }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -76,12 +88,11 @@ fun LoginScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Button(
-                    // Clear the local session immediately so the UI feels
-                    // instant; the (best-effort) server-side revoke happens
-                    // in the background and never blocks this.
+                    // logout() forgets the session at once; the server-side
+                    // revoke runs in the background and never blocks this.
                     onClick = {
                         session = null
-                        scope.launch { auth.logout() }
+                        auth.logout()
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Log out") }

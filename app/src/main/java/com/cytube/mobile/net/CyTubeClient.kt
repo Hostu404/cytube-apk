@@ -38,13 +38,6 @@ class CyTubeClient(
 
     private var socket: Socket? = null
 
-    @Volatile
-    private var lastPingSentMs: Long = 0L
-
-    @Volatile
-    var estimatedRttMs: Long = 100L
-        private set
-
     // Replayed on every reconnect.
     private var channelName: String? = null
     private var channelPassword: String? = null
@@ -52,20 +45,17 @@ class CyTubeClient(
 
     var localUsername: String? = null
         private set
-    var localRank: Double = 0.0
-        private set
     var leaderName: String? = null
         private set
 
     val isLeader: Boolean get() = leaderName != null && leaderName == localUsername
 
     /**
-     * Either a session cookie (preferred — no password held in memory) or a
-     * name/password pair for the socket login frame.
+     * A logged-in session cookie (from AuthRepository's web login — no
+     * password is ever held here) or a guest name.
      */
     sealed interface Credential {
         data class Cookie(val authCookie: String, val name: String) : Credential
-        data class Password(val name: String, val password: String) : Credential
         data class Guest(val name: String) : Credential
     }
 
@@ -98,31 +88,29 @@ class CyTubeClient(
 
     private fun wire(s: Socket) {
         s.on(Socket.EVENT_CONNECT) {
+            // A leader is only ever announced, never un-announced to someone
+            // who wasn't there: if the leader left while we were
+            // disconnected, the rejoin simply doesn't mention one. So forget
+            // the old one now; the server sends setLeader after the join if
+            // there still is one.
+            leaderName = null
             emit(CyTubeEvent.Connected)
             replaySession()
         }
         s.on(Socket.EVENT_DISCONNECT) {
-            lastPingSentMs = 0L
             emit(CyTubeEvent.Disconnected)
         }
         s.on(Socket.EVENT_CONNECT_ERROR) { args ->
             emit(CyTubeEvent.ConnectionFailed(args.firstOrNull()?.toString() ?: "connect error"))
         }
-        s.io().on(Manager.EVENT_TRANSPORT) { args ->
-            val engine = args.firstOrNull() as? io.socket.engineio.client.Socket ?: return@on
-            engine.on(io.socket.engineio.client.Socket.EVENT_PING) {
-                lastPingSentMs = System.nanoTime() / 1_000_000L
-            }
-            engine.on(io.socket.engineio.client.Socket.EVENT_PONG) {
-                val now = System.nanoTime() / 1_000_000L
-                if (lastPingSentMs > 0L) {
-                    val sample = (now - lastPingSentMs).coerceIn(10L, 2000L)
-                    estimatedRttMs = if (estimatedRttMs == 100L) sample else (estimatedRttMs * 7 + sample) / 8
-                }
-            }
-        }
         s.io().on(Manager.EVENT_RECONNECT_ATTEMPT) { args ->
             emit(CyTubeEvent.Reconnecting((args.firstOrNull() as? Int) ?: 0))
+        }
+        // After reconnectionAttempts failures (a few minutes offline) the
+        // Manager stops for good; without this the app sat on
+        // "Reconnecting…" forever.
+        s.io().on(Manager.EVENT_RECONNECT_FAILED) {
+            emit(CyTubeEvent.ReconnectGaveUp)
         }
 
         obj(s, "login") { o ->
@@ -132,15 +120,12 @@ class CyTubeClient(
                 o.optString("error").ifBlank { null })
         }
         s.on("rank") { args ->
-            val r = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
-            localRank = r
-            emit(CyTubeEvent.RankChanged(r))
+            emit(CyTubeEvent.RankChanged((args.firstOrNull() as? Number)?.toDouble() ?: 0.0))
         }
         s.on("needPassword") { args ->
             emit(CyTubeEvent.NeedPassword(args.firstOrNull() as? Boolean ?: false))
         }
         s.on("cancelNeedPassword") { emit(CyTubeEvent.PasswordAccepted) }
-        s.on("channelNotRegistered") { emit(CyTubeEvent.ChannelNotRegistered) }
         s.on("partitionChange") { emit(CyTubeEvent.PartitionChanged) }
         s.on("kick") { args ->
             val reason = (args.firstOrNull() as? JSONObject)?.optString("reason")
@@ -167,14 +152,15 @@ class CyTubeClient(
         obj(s, "queue") {
             val item = it.optJSONObject("item")
             if (item == null) null
-            else CyTubeEvent.ItemQueued(PlaylistItem.from(item), it.optInt("after", -1))
+            else CyTubeEvent.ItemQueued(PlaylistItem.from(item), playlistPosition(it))
+        }
+        obj(s, "moveVideo") {
+            val uid = it.optInt("from", -1)
+            if (uid < 0) null else CyTubeEvent.ItemMoved(uid, playlistPosition(it))
         }
         obj(s, "delete") { CyTubeEvent.ItemDeleted(it.optInt("uid", -1)) }
         s.on("setPlaylistLocked") { args ->
             emit(CyTubeEvent.PlaylistLocked(args.firstOrNull() as? Boolean ?: false))
-        }
-        obj(s, "setPlaylistMeta") {
-            CyTubeEvent.PlaylistMeta(it.optInt("count", 0), it.optString("time", ""))
         }
 
         obj(s, "chatMsg") { CyTubeEvent.Chat(ChatMessage.from(it)) }
@@ -183,7 +169,17 @@ class CyTubeClient(
 
         arr(s, "userlist") { CyTubeEvent.UserListReplaced(ChannelUser.listFrom(it)) }
         obj(s, "addUser") { CyTubeEvent.UserJoined(ChannelUser.from(it)) }
-        obj(s, "setUserMeta") { CyTubeEvent.UserMetaChanged(ChannelUser.from(it)) }
+        obj(s, "setUserMeta") {
+            val name = it.optString("name")
+            val meta = it.optJSONObject("meta")
+            if (name.isBlank() || meta == null) null
+            else CyTubeEvent.UserAfkChanged(name, meta.optBoolean("afk", false))
+        }
+        obj(s, "setUserRank") {
+            val name = it.optString("name")
+            if (name.isBlank() || !it.has("rank")) null
+            else CyTubeEvent.UserRankChanged(name, it.optDouble("rank", 0.0))
+        }
         s.on("userLeave") { args ->
             (args.firstOrNull() as? JSONObject)?.optString("name")
                 ?.let { emit(CyTubeEvent.UserLeft(it)) }
@@ -206,7 +202,6 @@ class CyTubeClient(
         }
         obj(s, "removeEmote") { CyTubeEvent.EmoteRemoved(it.optString("name", "")) }
         obj(s, "setPermissions") { CyTubeEvent.PermissionsChanged(Permissions(it)) }
-        obj(s, "channelOpts") { CyTubeEvent.ChannelOptions(it) }
         s.on("setMotd") { args ->
             emit(CyTubeEvent.MotdChanged(args.firstOrNull() as? String ?: ""))
         }
@@ -226,9 +221,6 @@ class CyTubeClient(
     private fun replaySession() {
         val s = socket ?: return
         when (val c = credential) {
-            is Credential.Password -> s.emit("login", JSONObject().apply {
-                put("name", c.name); put("pw", c.password)
-            })
             is Credential.Guest -> s.emit("login", JSONObject().put("name", c.name))
             is Credential.Cookie -> {
                 // The auth cookie was verified during the handshake by
@@ -286,11 +278,8 @@ class CyTubeClient(
 
     fun requestPlaylist() { socket?.emit("requestPlaylist") }
     fun vote(option: Int) { socket?.emit("vote", JSONObject().put("option", option)) }
-    fun voteSkip() { socket?.emit("voteskip") }
-    fun setAfk() { socket?.emit("setAFK") }
     fun jumpTo(uid: Int) { socket?.emit("jumpTo", uid) }
     fun deleteItem(uid: Int) { socket?.emit("delete", uid) }
-    fun playNext() { socket?.emit("playNext") }
 
     fun queue(id: String, type: String, atEnd: Boolean = true, temp: Boolean = false) {
         socket?.emit("queue", JSONObject().apply {
@@ -300,30 +289,20 @@ class CyTubeClient(
         })
     }
 
-    /** Leader-only: push our clock upward. Mirrors the desktop client. */
-    fun sendMediaUpdate(currentTime: Double, paused: Boolean) {
+    /**
+     * Leader-only: push our clock upward, the same frame the website sends.
+     * [id] (and [type]) name the item this time belongs to: the server
+     * rejects the frame without an id, and ignores it when the id isn't the
+     * channel's current item.
+     */
+    fun sendMediaUpdate(id: String, type: String, currentTime: Double, paused: Boolean) {
         if (!isLeader) return
         socket?.emit("mediaUpdate", JSONObject().apply {
-            put("currentTime", currentTime); put("paused", paused)
+            put("id", id)
+            put("type", type)
+            put("currentTime", currentTime)
+            put("paused", paused)
         })
-    }
-
-    /**
-     * Pauses or resumes reconnection attempts based on application background state.
-     * When backgrounded, reconnection is disabled to prevent battery drain and server hammering.
-     * When foregrounded, reconnection is re-enabled and an active reconnect is triggered if disconnected.
-     */
-    fun setBackgrounded(backgrounded: Boolean) {
-        val s = socket ?: return
-        val manager = s.io()
-        if (backgrounded) {
-            manager.reconnection(false)
-        } else {
-            manager.reconnection(true)
-            if (!s.connected()) {
-                s.connect()
-            }
-        }
     }
 
     fun disconnect() {
@@ -338,10 +317,18 @@ class CyTubeClient(
         channelPassword = null
         credential = null
         localUsername = null
-        localRank = 0.0
     }
 
     // ---- helpers ----
+
+    /** The "after" field of queue/moveVideo: an item uid, or "prepend" /
+     *  "append". */
+    private fun playlistPosition(o: JSONObject): Int = when (val after = o.opt("after")) {
+        "prepend" -> PlaylistPosition.START
+        is Number -> after.toInt()
+        is String -> after.toIntOrNull() ?: PlaylistPosition.END
+        else -> PlaylistPosition.END
+    }
 
     private fun emit(e: CyTubeEvent) { _events.tryEmit(e) }
 

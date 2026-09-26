@@ -1,18 +1,17 @@
 package com.cytube.mobile.net
 
-import org.json.JSONObject
-
 sealed interface CyTubeEvent {
     data object Connected : CyTubeEvent
     data object Disconnected : CyTubeEvent
     data class Reconnecting(val attempt: Int) : CyTubeEvent
     data class ConnectionFailed(val reason: String) : CyTubeEvent
+    /** Socket.IO has used up its reconnection attempts and stopped trying. */
+    data object ReconnectGaveUp : CyTubeEvent
 
     data class LoginResult(val success: Boolean, val name: String?, val error: String?) : CyTubeEvent
     data class RankChanged(val rank: Double) : CyTubeEvent
     data class NeedPassword(val wrongPasswordTried: Boolean) : CyTubeEvent
     data object PasswordAccepted : CyTubeEvent
-    data object ChannelNotRegistered : CyTubeEvent
     /** partitionChange: the channel moved backend. Re-resolve socketconfig. */
     data object PartitionChanged : CyTubeEvent
     data class Kicked(val reason: String) : CyTubeEvent
@@ -22,10 +21,14 @@ sealed interface CyTubeEvent {
     data class MediaTimeUpdate(val update: TimeUpdate) : CyTubeEvent
     data class PlaylistReplaced(val items: List<PlaylistItem>) : CyTubeEvent
     data class CurrentItemChanged(val uid: Int) : CyTubeEvent
+    /** [afterUid]: the item it goes after — [PlaylistPosition.START] for the
+     *  top of the list, [PlaylistPosition.END] (or an unknown uid) for the end. */
     data class ItemQueued(val item: PlaylistItem, val afterUid: Int) : CyTubeEvent
+    /** A moderator moved item [uid] to after [afterUid] (same encoding as
+     *  [ItemQueued]). */
+    data class ItemMoved(val uid: Int, val afterUid: Int) : CyTubeEvent
     data class ItemDeleted(val uid: Int) : CyTubeEvent
     data class PlaylistLocked(val locked: Boolean) : CyTubeEvent
-    data class PlaylistMeta(val count: Int, val totalTime: String) : CyTubeEvent
 
     data class Chat(val message: ChatMessage) : CyTubeEvent
     data object ChatCleared : CyTubeEvent
@@ -34,7 +37,9 @@ sealed interface CyTubeEvent {
     data class UserJoined(val user: ChannelUser) : CyTubeEvent
     data class UserLeft(val name: String) : CyTubeEvent
     data class UserCount(val count: Int) : CyTubeEvent
-    data class UserMetaChanged(val user: ChannelUser) : CyTubeEvent
+    /** setUserMeta carries only a user's status flags — never their rank. */
+    data class UserAfkChanged(val name: String, val afk: Boolean) : CyTubeEvent
+    data class UserRankChanged(val name: String, val rank: Double) : CyTubeEvent
     data class LeaderChanged(val name: String?) : CyTubeEvent
 
     data class Emotes(val emotes: List<Emote>) : CyTubeEvent
@@ -52,6 +57,13 @@ sealed interface CyTubeEvent {
     data class PollOpened(val poll: Poll) : CyTubeEvent
     data class PollUpdated(val counts: List<Int>, val hiddenFromOthers: Boolean = false) : CyTubeEvent
     data object PollClosed : CyTubeEvent
-    data class ChannelOptions(val raw: JSONObject) : CyTubeEvent
+    /** A site-wide announcement from the server's administrators. */
     data class Announcement(val title: String, val html: String) : CyTubeEvent
+}
+
+/** Positions used by the server's "queue" and "moveVideo" frames besides a
+ *  real item uid ("prepend" / "append"). Uids are never negative. */
+object PlaylistPosition {
+    const val START = -2
+    const val END = -1
 }

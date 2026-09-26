@@ -57,15 +57,13 @@ import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import com.cytube.mobile.di.Graph
+import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
-import com.cytube.mobile.player.GoogleDriveResolver
 import com.cytube.mobile.player.NativePlayerHandle
-import com.cytube.mobile.player.PeerTubeResolver
 import com.cytube.mobile.player.PlayerHandle
-import com.cytube.mobile.player.StreamableResolver
-import com.cytube.mobile.player.YouTubeResolver
+import com.cytube.mobile.player.ResolvedStream
+import com.cytube.mobile.player.StreamResolvers
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -75,8 +73,10 @@ import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.webview.BLANK_EMBED_HTML
 import com.cytube.mobile.webview.EMBED_DEFENSIVE_SHIM_JS
 import com.cytube.mobile.webview.EMBED_ENDED_SENTINEL
+import com.cytube.mobile.webview.EMBED_ERROR_SENTINEL
 import com.cytube.mobile.webview.EMBED_PAGE_ORIGIN
 import com.cytube.mobile.webview.EMBED_STATE_SENTINEL
+import com.cytube.mobile.webview.PROVIDER_EMBED_TYPES
 import com.cytube.mobile.webview.dailymotionSdkHtml
 import com.cytube.mobile.webview.peertubeSdkHtml
 import com.cytube.mobile.webview.sameSite
@@ -165,9 +165,8 @@ fun PlayerSurface(
     media: MediaFrame?,
     player: MediaTypes.Player,
     showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
+    onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int = 0,
     modifier: Modifier = Modifier,
     /** Fires right as each item's first frame renders, and then again on a
      *  slow, fixed interval for as long as that item keeps playing — see
@@ -178,35 +177,26 @@ fun PlayerSurface(
      *  between whatever colors arrive here rather than snapping; null for
      *  EMBED/WEB, which have no ExoPlayer to snapshot. */
     onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    /** True while the app is backgrounded and not floating in PiP — i.e.
-     *  there's definitely no video actually on screen right now. ExoSurface
-     *  uses this to disable the video track and keep decoding audio only,
-     *  which is real GPU/decoder work saved rather than a cosmetic switch
-     *  (see ExoSurface's own comment). Has no effect on EMBED/WEB, which
-     *  don't own an ExoPlayer to begin with. */
-    audioOnly: Boolean = false,
     /** Fires once, the moment this item finishes playing on its own (not a
-     *  seek, not a manual stop) — NATIVE/NEWPIPE/GDRIVE via ExoPlayer's own
-     *  STATE_ENDED, EMBED via a sentinel console message the yt/dm pages log
-     *  from their own "ended" event (see youtubeIframeApiHtml/
-     *  dailymotionSdkHtml). Used to drive personal/unsynced playlist
+     *  seek, not a manual stop) — Media3-played types via ExoPlayer's own
+     *  STATE_ENDED, EMBED via a sentinel console message each embed page
+     *  logs from its player's "ended" event (see WebEmbedHtml). Used to drive personal/unsynced playlist
      *  auto-advance — see ChannelViewModel.onPlaybackEnded — which is the
      *  only reason this exists; normal synced playback ignores it entirely
      *  (the server drives advancement for everyone in that mode). Never
      *  fires for WEB, which has no player here to watch. */
     onEnded: (() -> Unit)? = null,
-    /** Fires with the wall-clock length of a mid-playback rebuffer — one
-     *  that happened AFTER this item already reached its first STATE_READY,
-     *  never the item's own initial buffer-up (see ExoSurface's own comment
-     *  on why that distinction matters: a large file's cold seek-point
-     *  discovery can itself take several seconds on a fine connection, and
-     *  that is not a bandwidth problem). Only ExoSurface (the NATIVE
-     *  backend) reports this — NEWPIPE/GDRIVE/EMBED never call it. Drives
-     *  ChannelViewModel.onPlaybackStall's quality step-down; see
-     *  [qualityIndex] for the way back up. */
+    /** Fires with the measured length of mid-playback rebuffering — after
+     *  this item already reached its first STATE_READY, never the item's
+     *  own initial buffer-up (see ExoSurface's own comment on why that
+     *  distinction matters: a large file's cold seek-point discovery can
+     *  itself take several seconds on a fine connection, and that is not a
+     *  bandwidth problem). Reported by every Media3-played type; drives
+     *  ChannelViewModel.onPlaybackStall's quality step-down, which only
+     *  acts on NATIVE items (the only ones with a quality list). */
     onStall: ((Long) -> Unit)? = null,
     /** Which entry of the current item's MediaFrame.direct the NATIVE
-     *  backend should load — see PlayerHandle.load's own doc. Meaningless
+     *  backend should load — see NativePlayerHandle.load. Meaningless
      *  for every other player type, which never reads CyTube's own quality
      *  list to begin with. */
     qualityIndex: Int = 0
@@ -217,31 +207,19 @@ fun PlayerSurface(
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         when {
             media == null -> Message("Nothing is playing")
-            player == MediaTypes.Player.NATIVE ->
-                ExoSurface(
-                    media, null, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded,
-                    onStall = onStall, qualityIndex = qualityIndex
+            player == MediaTypes.Player.NATIVE || StreamResolvers.handles(player) ->
+                Media3Surface(
+                    media, player, showControls, onHandle, onFailed, onFrameSnapshot, onEnded,
+                    onStall, qualityIndex
                 )
-            player == MediaTypes.Player.NEWPIPE ->
-                NewPipeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
-            player == MediaTypes.Player.GDRIVE ->
-                GDriveSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
-            player == MediaTypes.Player.STREAMABLE ->
-                StreamableSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
-            player == MediaTypes.Player.PEERTUBE ->
-                PeerTubeSurface(media, showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded)
             player == MediaTypes.Player.EMBED && embedSrc != null ->
-                // Deliberately NOT wired to the backgrounded signal
-                // ExoSurface uses for audioOnly — see EmbedSurface's own
-                // comment on why there's no safe way to reuse it here.
-                //
                 // key() here is load-bearing, not decorative: EmbedSurface's
                 // AndroidView `factory` only ever runs once for a given
                 // WebView instance, and its own `update` block never
                 // reloads new content into an existing one (see its own
                 // onRelease comment). Without this key, the playlist
                 // advancing from one EMBED-routed item straight to another
-                // (e.g. a Vimeo item to a PeerTube one, or two Vimeo items
+                // (e.g. a Vimeo item to a Dailymotion one, or two Vimeo items
                 // back to back — CyTube classifies both as
                 // MediaTypes.Player.EMBED) hit the same
                 // `when` branch twice in a row, so Compose treated it as
@@ -266,28 +244,9 @@ fun PlayerSurface(
     }
 }
 
-/**
- * A provider's own embeddable iframe (cu/bc/bn — meta.embed.src), hosted in a
- * WebView that's just the video surface.
- */
-@Composable
-private fun EmbedSurface(
-    media: MediaFrame,
-    embedSrc: String,
-    onHandle: (PlayerHandle?) -> Unit,
-    onFailed: ((String) -> Unit)? = null,
-    onEnded: (() -> Unit)? = null
-) {
-    InProcessEmbedSurface(
-        media = media,
-        embedSrc = embedSrc,
-        onHandle = onHandle,
-        onFailed = onFailed,
-        onEnded = onEnded
-    )
-}
-
-private class InProcessEmbedPlayerHandle(
+/** A provider's player running in the embed WebView, driven through the
+ *  `window.__cytubeEmbed` object each embed page defines (see WebEmbedHtml). */
+private class EmbedPlayerHandle(
     private var webView: WebView?,
     initialMedia: MediaFrame
 ) : PlayerHandle {
@@ -310,12 +269,26 @@ private class InProcessEmbedPlayerHandle(
     override val isNative: Boolean
         get() = false
 
-    override fun load(media: MediaFrame, qualityIndex: Int) {
-        mediaId = media.id
-        mediaType = media.type
-        mediaLengthSeconds = media.seconds
-        isPaused = media.paused
-        lastCurrentTime = if (media.currentTime > 0) media.currentTime else 0.0
+    override val isReleased: Boolean
+        get() = webView == null
+
+    /** Last volume asked for (the user's mute setting). A page's player
+     *  doesn't exist until the page has loaded, and several pages force the
+     *  sound on when playback starts (they start muted so autoplay is
+     *  allowed), so this is applied again once the page reports it's
+     *  playing — see [onStateReport]. */
+    private var volume: Float = 1f
+    private var volumeAppliedWhilePlaying = false
+
+    /** Called with each state report from the page. */
+    fun onStateReport(paused: Boolean, currentTime: Double, buffering: Boolean) {
+        isPaused = paused
+        lastCurrentTime = currentTime
+        isBuffering = buffering
+        if (!paused && !volumeAppliedWhilePlaying) {
+            volumeAppliedWhilePlaying = true
+            applyVolume()
+        }
     }
 
     override fun play() {
@@ -351,6 +324,11 @@ private class InProcessEmbedPlayerHandle(
     override suspend fun currentTimeSeconds(): Double = lastCurrentTime
 
     override fun setVolume(volume: Float) {
+        this.volume = volume
+        applyVolume()
+    }
+
+    private fun applyVolume() {
         webView?.evaluateJavascript(
             "if (window.__cytubeEmbed && window.__cytubeEmbed.setVolume) window.__cytubeEmbed.setVolume($volume);",
             null
@@ -362,11 +340,18 @@ private class InProcessEmbedPlayerHandle(
     }
 }
 
+/**
+ * A single-video WebView: a provider's own player (YouTube, Dailymotion,
+ * Vimeo, PeerTube, Streamable pages built in WebEmbedHtml), or for anything
+ * else the item's embeddable link loaded directly. Always called inside a
+ * key() on the item (see PlayerSurface), so one instance only ever shows one
+ * item.
+ */
 @Composable
-private fun InProcessEmbedSurface(
+private fun EmbedSurface(
     media: MediaFrame,
     embedSrc: String,
-    onHandle: (PlayerHandle?) -> Unit,
+    onHandle: (PlayerHandle) -> Unit,
     onFailed: ((String) -> Unit)? = null,
     onEnded: (() -> Unit)? = null
 ) {
@@ -377,22 +362,27 @@ private fun InProcessEmbedSurface(
     val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
     val type = media.type
     val id = media.id
-    var isReady by remember(media.id, media.type, embedSrc) { mutableStateOf(false) }
+    // The provider pages report their own failures (EMBED_ERROR_SENTINEL);
+    // for them, WebView's main-frame errors below can't fire, because the
+    // main frame is inline HTML. A directly loaded link is the opposite:
+    // only the main-frame errors, and the generic <video> watcher injected
+    // in onPageFinished (a provider page's video is inside a cross-origin
+    // iframe that script can't reach).
+    val isProviderPage = type in PROVIDER_EMBED_TYPES
+    var isReady by remember { mutableStateOf(false) }
+    var failureReported by remember { mutableStateOf(false) }
+    fun reportFailure(reason: String) {
+        if (failureReported) return
+        failureReported = true
+        currentOnFailed?.invoke(reason)
+    }
     val alpha by animateFloatAsState(
         targetValue = if (isReady) 1f else 0f,
         animationSpec = tween(durationMillis = 200),
         label = "embedAlpha"
     )
 
-    var handleRef by remember(media.id, media.type, embedSrc) { mutableStateOf<InProcessEmbedPlayerHandle?>(null) }
-
-    DisposableEffect(media.id, media.type, embedSrc) {
-        onDispose {
-            currentOnHandle(null)
-            handleRef?.release()
-            handleRef = null
-        }
-    }
+    var handleRef by remember { mutableStateOf<EmbedPlayerHandle?>(null) }
 
     AndroidView(
         modifier = Modifier
@@ -405,7 +395,7 @@ private fun InProcessEmbedSurface(
 
                 setBackgroundColor(android.graphics.Color.BLACK)
 
-                val handle = InProcessEmbedPlayerHandle(this, media)
+                val handle = EmbedPlayerHandle(this, media)
                 handleRef = handle
                 currentOnHandle(handle)
 
@@ -458,24 +448,18 @@ private fun InProcessEmbedSurface(
                         return null
                     }
 
-                    // Previously nothing here ever called onFailed — a generic
-                    // embed (dm/yt/vi/pt/sb/custom cu-bc-bn iframe) that failed
-                    // to load at all (dead link, offline instance, DNS
-                    // failure...) just sat on a black screen forever with no
-                    // fallback offered, unlike every other surface in this file
-                    // (NewPipeSurface/GDriveSurface/StreamableSurface/
-                    // PeerTubeSurface), which all report failures so
+                    // A directly loaded link that fails to load at all (dead
+                    // link, offline instance, DNS failure...) is reported so
                     // ChannelViewModel can offer Compatibility View. Only the
-                    // main-frame navigation matters here — sub-resource errors
-                    // (ads/trackers/analytics the embed page itself loads) are
-                    // not this surface failing.
+                    // main frame counts — sub-resource errors (ads, trackers
+                    // the page loads) are not this surface failing.
                     override fun onReceivedError(
                         view: WebView,
                         request: WebResourceRequest,
                         error: WebResourceError
                     ) {
                         if (request.isForMainFrame) {
-                            currentOnFailed?.invoke("Embed failed to load (${error.description})")
+                            reportFailure("Embed failed to load (${error.description})")
                         }
                     }
 
@@ -485,7 +469,7 @@ private fun InProcessEmbedSurface(
                         errorResponse: android.webkit.WebResourceResponse
                     ) {
                         if (request.isForMainFrame) {
-                            currentOnFailed?.invoke("Embed failed to load (HTTP ${errorResponse.statusCode})")
+                            reportFailure("Embed failed to load (HTTP ${errorResponse.statusCode})")
                         }
                     }
 
@@ -497,6 +481,7 @@ private fun InProcessEmbedSurface(
                                 "document.body.style.margin='0';",
                             null
                         )
+                        if (isProviderPage) return
                         val curTime = if (media.currentTime > 0) media.currentTime else 0.0
                         val isPaused = media.paused
                         val genericWatcherJs = """
@@ -569,6 +554,12 @@ private fun InProcessEmbedSurface(
                             (it.parent as? ViewGroup)?.removeView(it)
                             it.destroy()
                         }
+                        // Nothing is left on screen, so say so rather than
+                        // sit on a black area (ChannelViewModel offers
+                        // Compatibility View), and stop the ViewModel
+                        // driving a WebView that no longer exists.
+                        handleRef?.release()
+                        reportFailure("Embed page crashed")
                         return true
                     }
                 }
@@ -590,16 +581,21 @@ private fun InProcessEmbedSurface(
                             currentOnEnded?.invoke()
                             return true
                         }
+                        if (msg.startsWith(EMBED_ERROR_SENTINEL)) {
+                            val detail = msg.removePrefix(EMBED_ERROR_SENTINEL)
+                            Log.w("CyTubePlayer", "embed player error type=$type: $detail")
+                            reportFailure("${MediaTypes.label(type)} player error ($detail)")
+                            return true
+                        }
                         if (msg.startsWith(EMBED_STATE_SENTINEL)) {
                             val jsonStr = msg.removePrefix(EMBED_STATE_SENTINEL)
                             try {
                                 val json = JSONObject(jsonStr)
-                                val paused = json.optBoolean("paused", true)
-                                val currentTime = json.optDouble("currentTime", 0.0)
-                                val buffering = json.optBoolean("buffering", false)
-                                handle.isPaused = paused
-                                handle.lastCurrentTime = currentTime
-                                handle.isBuffering = buffering
+                                handle.onStateReport(
+                                    paused = json.optBoolean("paused", true),
+                                    currentTime = json.optDouble("currentTime", 0.0),
+                                    buffering = json.optBoolean("buffering", false)
+                                )
                             } catch (ignored: Throwable) {}
                             isReady = true
                             return true
@@ -616,58 +612,34 @@ private fun InProcessEmbedSurface(
                 }
                 val initTime = if (media.currentTime > 0) media.currentTime else 0.0
                 val initPaused = media.paused
-                if (type == "dm") {
-                    loadDataWithBaseURL(
-                        "$EMBED_PAGE_ORIGIN/",
-                        dailymotionSdkHtml(id, initTime, initPaused),
-                        "text/html",
-                        "utf-8",
-                        null
-                    )
-                } else if (type == "yt") {
-                    loadDataWithBaseURL(
-                        "$EMBED_PAGE_ORIGIN/",
-                        youtubeIframeApiHtml(id, initTime, initPaused),
-                        "text/html",
-                        "utf-8",
-                        null
-                    )
-                } else if (type == "vi") {
-                    loadDataWithBaseURL(
-                        "$EMBED_PAGE_ORIGIN/",
-                        vimeoSdkHtml(id, initTime, initPaused),
-                        "text/html",
-                        "utf-8",
-                        null
-                    )
-                } else if (type == "pt") {
-                    val ptEmbedUrl = MediaTypes.knownEmbedUrl("pt", id)
-                    loadDataWithBaseURL(
-                        "$EMBED_PAGE_ORIGIN/",
-                        peertubeSdkHtml(ptEmbedUrl, initTime, initPaused),
-                        "text/html",
-                        "utf-8",
-                        null
-                    )
-                } else if (type == "sb") {
-                    loadDataWithBaseURL(
-                        "$EMBED_PAGE_ORIGIN/",
-                        streamableSdkHtml(id, initTime, initPaused),
-                        "text/html",
-                        "utf-8",
-                        null
-                    )
-                } else if (embedSrc.startsWith("https://", ignoreCase = true)) {
-                    loadUrl(embedSrc)
-                } else {
-                    Log.w("CyTubePlayer", "refusing to load embed with untrusted scheme: type=$type")
-                    loadDataWithBaseURL("$EMBED_PAGE_ORIGIN/", BLANK_EMBED_HTML, "text/html", "utf-8", null)
+                val providerHtml: String? = when (type) {
+                    "dm" -> dailymotionSdkHtml(id, initTime, initPaused)
+                    "yt" -> youtubeIframeApiHtml(id, initTime, initPaused)
+                    "vi" -> vimeoSdkHtml(id, initTime, initPaused)
+                    "pt" -> peertubeSdkHtml(MediaTypes.knownEmbedUrl("pt", id), initTime, initPaused)
+                    "sb" -> streamableSdkHtml(id, initTime, initPaused)
+                    else -> null
+                }
+                when {
+                    providerHtml != null && providerHtml != BLANK_EMBED_HTML ->
+                        loadDataWithBaseURL("$EMBED_PAGE_ORIGIN/", providerHtml, "text/html", "utf-8", null)
+                    providerHtml == null && embedSrc.startsWith("https://", ignoreCase = true) ->
+                        loadUrl(embedSrc)
+                    else -> {
+                        // An id that fails the page builder's safety check,
+                        // or a link that isn't https: show nothing — and say
+                        // so, rather than leave a black screen with no offer.
+                        Log.w("CyTubePlayer", "refusing to load embed type=$type (unsafe id or link)")
+                        loadDataWithBaseURL("$EMBED_PAGE_ORIGIN/", BLANK_EMBED_HTML, "text/html", "utf-8", null)
+                        reportFailure("This ${MediaTypes.label(type)} link can't be played here")
+                    }
                 }
             }
         },
         update = { it.requestFocus() },
         onRelease = {
-            currentOnHandle(null)
+            // Releasing is how the ViewModel learns this player is gone —
+            // see ChannelViewModel.player.
             handleRef?.release()
             handleRef = null
             (it.parent as? ViewGroup)?.removeView(it)
@@ -685,101 +657,43 @@ private fun InProcessEmbedSurface(
     )
 }
 
-/** Resolves a YouTube id to a stream URL, then hands over to the normal player. */
-@Composable
-private fun NewPipeSurface(
-    media: MediaFrame,
-    showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
-    onFailed: (String) -> Unit,
-    epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null
-) {
-    var resolved by remember(media.id, epoch) {
-        mutableStateOf<YouTubeResolver.Resolved?>(null)
-    }
-    var adjustedMedia by remember(media.id, epoch) {
-        mutableStateOf(media)
-    }
-    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(media.id, epoch) {
-        resolved = null
-        error = null
-        val startResolveMs = SystemClock.elapsedRealtime()
-        YouTubeResolver.resolve(media.id)
-            .onSuccess {
-                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
-                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
-                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
-                    else (media.currentTime + elapsedSec)
-                } else {
-                    media.currentTime
-                }
-                adjustedMedia = media.copy(currentTime = targetTime)
-                resolved = it
-            }
-            .onFailure {
-                val why = "YouTube extraction failed (${it.javaClass.simpleName})"
-                error = why
-                onFailed(why)
-            }
-    }
-
-    when {
-        error != null -> Message(error!!)
-        resolved == null -> CircularProgressIndicator()
-        else -> ExoSurface(
-            adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
-        )
-    }
-}
-
 /**
- * A previous pass spoofed Referer/Origin/a desktop Chrome User-Agent on the
- * actual video-byte request, on the theory that Google's CDN hotlink-checks
- * it the same way the metadata lookup is checked. Live testing across two
- * different Drive file ids showed that was wrong — both still came back
- * HTTP 403 with those headers attached. Checked against the actual
- * reference implementation this resolver is modeled on (yt-dlp's
- * GoogleDriveIE, same content-workspacevideo-pa.googleapis.com endpoint and
- * API key): it sends no Referer/Origin/User-Agent override at all for these
- * formatStreamingData URLs — only the metadata lookup itself carries a
- * Referer. Matching that exactly (i.e., sending no User-Agent or other
- * header overrides) is what actually fixed it — confirmed live, playback works.
+ * Every type Media3 plays. NATIVE plays the item's own URL; the others look
+ * up a stream first (StreamResolvers). There is one ExoSurface call site
+ * whatever the type, so when the next item's stream is already known (a
+ * cache hit — always the case for an item ChannelViewModel loaded while the
+ * app was in the background) the same ExoPlayer carries on, even across
+ * types, instead of being thrown away and reloaded. A lookup that has to go
+ * to the network shows a spinner meanwhile, which does replace the player.
  */
-private val GDRIVE_STREAM_HEADERS = mapOf("User-Agent" to "")
-
-/** Resolves a Google Drive file id to a stream URL, then hands over to the normal player. */
 @Composable
-private fun GDriveSurface(
+private fun Media3Surface(
     media: MediaFrame,
+    player: MediaTypes.Player,
     showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
+    onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null
+    onFrameSnapshot: ((Bitmap) -> Unit)?,
+    onEnded: (() -> Unit)?,
+    onStall: ((Long) -> Unit)?,
+    qualityIndex: Int
 ) {
-    var resolved by remember(media.id, epoch) {
-        mutableStateOf<GoogleDriveResolver.Resolved?>(null)
+    val needsResolve = player != MediaTypes.Player.NATIVE
+    // Already resolved (typically: loaded while the app was in the
+    // background) — start from it rather than a spinner, so the existing
+    // player stays in place and ExoSurface sees the item is already loaded.
+    var resolved by remember(media.id, player) {
+        mutableStateOf(if (needsResolve) StreamResolvers.cached(player, media.id) else null)
     }
-    var adjustedMedia by remember(media.id, epoch) {
-        mutableStateOf(media)
-    }
-    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
+    var resolvedMedia by remember(media.id, player) { mutableStateOf(media) }
+    var error by remember(media.id, player) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(media.id, epoch) {
-        resolved = null
-        error = null
+    LaunchedEffect(media.id, player) {
+        if (!needsResolve || resolved != null) return@LaunchedEffect
         val startResolveMs = SystemClock.elapsedRealtime()
-        GoogleDriveResolver.resolve(Graph.http, media.id)
+        StreamResolvers.resolve(player, media.id)
             .onSuccess {
+                // The lookup took time the room kept playing through.
                 val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
                 val targetTime = if (!media.paused && media.currentTime >= 0.0) {
                     if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
@@ -787,12 +701,12 @@ private fun GDriveSurface(
                 } else {
                     media.currentTime
                 }
-                adjustedMedia = media.copy(currentTime = targetTime)
+                resolvedMedia = media.copy(currentTime = targetTime)
                 resolved = it
             }
             .onFailure {
-                val why = "Google Drive extraction failed: ${it.message ?: it.javaClass.simpleName}"
-                Log.w("CyTubePlayer", "GDrive lookup failed id=${media.id}", it)
+                val why = "${StreamResolvers.providerName(player)} lookup failed: ${it.message ?: it.javaClass.simpleName}"
+                Log.w("CyTubePlayer", "stream lookup failed type=${media.type} id=${media.id}", it)
                 error = why
                 onFailed(why)
             }
@@ -800,160 +714,44 @@ private fun GDriveSurface(
 
     when {
         error != null -> Message(error!!)
-        resolved == null -> CircularProgressIndicator()
+        needsResolve && resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
-            adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS, variant = resolved!!.label),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
+            media = if (needsResolve) resolvedMedia else media,
+            resolved = resolved,
+            showControls = showControls,
+            onHandle = onHandle,
+            onFailed = onFailed,
+            onFrameSnapshot = onFrameSnapshot,
+            onEnded = onEnded,
+            onStall = onStall,
+            qualityIndex = qualityIndex
         )
     }
 }
-
-/** Resolves a Streamable video id to a direct MP4 stream URL, then hands over to the normal player. */
-@Composable
-private fun StreamableSurface(
-    media: MediaFrame,
-    showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
-    onFailed: (String) -> Unit,
-    epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null
-) {
-    var resolved by remember(media.id, epoch) {
-        mutableStateOf<StreamableResolver.Resolved?>(null)
-    }
-    var adjustedMedia by remember(media.id, epoch) {
-        mutableStateOf(media)
-    }
-    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(media.id, epoch) {
-        resolved = null
-        error = null
-        val startResolveMs = SystemClock.elapsedRealtime()
-        StreamableResolver.resolve(Graph.http, media.id)
-            .onSuccess {
-                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
-                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
-                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
-                    else (media.currentTime + elapsedSec)
-                } else {
-                    media.currentTime
-                }
-                adjustedMedia = media.copy(currentTime = targetTime)
-                resolved = it
-            }
-            .onFailure {
-                val why = "Streamable extraction failed: ${it.message ?: it.javaClass.simpleName}"
-                Log.w("CyTubePlayer", "Streamable lookup failed id=${media.id}", it)
-                error = why
-                onFailed(why)
-            }
-    }
-
-    when {
-        error != null -> Message(error!!)
-        resolved == null -> CircularProgressIndicator()
-        else -> ExoSurface(
-            adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
-        )
-    }
-}
-
-/** Resolves a PeerTube video id (domain;shortId) to a stream URL (preferring HLS), then hands over to the normal player. */
-@Composable
-private fun PeerTubeSurface(
-    media: MediaFrame,
-    showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
-    onFailed: (String) -> Unit,
-    epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null
-) {
-    var resolved by remember(media.id, epoch) {
-        mutableStateOf<PeerTubeResolver.Resolved?>(null)
-    }
-    var adjustedMedia by remember(media.id, epoch) {
-        mutableStateOf(media)
-    }
-    var error by remember(media.id, epoch) { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(media.id, epoch) {
-        resolved = null
-        error = null
-        val startResolveMs = SystemClock.elapsedRealtime()
-        PeerTubeResolver.resolve(Graph.http, media.id)
-            .onSuccess {
-                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
-                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
-                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
-                    else (media.currentTime + elapsedSec)
-                } else {
-                    media.currentTime
-                }
-                adjustedMedia = media.copy(currentTime = targetTime)
-                resolved = it
-            }
-            .onFailure {
-                val why = "PeerTube extraction failed: ${it.message ?: it.javaClass.simpleName}"
-                Log.w("CyTubePlayer", "PeerTube lookup failed id=${media.id}", it)
-                error = why
-                onFailed(why)
-            }
-    }
-
-    when {
-        error != null -> Message(error!!)
-        resolved == null -> CircularProgressIndicator()
-        else -> ExoSurface(
-            adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
-            showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
-        )
-    }
-}
-
-/**
- * Just what ExoSurface actually needs from a resolved stream. YouTubeResolver,
- * GoogleDriveResolver, StreamableResolver, and PeerTubeResolver each keep their own richer `Resolved`
- * (with a quality label used only for logging) — this is the common shape they
- * boil down to before playback. `headers` is empty for YouTube, Streamable, and PeerTube;
- * NewPipe's resolved googlevideo.com URLs don't need any.
- */
-private data class ResolvedSource(
-    val url: String,
-    val mimeType: String?,
-    val headers: Map<String, String> = emptyMap(),
-    /** Which format this is (the resolver's quality label, e.g. "360p"),
-     *  so the on-disk media cache keeps different encodes of the same video
-     *  apart — see NativePlayerHandle.loadUrl. */
-    val variant: String = ""
-)
 
 @OptIn(UnstableApi::class)
 @Composable
 private fun ExoSurface(
     media: MediaFrame,
-    resolved: ResolvedSource?,
+    resolved: ResolvedStream?,
     showControls: Boolean,
-    onHandle: (PlayerHandle?) -> Unit,
+    onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
-    epoch: Int,
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
-    audioOnly: Boolean = false,
-    onEnded: (() -> Unit)? = null,
-    onStall: ((Long) -> Unit)? = null,
-    qualityIndex: Int = 0
+    onFrameSnapshot: ((Bitmap) -> Unit)?,
+    onEnded: (() -> Unit)?,
+    onStall: ((Long) -> Unit)?,
+    qualityIndex: Int
 ) {
     val context = LocalContext.current
     val isTv = remember { isTvDevice(context) }
-    val exo = remember(epoch, isTv) {
+    // The ExoPlayer listener below is registered once for the player's
+    // whole life, which spans many items; read the callbacks through these
+    // so it always calls the current ones, not the first composition's.
+    val currentOnFailed by rememberUpdatedState(onFailed)
+    val currentOnEnded by rememberUpdatedState(onEnded)
+    val currentOnStall by rememberUpdatedState(onStall)
+    val currentOnFrameSnapshot by rememberUpdatedState(onFrameSnapshot)
+    val exo = remember(isTv) {
         val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(context)
         val renderersFactory = object : DefaultRenderersFactory(context) {
             override fun buildAudioSink(
@@ -1041,22 +839,6 @@ private fun ExoSurface(
     }
     val handle = remember(exo) { NativePlayerHandle(exo, context) }
 
-    // Backgrounded-but-not-PiP: nothing is actually on screen, so decoding
-    // and rendering video frames the user can't see is pure waste — this
-    // disables just the video track and lets ExoPlayer keep decoding audio
-    // only, same idea as a music app playing with the screen off. Re-enabled
-    // the moment audioOnly goes false (foregrounded again, or PiP started —
-    // see ChannelScreen, which never passes audioOnly=true while in PiP).
-    // trackSelectionParameters is cheap to rebuild and safe to set mid-playback;
-    // ExoPlayer just reselects tracks on the next internal cycle.
-    LaunchedEffect(exo, audioOnly) {
-        runCatching {
-            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, audioOnly)
-                .build()
-        }
-    }
-
     // Exposes this ExoPlayer to the system: a Fire TV remote's dedicated
     // media keys, Alexa's "pause"/"resume" voice commands, and any system
     // Now Playing surface all reach whichever app currently holds the
@@ -1066,20 +848,15 @@ private fun ExoSurface(
     // Scoped to the player's own lifetime (same as the error/frame listener
     // below), not a standalone service — playback keeps running via
     // ExoPlayer's own lifecycle when backgrounded outside of PiP (only the
-    // video track gets dropped, see audioOnly above), so there is no "still
-    // playing but the session's gone" gap to cover.
+    // video track gets dropped — see NativePlayerHandle.setVideoEnabled),
+    // so there is no "still playing but the session's gone" gap to cover.
     //
     // The id MUST be unique across every session live in the process at
-    // once, not just "one per ExoSurface" — Compose creates the new
-    // ExoPlayer/MediaSession pair for a bumped epoch (e.g. the manual
-    // refresh button) as part of composing this recomposition, but the OLD
-    // pair's DisposableEffect cleanup below doesn't run until the effects
-    // phase right after, so for one brief moment both the old and new
-    // session exist together. Two sessions both using Media3's default
-    // empty-string id crashed on exactly that overlap with "Session ID
-    // must be unique" the moment the button was tapped. A process-wide
-    // counter guarantees they never collide, regardless of epoch, and
-    // regardless of two different channels' ExoSurfaces overlapping too.
+    // once: Compose creates a new ExoSurface's player and session before
+    // the old one's DisposableEffect cleanup runs, so for a moment both
+    // exist (e.g. one channel screen crossfading into another). Two
+    // sessions with Media3's default empty-string id crash with "Session ID
+    // must be unique"; a process-wide counter means they never collide.
     val mediaSession = remember(exo) {
         MediaSession.Builder(context, exo)
             .setId("cytube-${nextMediaSessionId()}")
@@ -1104,10 +881,9 @@ private fun ExoSurface(
 
     val scope = rememberCoroutineScope()
     DisposableEffect(exo) {
-        // Scoped to this exo/listener's own lifetime (a fresh pair per
-        // epoch — see the LaunchedEffect above), so these reset naturally
-        // for every new item AND for every quality-adaptation reload, never
-        // needing an explicit reset of their own.
+        // Per-item stall tracking. The same ExoPlayer plays one item after
+        // another (and quality changes reload in place), so these are reset
+        // by onMediaItemTransition below at each new media source.
         var reachedReadyOnce = false
         var stallStartedAtMs = 0L
         var stallJob: Job? = null
@@ -1145,8 +921,8 @@ private fun ExoSurface(
             // frame actually renders, so the glow doesn't sit on the
             // PREVIOUS item's color for the first few seconds of a new one.
             // Media3 also calls this on a media-source swap within the same
-            // ExoPlayer instance (epoch unchanged, e.g. a playlist advance),
-            // which is exactly when a fresh snapshot is wanted too. The
+            // ExoPlayer instance (a playlist advance), which is exactly when
+            // a fresh snapshot is wanted too. The
             // periodic resample loop below (see the LaunchedEffect right
             // after this listener) is what keeps the color moving with the
             // video for the rest of that item's runtime, rather than this
@@ -1154,7 +930,7 @@ private fun ExoSurface(
             override fun onRenderedFirstFrame() {
                 transitionFreezeFrame?.recycle()
                 transitionFreezeFrame = null
-                val snapshot = onFrameSnapshot ?: return
+                val snapshot = currentOnFrameSnapshot ?: return
                 val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
                 if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
                     ambientBitmap = Bitmap.createBitmap(
@@ -1188,9 +964,9 @@ private fun ExoSurface(
                 // identifying header, and every other call site in this app
                 // is careful never to put that kind of thing in Logcat.
                 // Names alone are enough to tell what came back.
-                Log.w("CyTubePlayer", "Media3 error type=${media.type} code=$detail id=${media.id} " +
+                Log.w("CyTubePlayer", "Media3 error type=${handle.mediaType} code=$detail id=${handle.mediaId} " +
                     "responseHeaderNames=${http?.headerFields?.keys}")
-                onFailed(detail)
+                currentOnFailed(detail)
             }
 
             // STATE_ENDED is ExoPlayer's own terminal state for "ran off the
@@ -1218,7 +994,7 @@ private fun ExoSurface(
             // waiting for the slow, high-bitrate stream to finish gathering
             // seconds of data that will just be discarded on reload.
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED) onEnded?.invoke()
+                if (playbackState == Player.STATE_ENDED) currentOnEnded?.invoke()
                 when (playbackState) {
                     Player.STATE_READY -> {
                         stallJob?.cancel()
@@ -1245,7 +1021,7 @@ private fun ExoSurface(
                                 // QUALITY_DOWNGRADE_STALL_THRESHOLD_MS check —
                                 // see that constant's updated comment. Report
                                 // what was actually measured.
-                                onStall?.invoke(totalStalledMs)
+                                currentOnStall?.invoke(totalStalledMs)
                             }
                         }
                     }
@@ -1265,7 +1041,9 @@ private fun ExoSurface(
                                 delay(threshold)
                                 if (stallStartedAtMs == start) {
                                     recentStalls.clear()
-                                    onStall?.invoke(STALL_TRIGGER_MS)
+                                    // Still stalled: report what has actually
+                                    // accumulated, same as the READY path.
+                                    currentOnStall?.invoke(SystemClock.elapsedRealtime() - start + priorStalled)
                                 }
                             }
                         }
@@ -1285,18 +1063,21 @@ private fun ExoSurface(
     // snapshot above left. Deliberately a slow poll rather than a frame
     // callback: AMBIENT_RESAMPLE_INTERVAL_MS is long enough that this is a
     // handful of tiny 16x16 TextureView grabs per minute, not a per-frame
-    // cost, and ChannelScreen already crossfades every new color in over half
-    // a second, so infrequent sampling still reads as smooth rather than a
-    // visible jump. Skipped entirely while paused — nothing new to sample,
-    // and a paused screen is exactly the "avoid processing when paused"
-    // case — and it costs nothing at all when onFrameSnapshot is null
-    // (ambient glow can't be shown for this surface, e.g. EMBED/WEB).
-    LaunchedEffect(exo, onFrameSnapshot) {
-        val snapshot = onFrameSnapshot ?: return@LaunchedEffect
+    // cost, and ChannelScreen already crossfades every new color in over a
+    // few seconds, so infrequent sampling still reads as smooth rather than
+    // a visible jump. Skipped while paused (nothing new to sample) and
+    // whenever onFrameSnapshot is null (glow off, or on TV where it's never
+    // shown).
+    LaunchedEffect(exo) {
         while (true) {
             delay(AMBIENT_RESAMPLE_INTERVAL_MS)
+            val snapshot = currentOnFrameSnapshot ?: continue
             val isPlaying = runCatching { exo.isPlaying }.getOrDefault(false)
             if (!isPlaying) continue
+            // Nothing on screen (and no video decoded) while in the
+            // background, so nothing worth sampling. This loop keeps running
+            // then — it's a coroutine already under way, not a recomposition.
+            if (AppVisibility.inBackground.value) continue
             val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
             if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
                 ambientBitmap = Bitmap.createBitmap(
@@ -1312,8 +1093,8 @@ private fun ExoSurface(
     DisposableEffect(handle) {
         onDispose {
             playerViewRef[0] = null
-            onHandle(null)
-            // Session first, then the player it wraps — releasing in the
+            // Releasing is how the ViewModel learns this player is gone —
+            // see ChannelViewModel.player. Session first, then the player it wraps — releasing in the
             // other order would leave the session momentarily pointing at
             // an already-released player.
             runCatching { mediaSession.release() }
@@ -1346,31 +1127,37 @@ private fun ExoSurface(
     // we're ready, until the media source has genuinely been handed to
     // ExoPlayer.
     //
-    // epoch is also a key, not just media.id/type/resolved: `exo`/`handle`
-    // above are remember(epoch)'d, so a playerEpoch bump builds a brand new
-    // ExoPlayer/handle pair and restarts this effect. qualityIndex is also
-    // included so automatic quality adaptation switches streams directly on
-    // the existing handle without tearing down the player.
-    LaunchedEffect(media.id, media.type, resolved, epoch, qualityIndex) {
-        // When adapting quality in place for the same media item, capture the last
-        // rendered video frame so it stays displayed as an overlay while the decoder
-        // flushes and buffers the new stream, preventing a black screen flash.
-        if (handle.mediaId == media.id) {
-            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView
-            if (textureView != null && textureView.isAvailable) {
-                runCatching {
-                    val bmp = textureView.bitmap
-                    if (bmp != null) {
-                        transitionFreezeFrame?.recycle()
-                        transitionFreezeFrame = bmp
+    // qualityIndex is a key too, so automatic quality adaptation switches
+    // streams directly on the existing handle without tearing down the
+    // player.
+    LaunchedEffect(media.id, media.type, resolved, qualityIndex) {
+        // Already loaded into this player — ChannelViewModel does that itself
+        // when the playlist moves on (or quality steps down) while the app
+        // is in the background, because this effect can't run then. Loading
+        // it again here would restart it from the (now old) start position.
+        val key = if (resolved != null) NativePlayerHandle.loadKey(media, resolved.url)
+            else NativePlayerHandle.loadKey(media, qualityIndex)
+        if (handle.loadedKey != key) {
+            // When adapting quality in place for the same media item, capture the last
+            // rendered video frame so it stays displayed as an overlay while the decoder
+            // flushes and buffers the new stream, preventing a black screen flash.
+            if (handle.mediaId == media.id) {
+                val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView
+                if (textureView != null && textureView.isAvailable) {
+                    runCatching {
+                        val bmp = textureView.bitmap
+                        if (bmp != null) {
+                            transitionFreezeFrame?.recycle()
+                            transitionFreezeFrame = bmp
+                        }
                     }
                 }
             }
-        }
-        if (resolved != null) {
-            handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
-        } else {
-            handle.load(media, qualityIndex)
+            if (resolved != null) {
+                handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
+            } else {
+                handle.load(media, qualityIndex)
+            }
         }
         onHandle(handle)
     }
