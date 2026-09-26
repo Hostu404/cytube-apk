@@ -197,6 +197,10 @@ data class ChatMessage(
     val addClass: String?,
     val shadow: Boolean,
     val isPm: Boolean = false,
+    /** For a PM, who it was sent to. The server sends each PM to both the
+     *  sender and the recipient, so this is how our own sent PMs are shown
+     *  as "You → name". Null for public messages. */
+    val to: String? = null,
     /** Assigned by the ViewModel; a stable LazyColumn key so chat rows are not
         rebuilt every time the buffer trims from the front. */
     val seq: Long = 0L
@@ -212,7 +216,8 @@ data class ChatMessage(
                 timestamp = o.optLong("time", System.currentTimeMillis()),
                 addClass = meta.optString("addClass").ifBlank { null },
                 shadow = meta.optBoolean("shadow", false),
-                isPm = isPm
+                isPm = isPm,
+                to = if (isPm) o.optString("to").ifBlank { null } else null
             )
         }
     }
@@ -302,7 +307,31 @@ data class Emote(val name: String, val image: String, val source: String) {
 data class Permissions(val raw: JSONObject) {
     fun requiredRank(key: String): Double = raw.optDouble(key, Double.MAX_VALUE)
     fun allows(key: String, rank: Double): Boolean = rank >= requiredRank(key)
+
+    /**
+     * Mirrors the server's own PermissionsModule.hasPermission: a
+     * "playlist..." permission can also be met by its open-playlist variant
+     * ("o" + key) while the playlist is unlocked. Needed because the server
+     * silently ignores a queue request from someone without permission
+     * rather than replying, so the app has to know up front.
+     */
+    fun allowsPlaylistAction(key: String, rank: Double, playlistOpen: Boolean): Boolean =
+        (key.startsWith("playlist") && playlistOpen && rank >= requiredRank("o$key")) ||
+            rank >= requiredRank(key)
 }
+
+private val IMAGE_TAG = Regex("\\[img]\\((https?://[^\\s)]+)\\)", RegexOption.IGNORE_CASE)
+
+/** `[img](https://...)` → just the address. Some channels (v4c, for one)
+ *  write that in poll titles for their own site script to turn into a
+ *  picture. Used for the chat notice, which shows it as a plain link. */
+fun unwrapImageTags(text: String): String = IMAGE_TAG.replace(text) { it.groupValues[1] }
+
+/** The picture addresses in any `[img](...)` tags — the poll panel shows these. */
+fun imageTagUrls(text: String): List<String> = IMAGE_TAG.findAll(text).map { it.groupValues[1] }.toList()
+
+/** [text] with its `[img](...)` tags removed (they're shown as pictures instead). */
+fun removeImageTags(text: String): String = IMAGE_TAG.replace(text, " ").replace(Regex("\\s+"), " ").trim()
 
 /**
  * newPoll / updatePoll — src/poll.js packUpdate(). counts is parallel to
@@ -317,7 +346,14 @@ data class Poll(
     val title: String,
     val options: List<String>,
     val counts: List<Int>,
-    val timestamp: Long
+    val timestamp: Long,
+    /** A hidden-results poll whose counts we can see anyway because we're a
+     *  moderator: the server sends those as "3?" rather than "?". */
+    val hiddenFromOthers: Boolean = false,
+    /** The poll has ended. It stays on screen with its final counts until
+     *  the next poll or until dismissed, like the website — for a
+     *  hidden-results poll, closing is the only time anyone sees the result. */
+    val closed: Boolean = false
 ) {
     val totalVotes: Int get() = counts.filter { it >= 0 }.sum()
     val isObscured: Boolean get() = counts.any { it < 0 }
@@ -332,7 +368,8 @@ data class Poll(
                 title = plainText(o.optString("title", "")),
                 options = optList,
                 counts = parseCounts(o.optJSONArray("counts"), optList.size),
-                timestamp = o.optLong("timestamp", System.currentTimeMillis())
+                timestamp = o.optLong("timestamp", System.currentTimeMillis()),
+                hiddenFromOthers = countsHiddenFromOthers(o.optJSONArray("counts"))
             )
         }
 
@@ -344,14 +381,31 @@ data class Poll(
          * showing raw tags.
          */
         private fun plainText(raw: String): String =
-            if (raw.indexOf('<') < 0) raw else Jsoup.parse(raw).text()
+            // '&' as well as '<': the server HTML-escapes every title and
+            // option, so "Who's best? (vote)" arrives as
+            // "Who&#39;s best? &#40;vote&#41;". Only links used to trigger
+            // decoding, so almost every poll showed codes like &#39;.
+            if (raw.indexOf('<') < 0 && raw.indexOf('&') < 0) raw else Jsoup.parse(raw).text()
 
         /** Always returns exactly [size] entries so it can be zipped with
-         *  options positionally even if the server sent a mismatched array. */
+         *  options positionally even if the server sent a mismatched array.
+         *  A hidden poll's counts are "?" for most people (-1 here) but "3?"
+         *  for moderators, who are allowed to see them — that's read as 3. */
         fun parseCounts(a: JSONArray?, size: Int): List<Int> =
             (0 until size).map { i ->
                 val raw = a?.opt(i)
-                (raw as? Number)?.toInt() ?: raw?.toString()?.toIntOrNull() ?: -1
+                (raw as? Number)?.toInt()
+                    ?: raw?.toString()?.trim()?.removeSuffix("?")?.toIntOrNull()
+                    ?: -1
             }
+
+        /** True for the moderator view of a hidden poll ("3?"-style counts). */
+        fun countsHiddenFromOthers(a: JSONArray?): Boolean {
+            if (a == null) return false
+            return (0 until a.length()).any { i ->
+                val s = (a.opt(i) as? String)?.trim() ?: return@any false
+                s.length > 1 && s.endsWith("?") && s.dropLast(1).toIntOrNull() != null
+            }
+        }
     }
 }

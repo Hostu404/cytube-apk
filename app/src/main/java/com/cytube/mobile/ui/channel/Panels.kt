@@ -24,7 +24,10 @@ import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Search
@@ -35,6 +38,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -45,12 +50,19 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Density
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
@@ -58,6 +70,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -73,6 +86,8 @@ import com.cytube.mobile.net.ChatMessage
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.net.PlaylistItem
 import com.cytube.mobile.net.Poll
+import com.cytube.mobile.net.imageTagUrls
+import com.cytube.mobile.net.removeImageTags
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -207,9 +222,27 @@ fun ChatPanel(
     // TV only — there's no touch to pick an emote with, and the emote
     // picker's own grid is a whole separate focus surface this screen's
     // fixed video -> Nico -> chat bar stop order was never built to host.
-    showEmotePickerButton: Boolean = true
+    showEmotePickerButton: Boolean = true,
+    /** The local user's name: other people's messages mentioning it get
+     *  highlighted (see [mentionRegex]). Null for no highlighting. */
+    highlightName: String? = null,
+    /** Private-message support (phone only): null turns it off entirely,
+     *  which is what TV passes — PMs still show there, just with no way to
+     *  start or reply to one. Given a name, switches the input to a PM to
+     *  that person (ChannelViewModel.startPm). */
+    onStartPm: ((String) -> Unit)? = null,
+    /** Who the input is currently sending private messages to, if anyone. */
+    pmTarget: String? = null,
+    onCancelPm: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
+    val inputFocus = remember { FocusRequester() }
+    // Starting a PM (from a message or the user list) puts the cursor
+    // straight in the box, keyboard up, ready to type.
+    LaunchedEffect(pmTarget) {
+        if (pmTarget != null && onStartPm != null) runCatching { inputFocus.requestFocus() }
+    }
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var showEmotePicker by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -324,12 +357,45 @@ fun ChatPanel(
                     // as normal text instead of hidden-until-tapped. Reuses
                     // messagesFocusable rather than a separate isTv flag
                     // since the two have always meant the same thing here.
-                    revealSpoilers = !messagesFocusable
+                    revealSpoilers = !messagesFocusable,
+                    mentionRegex = mentionRegex,
+                    localName = highlightName,
+                    onPmReply = onStartPm
                 )
             }
         }
 
         HorizontalDivider()
+
+        if (pmTarget != null) {
+            Row(
+                Modifier.fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.tertiaryContainer)
+                    .padding(start = 16.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.MailOutline, contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Private message to $pmTarget",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onCancelPm) {
+                    Icon(
+                        Icons.Default.Close, contentDescription = "Back to public chat",
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+        }
 
         Row(
             // The one place this panel actually needs to react to the
@@ -357,7 +423,17 @@ fun ChatPanel(
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
-                placeholder = { Text(if (canSend) "Message" else "Log in to chat") },
+                placeholder = {
+                    Text(
+                        when {
+                            !canSend -> "Log in to chat"
+                            pmTarget != null -> "Message $pmTarget privately"
+                            else -> "Message"
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 enabled = canSend,
                 // Grows with the draft instead of staying pinned to one line
                 // and scrolling the typed text sideways out of view — capped
@@ -374,7 +450,7 @@ fun ChatPanel(
                 keyboardActions = KeyboardActions(onSend = {
                     onSend(draft.text); draft = TextFieldValue("")
                 }),
-                modifier = Modifier.weight(1f).then(inputFieldModifier)
+                modifier = Modifier.weight(1f).focusRequester(inputFocus).then(inputFieldModifier)
             )
             FilledIconButton(
                 onClick = { onSend(draft.text); draft = TextFieldValue("") },
@@ -394,6 +470,15 @@ fun ChatPanel(
         )
     }
 }
+
+/**
+ * The website's own rule for highlighting a message (util.js highlightsMe):
+ * the user's name as a whole word, any case. Hyphens count as part of a name
+ * here, since CyTube usernames can contain them and \b would treat "bob"
+ * as mentioned in "bob-bot".
+ */
+private fun buildMentionRegex(name: String): Regex =
+    Regex("(?<![\\w-])" + Regex.escape(name) + "(?![\\w-])", RegexOption.IGNORE_CASE)
 
 /**
  * Click-to-reply, matching the site: the username plus a colon is inserted at
@@ -526,7 +611,7 @@ fun NekoChatOverlay(
         LaunchedEffect(state) {
             if (state.hasCaughtUp) return@LaunchedEffect
             state.hasCaughtUp = true
-            val catchUp = messages.filterNot { it.isServerMessage }.takeLast(NEKO_CATCHUP_COUNT)
+            val catchUp = messages.filterNot { it.isServerMessage || it.isPm }.takeLast(NEKO_CATCHUP_COUNT)
             for (msg in catchUp) {
                 state.pending.addLast(msg)
             }
@@ -542,7 +627,9 @@ fun NekoChatOverlay(
             for (i in messages.indices.reversed()) {
                 val m = messages[i]
                 if (m.seq <= state.lastSpawnedSeq) break
-                if (!m.isServerMessage) fresh.add(m)
+                // Never PMs: this flies messages across the video for
+                // anyone looking at the screen (a TV, a screen share).
+                if (!m.isServerMessage && !m.isPm) fresh.add(m)
             }
             fresh.reverse()
             for (msg in fresh) {
@@ -952,7 +1039,13 @@ private fun ChatRow(
     /** True on TV — see the call site's own comment. Forces every spoiler in
      *  this row to render as plain, already-visible text; [revealedSpoilers]
      *  below is only ever consulted when this is false. */
-    revealSpoilers: Boolean = false
+    revealSpoilers: Boolean = false,
+    mentionRegex: Regex? = null,
+    /** Our own name, to tell PMs we sent from ones we received. */
+    localName: String? = null,
+    /** Tapping a PM's name replies privately to the other person. Null (TV)
+     *  leaves PM names like any other. */
+    onPmReply: ((String) -> Unit)? = null
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     // Which of THIS message's own spoilers (by index — see ChatHtml.SPOILER_TAG)
@@ -985,10 +1078,36 @@ private fun ChatRow(
         return
     }
 
-    Column(Modifier.fillMaxWidth()) {
+    // Someone else's public message that mentions us. Checked against the
+    // rendered text, not the raw HTML, so a name inside a link's address
+    // doesn't count. PMs already stand out (and are always to us).
+    val mentionsMe = remember(rendered.text, mentionRegex, msg.username, msg.isPm) {
+        mentionRegex != null && !msg.isPm &&
+            mentionRegex.matchEntire(msg.username) == null &&
+            mentionRegex.containsMatchIn(rendered.text.text)
+    }
+    // A PM we sent comes back from the server with us as the sender and
+    // `to` set; the other person in the conversation is who a reply goes to.
+    val isOutgoingPm = msg.isPm && localName != null && msg.username.equals(localName, ignoreCase = true)
+    val pmOtherParty = if (isOutgoingPm) msg.to ?: msg.username else msg.username
+    val highlight = when {
+        msg.isPm -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.16f)
+        mentionsMe -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+        else -> null
+    }
+    val rowModifier = if (highlight != null) {
+        Modifier.fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(highlight)
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    } else {
+        Modifier.fillMaxWidth()
+    }
+
+    Column(rowModifier) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
-                msg.username,
+                if (isOutgoingPm) "You → ${msg.to ?: "?"}" else msg.username,
                 style = MaterialTheme.typography.labelLarge,
                 color = if (msg.isPm) MaterialTheme.colorScheme.tertiary
                 else MaterialTheme.colorScheme.primary,
@@ -1000,7 +1119,14 @@ private fun ChatRow(
                 modifier = Modifier
                     .then(
                         if (usernameClickable) {
-                            Modifier.clickable { onUsernameClick(msg.username) }
+                            Modifier.clickable {
+                                // On a PM, tapping the name replies privately —
+                                // it used to drop "name: " into PUBLIC chat,
+                                // so the natural way to answer a PM posted the
+                                // answer for the whole channel to see.
+                                if (msg.isPm && onPmReply != null) onPmReply(pmOtherParty)
+                                else onUsernameClick(msg.username)
+                            }
                         } else {
                             Modifier
                         }
@@ -1104,9 +1230,16 @@ fun PlaylistPanel(
      *  ever get real playable data (direct sources, an embed URL) when
      *  they're the channel's actual current item, which a personal pick by
      *  definition isn't. */
-    onPersonalPick: (PlaylistItem) -> Unit = {}
+    onPersonalPick: (PlaylistItem) -> Unit = {},
+    /** Show the "add a video" box — see ChannelUiState.canQueue. */
+    canAdd: Boolean = false,
+    /** Also offer "Play next" — see ChannelUiState.canQueueNext. */
+    canAddNext: Boolean = false,
+    queueStatus: QueueStatus? = null,
+    /** (link, playNext) -> whether it was sent; false keeps the text so it can be fixed. */
+    onAddLink: (String, Boolean) -> Boolean = { _, _ -> false }
 ) {
-    if (items.isEmpty()) {
+    if (items.isEmpty() && !canAdd) {
         EmptyPanel("The playlist is empty, or you do not have permission to see it.", modifier)
         return
     }
@@ -1121,6 +1254,13 @@ fun PlaylistPanel(
     }
 
     Column(modifier.fillMaxSize()) {
+        if (canAdd) {
+            AddVideoBox(canAddNext = canAddNext, status = queueStatus, onAddLink = onAddLink)
+        }
+        if (items.isEmpty()) {
+            EmptyPanel("The playlist is empty.", Modifier.weight(1f))
+            return@Column
+        }
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
@@ -1213,6 +1353,74 @@ fun PlaylistPanel(
 }
 
 /**
+ * Paste a link, add it to the channel's playlist — the same thing as the
+ * website's "add from URL" box. Only shown when the channel's permissions
+ * allow it (see ChannelUiState.canQueue); ChannelViewModel.queueLink turns
+ * the link into CyTube's (type, id) and reports back through [status].
+ */
+@Composable
+private fun AddVideoBox(
+    canAddNext: Boolean,
+    status: QueueStatus?,
+    onAddLink: (String, Boolean) -> Boolean
+) {
+    var link by remember { mutableStateOf("") }
+    val clipboard = LocalClipboardManager.current
+    val busy = status?.inProgress == true
+    val canSubmit = link.isNotBlank() && !busy
+    fun submit(playNext: Boolean) {
+        if (canSubmit && onAddLink(link, playNext)) link = ""
+    }
+
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        OutlinedTextField(
+            value = link,
+            onValueChange = { link = it },
+            singleLine = true,
+            placeholder = { Text("Paste a video link to add") },
+            // One tap instead of long-press → Paste. Whatever the share
+            // sheet copied (title and all) is fine: the link is picked out
+            // of it when adding (MediaLink.extractLink).
+            trailingIcon = {
+                IconButton(onClick = { clipboard.getText()?.text?.let { link = it.trim() } }) {
+                    Icon(Icons.Default.ContentPaste, contentDescription = "Paste link")
+                }
+            },
+            shape = RoundedCornerShape(16.dp),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { submit(playNext = false) }),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (status != null) {
+                Text(
+                    status.message,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (status.isError) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            if (canAddNext) {
+                OutlinedButton(onClick = { submit(playNext = true) }, enabled = canSubmit) {
+                    Text("Play next")
+                }
+            }
+            Button(onClick = { submit(playNext = false) }, enabled = canSubmit) {
+                Text("Add")
+            }
+        }
+    }
+    HorizontalDivider()
+}
+
+/**
  * Voting only — creating or closing a poll is a moderator action done from
  * the site itself. counts entries of -1 mean the owner obscured the poll
  * (see [Poll.isObscured]); those show "?" and no bar instead of a fake 0.
@@ -1222,30 +1430,49 @@ fun PollPanel(
     poll: Poll?,
     myVote: Int?,
     onVote: (Int) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** See ChannelUiState.canVotePoll. */
+    canVote: Boolean = true,
+    /** Clears a closed poll. */
+    onDismiss: () -> Unit = {}
 ) {
     if (poll == null) {
         EmptyPanel("No poll is running right now.", modifier)
         return
     }
+    val votingOpen = !poll.closed && canVote
 
     Column(modifier.fillMaxSize().padding(16.dp)) {
-        Text(poll.title, style = MaterialTheme.typography.titleMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PollRichText(poll.title, MaterialTheme.typography.titleMedium, Modifier.weight(1f))
+            if (poll.closed) {
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+            }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             buildString {
-                append("Opened by ")
+                if (poll.closed) append("Poll closed · opened by ") else append("Opened by ")
                 append(poll.initiator.ifBlank { "the channel" })
                 if (poll.isObscured) append(" · results hidden until it closes")
                 else {
                     append(" · ")
                     append(poll.totalVotes)
                     append(if (poll.totalVotes == 1) " vote" else " votes")
+                    if (poll.hiddenFromOthers && !poll.closed) append(" · hidden from non-moderators")
                 }
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        if (!poll.closed && !canVote) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "This channel doesn't allow you to vote in polls.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
         Spacer(Modifier.height(16.dp))
 
         poll.options.forEachIndexed { i, option ->
@@ -1262,15 +1489,11 @@ fun PollPanel(
                         if (selected) MaterialTheme.colorScheme.primaryContainer
                         else MaterialTheme.colorScheme.surfaceContainerHigh
                     )
-                    .clickable { onVote(i) }
+                    .clickable(enabled = votingOpen) { onVote(i) }
                     .padding(12.dp)
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(
-                        option,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.weight(1f)
-                    )
+                    PollRichText(option, MaterialTheme.typography.bodyMedium, Modifier.weight(1f))
                     Text(
                         if (count < 0) "?" else count.toString(),
                         style = MaterialTheme.typography.labelMedium,
@@ -1289,8 +1512,61 @@ fun PollPanel(
     }
 }
 
+private val POLL_URL = Regex("https?://[^\\s<>\"']+")
+
+/**
+ * A poll title or option: any `[img](url)` shown as the picture (only here;
+ * the chat notice shows it as a link), and plain links made tappable (poll
+ * text arrives as plain text, so nothing was clickable before). Tapping a
+ * link opens it; tapping anywhere else on an option still votes.
+ */
 @Composable
-fun UsersPanel(users: ImmutableList<ChannelUser>, modifier: Modifier = Modifier) {
+private fun PollRichText(text: String, style: TextStyle, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val linkColor = MaterialTheme.colorScheme.primary
+    val images = remember(text) { imageTagUrls(text) }
+    val remaining = remember(text) { removeImageTags(text) }
+    val annotated = remember(remaining, linkColor) {
+        buildAnnotatedString {
+            var last = 0
+            for (m in POLL_URL.findAll(remaining)) {
+                append(remaining.substring(last, m.range.first))
+                val url = m.value.trimEnd('.', ',', ')', ']', '!', '?', ';', ':')
+                withLink(
+                    LinkAnnotation.Url(
+                        url,
+                        TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
+                    ) { openInBrowser(context, url) }
+                ) { append(url) }
+                append(m.value.substring(url.length))
+                last = m.range.last + 1
+            }
+            append(remaining.substring(last))
+        }
+    }
+    Column(modifier) {
+        images.forEach { url ->
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 180.dp).clip(RoundedCornerShape(8.dp))
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+        if (annotated.isNotEmpty()) Text(annotated, style = style)
+    }
+}
+
+@Composable
+fun UsersPanel(
+    users: ImmutableList<ChannelUser>,
+    modifier: Modifier = Modifier,
+    /** Our own name, so we don't offer to PM ourselves. */
+    localName: String? = null,
+    /** Start a private message to that user; null hides the option. */
+    onStartPm: ((String) -> Unit)? = null
+) {
     if (users.isEmpty()) {
         EmptyPanel("No users listed.", modifier)
         return
@@ -1323,6 +1599,15 @@ fun UsersPanel(users: ImmutableList<ChannelUser>, modifier: Modifier = Modifier)
                 rankLabel(user.rank)?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (onStartPm != null && !user.name.equals(localName, ignoreCase = true)) {
+                    IconButton(onClick = { onStartPm(user.name) }) {
+                        Icon(
+                            Icons.Default.MailOutline,
+                            contentDescription = "Private message ${user.name}",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
