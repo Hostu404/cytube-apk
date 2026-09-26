@@ -10,6 +10,7 @@ import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.player.BandwidthEstimate
 import com.cytube.mobile.player.YouTubeResolver
 import com.cytube.mobile.ui.isTvDevice
 import okhttp3.ConnectionPool
@@ -28,6 +29,10 @@ class CyTubeApp : Application(), ImageLoaderFactory {
         // NewPipeExtractor is a singleton and must be initialised once, before
         // any extraction, with an HTTP client it can use.
         YouTubeResolver.init(Graph.http)
+        // Starts listening for real bandwidth samples straight away, so the
+        // first video's downloads count towards the next item's starting
+        // quality (see ChannelViewModel.resolveInitialQualityIndex).
+        BandwidthEstimate.init(this)
     }
 
     override fun newImageLoader(): ImageLoader {

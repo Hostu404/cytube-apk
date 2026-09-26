@@ -66,10 +66,17 @@ object Graph {
             .build()
     }
 
-    private var authRepo: AuthRepository? = null
+    @Volatile private var authRepo: AuthRepository? = null
 
+    /** First call builds EncryptedSharedPreferences (a Keystore round-trip,
+     *  slow on low-end TV sticks), so callers make that first call off the
+     *  main thread (see HomeViewModel/ChannelViewModel). Synchronized because
+     *  of exactly that: a background first call and a main-thread one can now
+     *  race, and two instances over the same prefs file must not happen. */
     fun auth(context: Context): AuthRepository =
-        authRepo ?: AuthRepository(context.applicationContext, authHttp, BASE_URL).also { authRepo = it }
+        authRepo ?: synchronized(this) {
+            authRepo ?: AuthRepository(context.applicationContext, authHttp, BASE_URL).also { authRepo = it }
+        }
 
     val channelIndex: ChannelIndexRepository by lazy {
         ChannelIndexRepository(http, BASE_URL)

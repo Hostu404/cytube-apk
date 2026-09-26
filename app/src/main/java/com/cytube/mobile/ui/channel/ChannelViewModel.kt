@@ -11,6 +11,11 @@ import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
+import com.cytube.mobile.player.BandwidthEstimate
+import com.cytube.mobile.player.GoogleDriveResolver
+import com.cytube.mobile.player.PeerTubeResolver
+import com.cytube.mobile.player.StreamableResolver
+import com.cytube.mobile.player.YouTubeResolver
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import kotlinx.collections.immutable.PersistentList
@@ -259,8 +264,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         playerAttachedAtMs = SystemClock.elapsedRealtime()
         _state.value = _state.value.copy(connection = ConnectionState.CONNECTING)
         guestRetries = 0
-        val credential = Graph.auth(getApplication()).credentialForSession()
-            ?: CyTubeClient.Credential.Guest(guestName())
+        val credential = savedCredential() ?: CyTubeClient.Credential.Guest(guestName())
         runCatching { client.connect(channel, credential) }
             .onFailure {
                 _state.value = _state.value.copy(
@@ -336,7 +340,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     // preference — it never touches settingsStore, so it doesn't
                     // clobber a name the user chose on the Account screen.
                     if (!event.success &&
-                        Graph.auth(getApplication()).credentialForSession() == null &&
+                        savedCredential() == null &&
                         guestRetries < MAX_GUEST_RETRIES
                     ) {
                         guestRetries++
@@ -456,7 +460,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 is CyTubeEvent.PollClosed -> update { it.copy(poll = null, myPollVote = null) }
 
-                is CyTubeEvent.ErrorMessage -> update { it.copy(statusMessage = event.message) }
+                is CyTubeEvent.ErrorMessage -> showTransientStatus(event.message)
 
                 else -> Unit
             }
@@ -550,8 +554,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * decoder flushing and rebuffering loops during active playback.
      */
     private fun resolveInitialQualityIndex(media: MediaFrame): Int {
-        val preferredHeight = sessionPreferredQualityHeight ?: return 0
         if (media.direct.isEmpty()) return 0
+        val preferredHeight = sessionPreferredQualityHeight ?: return bandwidthBasedStartIndex(media)
 
         val now = SystemClock.elapsedRealtime()
         val stableDuration = if (qualityStableSinceMs > 0) now - qualityStableSinceMs else 0L
@@ -565,10 +569,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 preferredHeight < 480 -> 480
                 preferredHeight < 720 -> 720
                 preferredHeight < 1080 -> 1080
+                // Up to 4K too: a measured start (bandwidthBasedStartIndex)
+                // can now begin below a 1440p/2160p source, and without these
+                // two rungs the session could never climb back to it.
+                preferredHeight < 1440 -> 1440
+                preferredHeight < 2160 -> 2160
                 else -> preferredHeight
             }
             val requiredBps = requiredBitrateForHeight(candidateCap)
-            val currentBitrate = player?.estimatedBitrate
+            // Real measurements only — see BandwidthEstimate. Was the
+            // player handle's estimate, which reported Media3's per-country
+            // default before anything had downloaded, and was null whenever
+            // no player happened to be attached at an item boundary.
+            val currentBitrate = BandwidthEstimate.measuredBps()
             // Only bump if bandwidth estimate is absent (unknown) or satisfies target with 30% headroom
             val bandwidthOk = currentBitrate == null || currentBitrate >= (requiredBps * 1.3).toLong()
             if (bandwidthOk) {
@@ -589,8 +602,49 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         return if (matchIndex >= 0) matchIndex else 0
     }
 
+    /**
+     * Starting quality for an item when this session has no quality history
+     * yet (nothing has stalled and been stepped down). Used to be "always the
+     * highest source", which on a slower connection meant starting a 1080p
+     * or 4K source, stalling, and only then stepping down mid-item.
+     *
+     * Now: the highest source whose typical bitrate the measured bandwidth
+     * covers with the same 30% headroom the step-up check uses. Only a REAL
+     * measurement counts (BandwidthEstimate.measuredBps), so the first video
+     * after the app starts, before anything has downloaded, still starts at
+     * the top exactly as before, and the stall step-down still covers it.
+     *
+     * Choosing a lower source here records it as the session's quality cap,
+     * with one step-up allowed, so the existing step-up at the next item
+     * boundary can raise it again once playback proves stable and bandwidth
+     * allows. Without that, a conservative first pick could never go back up.
+     */
+    private fun bandwidthBasedStartIndex(media: MediaFrame): Int {
+        if (media.direct.size <= 1) return 0
+        val estimate = BandwidthEstimate.measuredBps() ?: return 0
+        // FLV is sorted last and nothing on Android plays it; never pick it.
+        val playable = media.direct.indices.filter { media.direct[it].contentType != "video/flv" }
+        if (playable.isEmpty()) return 0
+        val chosen = playable.firstOrNull { i ->
+            // An unrecognised quality label can't be judged, so it's allowed.
+            val height = media.direct[i].quality.toIntOrNull() ?: return@firstOrNull true
+            estimate >= (requiredBitrateForHeight(height) * 1.3).toLong()
+        } ?: playable.last()
+        if (chosen > 0) {
+            media.direct[chosen].quality.toIntOrNull()?.let { height ->
+                sessionPreferredQualityHeight = height
+                qualityUpgradeAttempts = maxOf(qualityUpgradeAttempts, 1)
+            }
+            Log.i(TAG, "quality: measured ${estimate / 1000}kbps; starting at " +
+                "${media.direct[chosen].quality}p instead of ${media.direct[0].quality}p")
+        }
+        return chosen
+    }
+
     private fun requiredBitrateForHeight(height: Int): Long {
         return when {
+            height >= 2160 -> 16_000_000L // 16 Mbps
+            height >= 1440 -> 9_000_000L  // 9 Mbps
             height >= 1080 -> 4_500_000L  // 4.5 Mbps
             height >= 720 -> 2_200_000L   // 2.2 Mbps
             height >= 480 -> 1_000_000L   // 1.0 Mbps
@@ -613,7 +667,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val p = player ?: return
         if (s.effectiveMode == CompatMode.WEB) return   // the web page syncs itself
         if (s.personalPickActive) return
-        if (s.isLeader || !settings.syncEnabled) return
+        if (s.isLeader || !settings.syncEnabled) {
+            // SyncEngine may have left a rate nudge running; don't let the
+            // player carry on at 1.1x once sync stops being applied.
+            sync.stopNudge(p)
+            return
+        }
         if (lastServerTimeElapsedRealtimeMs == 0L) return
 
         val now = SystemClock.elapsedRealtime()
@@ -904,6 +963,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val m = _state.value.media
         Log.w(TAG, "playback failed backend=${_state.value.player} " +
             "type=${m?.type} id=${m?.id}: $reason")
+        // A resolved stream URL that just failed (expired, 403, taken down)
+        // would otherwise stay cached for 5-10 minutes, so rejoining or the
+        // item coming round again would retry the same dead link.
+        if (m != null) {
+            when (_state.value.player) {
+                MediaTypes.Player.NEWPIPE -> YouTubeResolver.invalidate(m.id)
+                MediaTypes.Player.GDRIVE -> GoogleDriveResolver.invalidate(m.id)
+                MediaTypes.Player.STREAMABLE -> StreamableResolver.invalidate(m.id)
+                MediaTypes.Player.PEERTUBE -> PeerTubeResolver.invalidate(m.id)
+                else -> Unit
+            }
+        }
         if (_state.value.effectiveMode == CompatMode.WEB) return
         val embeddable = m?.embedPlayableSrc
         if (embeddable != null && _state.value.player != MediaTypes.Player.EMBED) {
@@ -1224,6 +1295,31 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         return if (saved.isNotBlank()) saved else "Guest" + (1000..9999).random()
     }
 
+    /** Graph.auth() may still be building EncryptedSharedPreferences on a
+     *  cold start (deep link straight into a channel), so never on Main. */
+    private suspend fun savedCredential(): CyTubeClient.Credential? =
+        withContext(Dispatchers.IO) { Graph.auth(getApplication()).credentialForSession() }
+
+    private var transientStatusJob: Job? = null
+
+    /**
+     * Server error notices (errorMsg / validationError / queueFail — "queue
+     * failed", chat rate limits and the like) share statusMessage with the
+     * header's "N connected" line (see ChannelScreen's ConnectionLine), and
+     * nothing used to clear them, so one stayed in the header until the next
+     * reconnect. Shown for [TRANSIENT_STATUS_MS], then cleared — but only if
+     * it's still the message on screen, so a newer notice or a connection
+     * status set in the meantime is left alone.
+     */
+    private fun showTransientStatus(message: String) {
+        update { it.copy(statusMessage = message) }
+        transientStatusJob?.cancel()
+        transientStatusJob = viewModelScope.launch {
+            delay(TRANSIENT_STATUS_MS)
+            update { if (it.statusMessage == message) it.copy(statusMessage = null) else it }
+        }
+    }
+
     private fun update(block: (ChannelUiState) -> ChannelUiState) {
         _state.value = block(_state.value)
     }
@@ -1241,6 +1337,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         const val MAX_CHAT_MESSAGES = 300
         const val MAX_GUEST_RETRIES = 3
         const val TAG = "CyTubeChannel"
+
+        /** How long a server error notice stays in the header — see
+         *  showTransientStatus. */
+        const val TRANSIENT_STATUS_MS = 6_000L
 
         /** Minimum time between actual [refresh] runs — the anti-spam gate
          *  on tapping the channel name. Comfortably longer than the 600ms

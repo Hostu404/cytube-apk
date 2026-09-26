@@ -80,10 +80,22 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
      *  ultimately come from the same login flow). */
     fun savedSession(): Session? {
         inMemorySession?.let { return it }
-        val name = prefs.getString(KEY_NAME, null) ?: return null
-        val cookie = prefs.getString(KEY_COOKIE, null) ?: return null
-        return Session(name, cookie)
+        if (!persistedLoaded) {
+            val name = prefs.getString(KEY_NAME, null)
+            val cookie = prefs.getString(KEY_COOKIE, null)
+            persistedSession = if (name != null && cookie != null) Session(name, cookie) else null
+            persistedLoaded = true
+        }
+        return persistedSession
     }
+
+    /** Decrypted copy of the remembered session, read from
+     *  EncryptedSharedPreferences once rather than decrypted again on every
+     *  call (ChannelScreen asks for it during composition in Compatibility
+     *  View). Kept in step with prefs by [login] and [logout], the only
+     *  writers. */
+    @Volatile private var persistedSession: Session? = null
+    @Volatile private var persistedLoaded = false
 
     fun credentialForSession(): CyTubeClient.Credential? =
         savedSession()?.let { CyTubeClient.Credential.Cookie(it.authCookie, it.name) }
@@ -113,6 +125,8 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
         }
         inMemorySession = null
         prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
+        persistedSession = null
+        persistedLoaded = true
 
         // WebCompatView shares the auth cookie into Android's WebView
         // CookieManager so the user isn't asked to log in twice there. That
@@ -168,6 +182,8 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                     if (remember) {
                         prefs.edit().putString(KEY_NAME, username)
                             .putString(KEY_COOKIE, auth).apply()
+                        persistedSession = session
+                        persistedLoaded = true
                     }
                     LoginOutcome.Success(session)
                 }

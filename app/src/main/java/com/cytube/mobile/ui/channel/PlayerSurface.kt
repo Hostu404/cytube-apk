@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.app.ActivityManager
 import android.content.Context
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -111,15 +112,53 @@ private const val LOAD_CONTROL_BUFFER_FOR_PLAYBACK_MS = 2_000
  *  and avoids immediate repeat rebuffers on struggling connections. */
 private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 4_000
 
-/** Retain 30s of decoded/buffered media behind the playback position.
- *  Enables instant backwards seeks and smooth backward SyncEngine speed
- *  adjustments from buffer memory without re-requesting upstream chunks. */
-private const val LOAD_CONTROL_BACK_BUFFER_MS = 30_000
+/** Retain 10s of buffered media behind the playback position, so a short
+ *  backwards seek (e.g. SyncEngine's "ahead" correction) needs no re-fetch.
+ *  Was 30s, but the back buffer counts against the byte budget below, and
+ *  at a high bitrate 30s of it (~150MB at 40 Mbps) would leave little room
+ *  for the forward buffer that actually prevents stalls. SyncEngine now
+ *  closes most "ahead" drift by slowing playback rather than seeking. */
+private const val LOAD_CONTROL_BACK_BUFFER_MS = 10_000
+
+/**
+ * Byte budget for ExoPlayer's buffer, sized to this device's own Java heap
+ * limit (ActivityManager.memoryClass), and used as a hard cap on both phone
+ * and TV (prioritizeTimeOverSizeThresholds = false).
+ *
+ * ExoPlayer's buffer lives on the Java heap. Before this:
+ *  - TV used a flat 64MB, so a 40 Mbps file only ever held ~13s, below the
+ *    TV config's own 15s minimum, even on devices with plenty of heap.
+ *  - Phone let time win over size, so it always buffered to the 50s minimum
+ *    whatever the bitrate: ~250MB for a 40 Mbps file, more for 4K, enough
+ *    to crash with OutOfMemoryError on a phone with a 256MB heap limit.
+ *
+ * Now 40% of the heap limit, never less than 64MB (TV's old value, and
+ * enough for a full 50s at ~10 Mbps on phone, so ordinary files buffer
+ * exactly as before). Ceilings: 160MB on TV, 256MB on phone. A 256MB-class
+ * device gets ~102MB (~20s of 40 Mbps video in total; on phone that includes
+ * the 10s back buffer), a 512MB-class phone ~205MB (~40s). Phones with small
+ * heaps now hold less of a very high-bitrate file than before; before, they
+ * could hold enough of it to crash.
+ */
+private fun bufferBudgetBytes(context: Context, isTv: Boolean): Int {
+    val memoryClassMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+        ?.memoryClass ?: 0
+    val maxMb = if (isTv) TV_BUFFER_MAX_MB else PHONE_BUFFER_MAX_MB
+    val budgetMb = (memoryClassMb * 0.4).toInt().coerceIn(BUFFER_MIN_MB, maxMb)
+    return budgetMb * 1024 * 1024
+}
+private const val BUFFER_MIN_MB = 64
+private const val TV_BUFFER_MAX_MB = 160
+private const val PHONE_BUFFER_MAX_MB = 256
 
 /** Rolling window for tracking frequent short rebuffers so repeated stalls
  *  under 3.0s accumulate toward quality adaptation rather than being lost. */
 private const val RECENT_STALL_WINDOW_MS = 10_000L
 private const val STALL_TRIGGER_MS = 3_000L
+
+/** Buffering that begins this soon after a seek is attributed to the seek,
+ *  not counted as a bandwidth stall — see ExoSurface's listener. */
+private const val SEEK_BUFFERING_WINDOW_MS = 1_000L
 
 @Composable
 fun PlayerSurface(
@@ -694,7 +733,7 @@ private fun NewPipeSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType),
+            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
@@ -763,7 +802,8 @@ private fun GDriveSurface(
         error != null -> Message(error!!)
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
-            adjustedMedia, ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS),
+            adjustedMedia,
+            ResolvedSource(resolved!!.url, resolved!!.mimeType, GDRIVE_STREAM_HEADERS, variant = resolved!!.label),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
@@ -818,7 +858,7 @@ private fun StreamableSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType),
+            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
@@ -873,7 +913,7 @@ private fun PeerTubeSurface(
         resolved == null -> CircularProgressIndicator()
         else -> ExoSurface(
             adjustedMedia,
-            ResolvedSource(resolved!!.url, resolved!!.mimeType),
+            ResolvedSource(resolved!!.url, resolved!!.mimeType, variant = resolved!!.label),
             showControls, onHandle, onFailed, epoch, onFrameSnapshot, audioOnly, onEnded
         )
     }
@@ -889,7 +929,11 @@ private fun PeerTubeSurface(
 private data class ResolvedSource(
     val url: String,
     val mimeType: String?,
-    val headers: Map<String, String> = emptyMap()
+    val headers: Map<String, String> = emptyMap(),
+    /** Which format this is (the resolver's quality label, e.g. "360p"),
+     *  so the on-disk media cache keeps different encodes of the same video
+     *  apart — see NativePlayerHandle.loadUrl. */
+    val variant: String = ""
 )
 
 @OptIn(UnstableApi::class)
@@ -952,7 +996,7 @@ private fun ExoSurface(
         val loadControl = DefaultLoadControl.Builder().run {
             if (isTv) {
                 setAllocator(DefaultAllocator(true, 64 * 1024))
-                    .setTargetBufferBytes(64 * 1024 * 1024)
+                    .setTargetBufferBytes(bufferBudgetBytes(context, isTv = true))
                     .setBufferDurationsMs(
                         /* minBufferMs = */ 15_000,
                         /* maxBufferMs = */ 30_000,
@@ -972,8 +1016,8 @@ private fun ExoSurface(
                     LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS
                 )
                     .setBackBuffer(LOAD_CONTROL_BACK_BUFFER_MS, true)
-                    .setTargetBufferBytes(128 * 1024 * 1024)
-                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .setTargetBufferBytes(bufferBudgetBytes(context, isTv = false))
+                    .setPrioritizeTimeOverSizeThresholds(false)
             }
             build()
         }
@@ -989,6 +1033,8 @@ private fun ExoSurface(
             // interruptions like a phone call ringtone.
             .setAudioAttributes(audioAttributes, false)
             .setWakeMode(C.WAKE_MODE_NETWORK)
+            // Only a default: NativePlayerHandle.seekTo picks EXACT or
+            // NEXT_SYNC per seek, depending on whether the target is buffered.
             .setSeekParameters(SeekParameters.CLOSEST_SYNC)
             .setLoadControl(loadControl)
             .build()
@@ -1066,13 +1112,33 @@ private fun ExoSurface(
         var stallStartedAtMs = 0L
         var stallJob: Job? = null
         val recentStalls = mutableListOf<Pair<Long, Long>>()
+        // When the last seek (in practice, a SyncEngine correction) happened.
+        // ExoPlayer reports a seek's STATE_BUFFERING in the same callback
+        // batch as the seek's discontinuity, so buffering that starts within
+        // SEEK_BUFFERING_WINDOW_MS of one is the seek's own cost, not a
+        // bandwidth shortfall, and must not feed onStall → quality step-down
+        // → reload → more drift → more seeks.
+        var lastSeekAtMs = 0L
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 reachedReadyOnce = false
+                lastSeekAtMs = 0L
                 stallJob?.cancel()
                 stallJob = null
                 stallStartedAtMs = 0L
                 recentStalls.clear()
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                ) {
+                    lastSeekAtMs = SystemClock.elapsedRealtime()
+                }
             }
 
             // The immediate snapshot: taken the moment a new item's first
@@ -1187,7 +1253,8 @@ private fun ExoSurface(
                         // Only mid-playback rebuffers count as stalls. The initial buffer-up
                         // (discovering container index/moov atom and seeking to start position on
                         // large files) can take several seconds and is NOT a bandwidth stall.
-                        if (reachedReadyOnce && stallStartedAtMs == 0L) {
+                        val seekInduced = SystemClock.elapsedRealtime() - lastSeekAtMs < SEEK_BUFFERING_WINDOW_MS
+                        if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start
                             stallJob?.cancel()
@@ -1301,7 +1368,7 @@ private fun ExoSurface(
             }
         }
         if (resolved != null) {
-            handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers)
+            handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
         } else {
             handle.load(media, qualityIndex)
         }

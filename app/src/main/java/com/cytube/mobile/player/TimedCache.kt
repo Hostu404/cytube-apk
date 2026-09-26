@@ -33,4 +33,10 @@ class TimedCache<K : Any, V : Any>(
     fun put(key: K, value: V, nowMs: Long = System.currentTimeMillis()) {
         entries[key] = nowMs to value
     }
+
+    /** Forget [key] now rather than at expiry — for a cached stream URL that
+     *  turned out not to work, so the next attempt resolves a fresh one. */
+    fun remove(key: K) {
+        entries.remove(key)
+    }
 }

@@ -7,11 +7,13 @@ import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class HomeUiState(
     val query: String = "",
@@ -71,7 +73,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             settings.recents.collect { r -> _state.update { it.copy(recents = r) } }
         }
-        _state.update { it.copy(loggedInAs = Graph.auth(app).savedSession()?.name) }
+        refreshSession()
     }
 
     fun refresh(force: Boolean = false) {
@@ -103,7 +105,15 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.clearRecents() }
     }
 
+    /** Off the main thread: the first Graph.auth() call builds
+     *  EncryptedSharedPreferences (a Keystore round-trip), and this is the
+     *  first thing to make it on a cold start — see Graph.auth. */
     fun refreshSession() {
-        _state.update { it.copy(loggedInAs = Graph.auth(getApplication()).savedSession()?.name) }
+        viewModelScope.launch {
+            val name = withContext(Dispatchers.IO) {
+                Graph.auth(getApplication()).savedSession()?.name
+            }
+            _state.update { it.copy(loggedInAs = name) }
+        }
     }
 }

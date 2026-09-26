@@ -57,6 +57,12 @@ object GoogleDriveResolver {
     // time-limited, so this only needs to survive a player-surface rebuild.
     private val cache = TimedCache<String, Resolved>(ttlMs = 5 * 60 * 1000L, evictAboveSize = 20)
 
+    /** Drops a cached URL for [fileId] after playback of it failed, so the
+     *  next attempt (rejoining, or the item coming round again) resolves a
+     *  fresh one instead of reusing the dead link until the cache expires.
+     *  Called from ChannelViewModel.reportPlaybackFailure. */
+    fun invalidate(fileId: String) = cache.remove(fileId)
+
     suspend fun resolve(http: OkHttpClient, fileId: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_FILE_ID_REGEX.matches(fileId)) {
             Log.w(TAG, "rejected malformed Google Drive file id (len=${fileId.length})")

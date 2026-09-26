@@ -11,6 +11,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.extractor.DefaultExtractorsFactory
@@ -112,7 +113,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * keeps the path consistent. [headers] carries whatever the resolver says
      * the stream itself needs (e.g. Referer) on top of that.
      */
-    fun loadUrl(media: MediaFrame, url: String, mimeType: String?, headers: Map<String, String> = emptyMap()) {
+    fun loadUrl(
+        media: MediaFrame,
+        url: String,
+        mimeType: String?,
+        headers: Map<String, String> = emptyMap(),
+        cacheVariant: String = ""
+    ) {
         if (isReleased) return
         mediaId = media.id
         mediaType = media.type
@@ -120,7 +127,14 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         Log.i("CyTubePlayer", "load type=${media.type} via=resolved mime=$mimeType headers=${headers.keys}")
         runCatching {
             val item = MediaItem.Builder().setUri(url)
-                .setCustomCacheKey("${media.type}:${media.id}")
+                // Keyed on the item AND the format. Resolved URLs are signed
+                // and change every time, so a stable key is what lets a
+                // re-resolve reuse bytes already on disk; but "type:id" alone
+                // meant a different format of the same video (another
+                // resolution or container, if the resolver ever picks one)
+                // would be read back from the same cache entry: mixed bytes
+                // from two different files.
+                .setCustomCacheKey("${media.type}:${media.id}:${mimeType.orEmpty()}:$cacheVariant")
                 .apply { if (!mimeType.isNullOrBlank()) setMimeType(mimeType) }
                 // Read by the MediaSession (see PlayerSurface's ExoSurface) to
                 // populate whatever system Now Playing UI is showing — without
@@ -234,6 +248,19 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         return (clamped * 1000).toLong().coerceAtLeast(0L)
     }
 
+    override val bufferedAheadSeconds: Double
+        get() = if (isReleased) Double.NaN else runCatching {
+            exo.totalBufferedDuration / 1000.0
+        }.getOrDefault(Double.NaN)
+
+    override fun setPlaybackRate(rate: Float) {
+        if (isReleased) return
+        if (rate.isNaN() || rate.isInfinite() || rate <= 0f) return
+        runCatching {
+            if (exo.playbackParameters.speed != rate) exo.setPlaybackSpeed(rate)
+        }
+    }
+
     override fun play() {
         if (isReleased) return
         runCatching { exo.playWhenReady = true }
@@ -251,8 +278,36 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             val length = mediaLengthSeconds
             val targetSeconds = if (length > 0 && seconds > length) length.toDouble() else seconds
             val targetMs = (targetSeconds * 1000).toLong().coerceAtLeast(0L)
+            exo.setSeekParameters(seekParametersFor(targetMs))
             exo.seekTo(targetMs)
         }
+    }
+
+    /**
+     * Seeks through this handle are SyncEngine corrections (the phone's
+     * on-screen scrubber talks to ExoPlayer directly and keeps the player's
+     * default), and how they snap to keyframes matters a lot on movie-length
+     * files, where keyframes are often 5–10s apart:
+     *
+     *  - Target already buffered: EXACT. The data (including the keyframe
+     *    before the target) is already here, so decoding forward to the exact
+     *    spot is cheap. CLOSEST_SYNC here would often snap a small forward
+     *    correction BACKWARD, past the playhead, to the previous keyframe:
+     *    the video visibly replays a few seconds and ends up further behind,
+     *    so the next tick corrects again.
+     *  - Forward, past the buffer: NEXT_SYNC. A new range request is needed
+     *    anyway; starting it at the next keyframe means nothing before the
+     *    target is downloaded or replayed, and it lands at or slightly ahead
+     *    of the target. That small lead absorbs the rebuffer. EXACT would have to
+     *    download from the previous keyframe first, making the rebuffer longer
+     *    and landing further behind.
+     *  - Backward: EXACT (normally inside the back buffer).
+     */
+    private fun seekParametersFor(targetMs: Long): SeekParameters {
+        val currentMs = exo.currentPosition
+        val bufferedMs = exo.bufferedPosition
+        val forwardPastBuffer = targetMs > currentMs && targetMs > bufferedMs - SEEK_BUFFER_MARGIN_MS
+        return if (forwardPastBuffer) SeekParameters.NEXT_SYNC else SeekParameters.EXACT
     }
 
     override suspend fun currentTimeSeconds(): Double = withContext(Dispatchers.Main) {
@@ -270,5 +325,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         if (isReleased) return
         isReleased = true
         runCatching { exo.release() }
+    }
+
+    private companion object {
+        /** A target this close to the end of the buffer is treated as
+         *  unbuffered: EXACT still needs data past it before it can resume. */
+        const val SEEK_BUFFER_MARGIN_MS = 1_000L
     }
 }
