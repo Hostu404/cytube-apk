@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        lastNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         pendingChannel = channelFromIntent(intent)
 
         ContextCompat.registerReceiver(
@@ -219,11 +220,34 @@ class MainActivity : ComponentActivity() {
         val isTv = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
                 packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
 
-        if (isTv) {
+        // Never while the Activity is only being recreated for a
+        // configuration change: onStop runs as part of that too, and exiting
+        // there would close the app instead of just rebuilding the screen.
+        if (isTv && !isChangingConfigurations) {
             finishAndRemoveTask()
             System.exit(0)
         }
     }
+
+    /**
+     * Configuration changes listed in the manifest's configChanges arrive
+     * here instead of recreating the Activity (see the manifest comment).
+     * Compose picks up the new configuration by itself; the one thing it
+     * doesn't redo is enableEdgeToEdge()'s light/dark status-bar icon choice,
+     * which is decided once, so re-apply it when dark mode flips.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val nightMode = newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK
+        if (nightMode != lastNightMode) {
+            lastNightMode = nightMode
+            enableEdgeToEdge()
+        }
+    }
+
+    /** Night-mode bits as of the last time edge-to-edge styling was applied —
+     *  see onConfigurationChanged. */
+    private var lastNightMode = 0
 
     override fun onStart() {
         super.onStart()

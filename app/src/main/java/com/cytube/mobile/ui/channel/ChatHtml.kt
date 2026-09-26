@@ -40,17 +40,18 @@ object ChatHtml {
     private val GREENTEXT = Color(0xFF789922)
     private val SPOILER = Color(0xFF444444)
 
-    /** A message of just one to this many emotes (no other visible text)
-     *  renders them big instead of at inline-text size — see [Rendered.soloEmoteCount].
-     *  Beyond this it falls back to normal inline size; a wall of a dozen
-     *  giant custom images is a worse read than a wall of small ones. */
-    private const val MAX_SOLO_EMOTES = 4
-
-    /** A single message never renders more than this many emotes — beyond it,
-     *  additional emote codes are left out entirely (not even as alt text).
-     *  Caps the cost of a deliberately emote-spammed line and keeps chat rows
-     *  from growing unbounded; ordinary messages never come close to this. */
+    /** A single message never renders more than this many emotes: the first
+     *  [MAX_EMOTES_PER_MESSAGE] are shown and any after that are left out
+     *  (not even as alt text), while the rest of the message is kept. Caps the
+     *  cost of a deliberately emote-spammed line and keeps chat rows from
+     *  growing unbounded. Also the ceiling for big "solo" emotes, see
+     *  [Rendered.soloEmoteCount], since a message can never show more. */
     private const val MAX_EMOTES_PER_MESSAGE = 3
+
+    /** Parsed messages kept. The chat panel holds 300 messages, each can be
+     *  rendered in a couple of link colours (chat, Niconico overlay), so this
+     *  is sized to keep a full scrollback warm rather than thrash. */
+    private const val RENDER_CACHE_SIZE = 600
 
     /** Threaded through [walk]/[styled] for the lifetime of a single
      *  [render] call so the cap applies per-message, not globally. */
@@ -76,6 +77,14 @@ object ChatHtml {
          *  order; also doubles as the final spoiler count once walking
          *  finishes (see [render]'s Rendered.spoilerCount). */
         var spoilerIndex = 0
+
+        /** True once any emote has been left out for being over the cap. */
+        var droppedEmote = false
+
+        /** Set when an emote is left out, so the whitespace that separated it
+         *  from the next word goes with it. Without this, "lol A B C D E ok"
+         *  rendered as "lol A B C   ok" with a gap where D and E were. */
+        var swallowLeadingSpace = false
     }
 
     data class Rendered(
@@ -83,8 +92,8 @@ object ChatHtml {
         val imageUrls: List<String>,
         /**
          * Nonzero when the message is ENTIRELY emotes — no other visible
-         * text — and there are few enough of them (see [MAX_SOLO_EMOTES]) to
-         * render big without the row taking over the chat. A ":smile:" typed
+         * text — so they can render big without the row taking over the
+         * chat (at most [MAX_EMOTES_PER_MESSAGE] of them, the cap). A ":smile:" typed
          * mid-sentence never sets this; only a message that is just emotes,
          * the case where making them bigger doesn't cost anything (there's
          * no surrounding text for a taller row to crowd).
@@ -106,7 +115,16 @@ object ChatHtml {
         val revealedSpoilers: Set<Int>
     )
 
-    private val renderCache = LruCache<RenderCacheKey, Rendered>(300)
+    /** Parsed messages, always built with an unspecified link colour so the
+     *  background prewarm and every on-screen caller share one parse. */
+    private val renderCache = LruCache<RenderCacheKey, Rendered>(RENDER_CACHE_SIZE)
+
+    private data class ColoredKey(val base: RenderCacheKey, val linkColor: Color)
+
+    /** The same parses with a real link colour applied. Restyling used to
+     *  happen on every cache hit, so every recomposition of a chat row or
+     *  Niconico comment containing a link rebuilt its AnnotatedString. */
+    private val coloredCache = LruCache<ColoredKey, Rendered>(RENDER_CACHE_SIZE)
 
     /**
      * Pre-computes and caches message rendering on a background dispatcher (e.g. Dispatchers.Default)
@@ -170,15 +188,34 @@ object ChatHtml {
             revealSpoilers = revealSpoilers,
             revealedSpoilers = revealedSpoilers
         )
-        synchronized(renderCache) {
-            renderCache.get(cacheKey)?.let { return it.withLinkColor(linkColor) }
+        val base = renderBase(cacheKey, emotes)
+        if (linkColor == Color.Unspecified) return base
+
+        val coloredKey = ColoredKey(cacheKey, linkColor)
+        synchronized(coloredCache) {
+            coloredCache.get(coloredKey)?.let { return it }
         }
+        val colored = base.withLinkColor(linkColor)
+        synchronized(coloredCache) {
+            coloredCache.put(coloredKey, colored)
+        }
+        return colored
+    }
+
+    /** The parse itself, link colour left unspecified — see [renderCache]. */
+    private fun renderBase(key: RenderCacheKey, emotes: EmoteSet): Rendered {
+        synchronized(renderCache) {
+            renderCache.get(key)?.let { return it }
+        }
+        val raw = key.raw
+        val greentext = key.greentext
+        val linkColor = Color.Unspecified
 
         // Emote substitution happens here, exactly as the official client does
         // it on receipt (util.js:1508). Needed whenever emotes will be shown OR
         // dropped (dropImages still has to recognise them as emotes first);
         // skipped only when neither applies, which is the common chat case.
-        val html = if ((showImages || dropImages) && emotes.mightMatch(raw)) emotes.apply(raw) else raw
+        val html = if ((key.showImages || key.dropImages) && emotes.mightMatch(raw)) emotes.apply(raw) else raw
 
         // Fast path. The large majority of chat lines are plain text with no
         // markup and no entities; running those through a full HTML parse is
@@ -192,7 +229,7 @@ object ChatHtml {
             }
             val result = Rendered(plain, emptyList())
             synchronized(renderCache) {
-                renderCache.put(cacheKey, result)
+                renderCache.put(key, result)
             }
             return result
         }
@@ -200,17 +237,24 @@ object ChatHtml {
         val images = mutableListOf<String>()
         val body = Jsoup.parseBodyFragment(html).body()
         val ctx = RenderCtx(
-            linkColor, showImages, dropImages, images, EmoteBudget(), revealSpoilers, revealedSpoilers
+            linkColor, key.showImages, key.dropImages, images, EmoteBudget(),
+            key.revealSpoilers, key.revealedSpoilers
         )
 
-        val annotated = buildAnnotatedString {
+        var annotated = buildAnnotatedString {
             if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
             walk(body, this, ctx)
             if (greentext) pop()
         }
+        // Emotes left out at the end of a message leave the space before the
+        // first of them behind ("A B C " for "A B C D E"); drop it.
+        if (ctx.droppedEmote) {
+            val end = annotated.text.trimEnd().length
+            if (end < annotated.length) annotated = annotated.subSequence(0, end)
+        }
         val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.spoilerIndex)
         synchronized(renderCache) {
-            renderCache.put(cacheKey, result)
+            renderCache.put(key, result)
         }
         return result
     }
@@ -238,7 +282,7 @@ object ChatHtml {
     private fun soloEmoteCount(annotated: AnnotatedString, images: List<String>): Int {
         if (images.isEmpty()) return 0
         val spans = annotated.getStringAnnotations(EMOTE_TAG, 0, annotated.text.length)
-        if (spans.isEmpty() || spans.size > MAX_SOLO_EMOTES) return 0
+        if (spans.isEmpty()) return 0
         val covered = BooleanArray(annotated.text.length)
         for (span in spans) for (i in span.start until span.end) covered[i] = true
         val hasOtherText = annotated.text.withIndex().any { (i, ch) -> !covered[i] && !ch.isWhitespace() }
@@ -248,7 +292,14 @@ object ChatHtml {
     private fun walk(node: Node, builder: AnnotatedString.Builder, ctx: RenderCtx) {
         for (child in node.childNodes()) {
             when (child) {
-                is TextNode -> builder.appendLinkified(child.text(), ctx.linkColor)
+                is TextNode -> {
+                    var text = child.text()
+                    if (ctx.swallowLeadingSpace) {
+                        text = text.trimStart()
+                        if (text.isNotEmpty()) ctx.swallowLeadingSpace = false
+                    }
+                    builder.appendLinkified(text, ctx.linkColor)
+                }
                 is Element -> when (child.tagName().lowercase()) {
                     "br" -> builder.append("\n")
 
@@ -276,7 +327,10 @@ object ChatHtml {
                             // guards against too. Once the budget is spent,
                             // the rest are left out entirely per spec (no
                             // alt-text placeholder either).
-                            !ctx.budget.take() -> Unit
+                            !ctx.budget.take() -> {
+                                ctx.droppedEmote = true
+                                ctx.swallowLeadingSpace = true
+                            }
                             ctx.showImages -> {
                                 ctx.images.add(src)
                                 val code = alt.ifBlank { "[emote]" }

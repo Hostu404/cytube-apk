@@ -73,12 +73,16 @@ import com.cytube.mobile.net.ChatMessage
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.net.PlaylistItem
 import com.cytube.mobile.net.Poll
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+
+/** One shared, immutable formatter rather than a new SimpleDateFormat for
+ *  every chat row every time it's composed. */
+private val CHAT_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 private fun formatTime(timestamp: Long): String =
-    SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+    CHAT_TIME_FORMAT.format(Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()))
 
 /**
  * Emote box height, in sp so it tracks the user's font scale. CyTube emotes are
@@ -104,7 +108,14 @@ private const val SOLO_EMOTE_HEIGHT = 56f
  * emotes settle into the right width and stay there for the rest of the session.
  */
 private object EmoteAspect {
-    val ratios = mutableStateMapOf<String, Float>()
+    // A plain map, not Compose state. It used to be a mutableStateMapOf read
+    // inside every row's remember{}, which meant each newly loaded emote
+    // invalidated every visible chat row (state maps notify all readers on
+    // any write), while the remember{} keys never changed, so none of those
+    // rows actually picked the new ratio up either. Rows now watch their own
+    // emotes instead — see inlineEmotes. Only touched on the main thread
+    // (composition and Coil's onSuccess).
+    private val ratios = HashMap<String, Float>()
     // Unbounded before this — every distinct emote URL seen all session (across
     // every channel visited) stayed in memory forever. A long session across a
     // few busy channels can rack up thousands of distinct emote URLs; this
@@ -112,9 +123,17 @@ private object EmoteAspect {
     // any single channel's real emote set. Losing cached ratios just means a
     // brief re-measure flicker next time those emotes render, not a crash.
     private const val MAX_ENTRIES = 500
-    fun record(url: String, ratio: Float) {
-        if (ratios.size >= MAX_ENTRIES && url !in ratios) ratios.clear()
+
+    operator fun get(url: String): Float? = ratios[url]
+
+    /** Returns true if this changed what's known for [url] enough to be worth
+     *  re-laying-out the row (a new emote, or a real change in shape). */
+    fun record(url: String, ratio: Float): Boolean {
+        val previous = ratios[url]
+        if (previous != null && kotlin.math.abs(previous - ratio) < 0.05f) return false
+        if (ratios.size >= MAX_ENTRIES && previous == null) ratios.clear()
         ratios[url] = ratio
+        return true
     }
 }
 
@@ -126,10 +145,13 @@ private fun inlineEmotes(
     if (urls.isEmpty()) return emptyMap()
     val context = LocalContext.current
     val density = LocalDensity.current
-    return remember(urls, emoteHeight, density) {
+    // Bumped when one of THIS row's own emotes first reports its real shape,
+    // so only this row re-lays-out with the right width (see EmoteAspect).
+    var aspectVersion by remember(urls) { mutableIntStateOf(0) }
+    return remember(urls, emoteHeight, density, aspectVersion) {
         val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
         urls.distinct().associateWith { url ->
-            val ratio = (EmoteAspect.ratios[url] ?: 1f).coerceIn(0.2f, 6f)
+            val ratio = (EmoteAspect[url] ?: 1f).coerceIn(0.2f, 6f)
             val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
             InlineTextContent(
                 Placeholder(
@@ -152,7 +174,7 @@ private fun inlineEmotes(
                         if (size.width > 0f && size.height > 0f &&
                             size.width.isFinite() && size.height.isFinite()
                         ) {
-                            EmoteAspect.record(url, size.width / size.height)
+                            if (EmoteAspect.record(url, size.width / size.height)) aspectVersion++
                         }
                     }
                 )

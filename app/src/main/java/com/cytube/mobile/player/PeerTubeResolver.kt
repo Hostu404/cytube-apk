@@ -32,6 +32,12 @@ object PeerTubeResolver {
 
     private val cache = TimedCache<String, Resolved>(ttlMs = 10 * 60 * 1000L, evictAboveSize = 50)
 
+    /** Drops a cached URL for [id] after playback of it failed, so the
+     *  next attempt (rejoining, or the item coming round again) resolves a
+     *  fresh one instead of reusing the dead link until the cache expires.
+     *  Called from ChannelViewModel.reportPlaybackFailure. */
+    fun invalidate(id: String) = cache.remove(id)
+
     suspend fun resolve(http: OkHttpClient, id: String): Result<Resolved> = withContext(Dispatchers.IO) {
         val parts = id.split(";", limit = 2)
         if (parts.size != 2) {

@@ -73,6 +73,12 @@ object YouTubeResolver {
     // charset validation before hitting NewPipeExtractor.
     private val SAFE_VIDEO_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
 
+    /** Drops a cached URL for [videoId] after playback of it failed, so the
+     *  next attempt (rejoining, or the item coming round again) resolves a
+     *  fresh one instead of reusing the dead link until the cache expires.
+     *  Called from ChannelViewModel.reportPlaybackFailure. */
+    fun invalidate(videoId: String) = cache.remove(videoId)
+
     suspend fun resolve(videoId: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_VIDEO_ID_REGEX.matches(videoId)) {
             Log.w(TAG, "rejected malformed YouTube video id: $videoId")

@@ -43,14 +43,22 @@
              adjustResize with no window-level resize actually happening
              (edge-to-edge) means Compose's own imePadding()/WindowInsets.ime
              is the ONLY thing moving anything, so there's exactly one shift,
-             not two. -->
+             not two.
+
+             configChanges covers everything the UI can react to on its own
+             (Compose re-reads configuration, density and dark mode itself).
+             Any change NOT listed here recreates the Activity, which tears
+             down and rebuilds the player: dark mode switching on at sunset
+             (uiMode), a font-size or language change, or a Bluetooth
+             keyboard/gamepad connecting (keyboard/navigation). On TV a
+             recreation also runs onStop, which exits the app. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:supportsPictureInPicture="true"
             android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|layoutDirection"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|layoutDirection|uiMode|density|fontScale|locale|keyboard|navigation|touchscreen"
             android:banner="@drawable/tv_banner"
             android:theme="@style/Theme.CyTube"
             android:windowSoftInputMode="adjustResize">

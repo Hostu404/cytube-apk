@@ -27,6 +27,14 @@ interface PlayerHandle {
     /** Estimated throughput in bits per second, if available from the backend. */
     val estimatedBitrate: Long? get() = null
 
+    /** Seconds of media buffered ahead of the playhead, or NaN if the backend
+     *  can't tell. SyncEngine won't speed-nudge a player that's nearly dry. */
+    val bufferedAheadSeconds: Double get() = Double.NaN
+
+    /** Small playback-rate adjustment SyncEngine uses to close moderate drift
+     *  without a seek. Backends that can't do it just ignore it. */
+    fun setPlaybackRate(rate: Float) {}
+
     /** [qualityIndex] indexes into media.direct (already sorted
      *  highest-to-lowest — see DirectSource.parse), for the NATIVE backend's
      *  own lightweight quality auto-adaptation (see ChannelViewModel's
