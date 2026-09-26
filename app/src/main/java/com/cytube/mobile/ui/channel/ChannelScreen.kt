@@ -191,7 +191,7 @@ fun ChannelScreen(
     val onCancelPm = remember(vm) { vm::cancelPm }
 
     // The single player surface, hoisted so it survives moving between the
-    // compact layout, the fullscreen layout and the PiP layout below. Before
+    // compact layout and the fullscreen layout (which PiP also uses). Before
     // this, each of those was a structurally different composable subtree, so
     // toggling fullscreen made Compose tear down and rebuild the whole
     // ExoPlayer from scratch (see ExoSurface's remember { ExoPlayer... }) —
@@ -287,9 +287,7 @@ fun ChannelScreen(
     // exposes the current value, never the transition. Written and read
     // synchronously in the same pass (not via a LaunchedEffect) so
     // `fullscreen` is already true by the time this same composition
-    // decides, further down, which branch to render — see the note by
-    // settlingFromPip below for why a one-frame-later async flip was
-    // actually making things worse, not better.
+    // decides, further down, which branch to render.
     var wasInPip by remember { mutableStateOf(isInPictureInPicture) }
     val justExitedPip = wasInPip && !isInPictureInPicture
     if (wasInPip != isInPictureInPicture) wasInPip = isInPictureInPicture
@@ -302,59 +300,6 @@ fun ChannelScreen(
     // the physical orientation at the moment (see the guard on
     // lastOrientation below for why that alone isn't reliable either).
     if (justExitedPip) fullscreen = true
-
-    // The single biggest remaining suspect for "expand from PiP crashes or
-    // closes the app": the moment isInPictureInPicture flips to false is
-    // also the moment the SYSTEM starts its own window-resize animation
-    // back to full size. Reparenting the player's TextureView between
-    // Compose hosts (PiP's Box -> the compact layout -> FullscreenPlayer,
-    // or straight to FullscreenPlayer once `fullscreen` above is already
-    // true) is itself a real view-tree change, and doing that WHILE the
-    // window is still being resized by the system stacks two independent
-    // animations of the same surface on top of each other. A previous fix
-    // here flipped `fullscreen` one async hop later (a LaunchedEffect), which
-    // actually made this worse: it turned one structural move into two in
-    // quick succession (PiP Box -> compact Box -> FullscreenPlayer Box)
-    // instead of one. Freezing this screen on the PiP-only Box — the exact
-    // same content, not reparented at all — for a short settle window after
-    // isInPictureInPicture goes false means the player isn't touched until
-    // the system's own transition has had time to finish, and by the time
-    // it is touched, `fullscreen` (set synchronously above) is already
-    // correct, so there is exactly one move, not two.
-    // `settlingFromPip` itself has to flip to true in the SAME synchronous
-    // pass as `fullscreen` above, not inside the LaunchedEffect below — a
-    // LaunchedEffect's body only starts running after this composition
-    // commits, so if the "= true" lived there, there was exactly one
-    // recomposition (the one where isInPictureInPicture first goes false)
-    // where isInPictureInPicture was already false AND settlingFromPip was
-    // still its old value of false. On that one frame the guard below is
-    // false, so playerContent() got moved straight out of the PiP Box into
-    // FullscreenPlayer's Box while the system's own PiP-exit window
-    // animation was still running — and one recomposition later, once the
-    // effect's `settlingFromPip = true` landed, it got moved straight back
-    // into the PiP Box, then forward again 220ms after that. That extra
-    // there-and-back move of the same movableContentOf-hoisted player
-    // content (see playerContent's own comment above) is what was tripping
-    // Compose's "Cannot insert LayoutNode... because it already has a
-    // parent" crash on expand-from-PiP — not the single clean move this was
-    // written to produce. Setting it synchronously here, exactly like
-    // `fullscreen` just above, closes that gap: both flip in the same pass
-    // isInPictureInPicture does, so the PiP Box stays the host without
-    // interruption until the (still-async) timeout below hands it off.
-    var settlingFromPip by remember { mutableStateOf(false) }
-    if (justExitedPip) settlingFromPip = true
-    // Keyed on the flag itself, not on justExitedPip: that is true for one
-    // composition only, and writing wasInPip above schedules another
-    // straight away — which changed this effect's key back to false and
-    // cancelled the delay, so the flag was never cleared and the screen
-    // stayed on the PiP-only layout (video, no chat or controls) until the
-    // channel was left.
-    LaunchedEffect(settlingFromPip) {
-        if (settlingFromPip) {
-            delay(220)
-            settlingFromPip = false
-        }
-    }
 
     // Fullscreen: prefer landscape, hide chrome, restore cleanly on exit.
     // "Chrome" here includes Android's own system bars — without hiding
@@ -483,40 +428,6 @@ fun ChannelScreen(
             fullscreen -> fullscreen = false
             openPanel != null -> openPanel = null
         }
-    }
-
-    // Picture-in-picture: just the video, full-bleed. The system draws its
-    // own chrome (the play/pause action wired up in MainActivity) around
-    // this, so there is nothing else to render here — and nothing from this
-    // screen leaks into the floating window when the channel changes, since
-    // switching channels recomposes ChannelScreen with a new vm/state
-    // entirely.
-    //
-    // `settlingFromPip` keeps this exact branch (and therefore the exact
-    // same host for playerContent()) active for a short window after PiP
-    // actually ends too — see the comment above where it's set for why.
-    // This has to stay UNCONDITIONAL (not gated on `fullscreen` or anything
-    // else): the whole point of the settle window is to hold playerContent()
-    // on this exact host for a fixed stretch after PiP exits, because the
-    // system's own PiP-exit resize (and often a coincident rotation change)
-    // is still animating the window during that stretch. Backing out of
-    // fullscreen during that window used to fall straight through to the
-    // compact Scaffold immediately, which meant Compose reparented the
-    // `movableContentOf`-hoisted playerContent() into a different host
-    // while that system transition was still in flight — confirmed via a
-    // crash log: `IllegalStateException: Cannot insert LayoutNode ...
-    // because it already has a parent`, thrown from inside Scaffold's
-    // SubcomposeLayout pass, concurrent with a system CHANGE/rotation
-    // transition right after the PiP-exit CLOSE transition. The fix is to
-    // just let the settle timer run out on its own — the back press still
-    // sets `fullscreen = false` immediately (see BackHandler above), it
-    // just doesn't visually leave this box until settlingFromPip clears,
-    // which is a brief black-box flicker rather than a crash.
-    if (isInPictureInPicture || settlingFromPip) {
-        Box(Modifier.fillMaxSize().background(Color.Black)) {
-            playerContent()
-        }
-        return
     }
 
     // Fire TV / Android TV: no title bar, no bottom playlist/users/poll bar —
@@ -686,8 +597,17 @@ fun ChannelScreen(
         return
     }
 
-    if (fullscreen) {
+    // Fullscreen, and picture-in-picture too: one layout for both, so going
+    // into PiP from fullscreen, or expanding PiP (which lands in fullscreen,
+    // see justExitedPip above), never moves the player between layouts. It
+    // used to have a PiP-only layout, and moving the player out of it into
+    // this one while the window was still resizing crashed Compose ("Cannot
+    // insert LayoutNode ... because it already has a parent"). In PiP the
+    // controls, chat overlay and PM notice are hidden — the system draws its
+    // own play/pause (wired up in MainActivity).
+    if (fullscreen || isInPictureInPicture) {
         FullscreenPlayer(
+            inPip = isInPictureInPicture,
             state = state,
             controlsVisible = controlsVisible,
             onToggleControls = { controlsVisible = !controlsVisible },
@@ -1829,6 +1749,7 @@ private fun TvPlaylistView(
 
 @Composable
 private fun FullscreenPlayer(
+    inPip: Boolean,
     state: ChannelUiState,
     controlsVisible: Boolean,
     onToggleControls: () -> Unit,
@@ -1864,7 +1785,7 @@ private fun FullscreenPlayer(
     ) {
         playerContent()
 
-        if (chatOverlayOn) {
+        if (chatOverlayOn && !inPip) {
             // Fills the whole screen itself (danmaku-style comments fly the
             // full width, on lanes spanning the full height), so no
             // alignment/sizing to set here beyond the default. Independent
@@ -1883,7 +1804,7 @@ private fun FullscreenPlayer(
             )
         }
 
-        AnimatedVisibility(visible = controlsVisible, enter = fadeIn(), exit = fadeOut()) {
+        AnimatedVisibility(visible = controlsVisible && !inPip, enter = fadeIn(), exit = fadeOut()) {
             Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
                 Row(
                     Modifier.align(Alignment.TopStart).padding(12.dp),
@@ -1908,7 +1829,7 @@ private fun FullscreenPlayer(
 
         // Stays up regardless of the auto-hiding controls: it's the only sign
         // of a new PM while chat is off screen.
-        state.unreadPm?.let { unread ->
+        if (!inPip) state.unreadPm?.let { unread ->
             Surface(
                 onClick = onOpenPm,
                 shape = RoundedCornerShape(50),
