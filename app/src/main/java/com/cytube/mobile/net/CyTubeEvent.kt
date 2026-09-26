@@ -42,12 +42,15 @@ sealed interface CyTubeEvent {
     data class EmoteRenamed(val oldName: String, val emote: Emote) : CyTubeEvent
     data class EmoteRemoved(val name: String) : CyTubeEvent
     data class PermissionsChanged(val permissions: Permissions) : CyTubeEvent
+    /** The server refused a "queue" request (bad link, not allowed, rate
+     *  limited...). [id] is the media id it was about, when given. */
+    data class QueueFailed(val message: String, val id: String?) : CyTubeEvent
     data class MotdChanged(val html: String) : CyTubeEvent
 
     /** Sent both when a poll is actually created and to bring a joining
      *  client up to date on one already running. */
     data class PollOpened(val poll: Poll) : CyTubeEvent
-    data class PollUpdated(val counts: List<Int>) : CyTubeEvent
+    data class PollUpdated(val counts: List<Int>, val hiddenFromOthers: Boolean = false) : CyTubeEvent
     data object PollClosed : CyTubeEvent
     data class ChannelOptions(val raw: JSONObject) : CyTubeEvent
     data class Announcement(val title: String, val html: String) : CyTubeEvent

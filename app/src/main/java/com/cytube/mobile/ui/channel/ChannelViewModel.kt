@@ -31,8 +31,54 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 enum class ConnectionState { CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, FAILED }
+
+/**
+ * Poll votes cast from this app, kept for the rest of the app session, so
+ * leaving a channel (or dropping connection) and coming back doesn't lose them.
+ *
+ * CyTube removes a user's vote when they leave the channel, unless the poll
+ * was created with "keep votes" — a setting the server never sends to
+ * viewers. So when the same poll is sent again on rejoin, the app casts the
+ * same vote again (see ChannelViewModel's PollOpened handling). If the server
+ * did keep it, re-casting the same choice changes nothing.
+ */
+private object PollVoteMemory {
+    private val votes = LinkedHashMap<String, Int>()
+    private val announced = LinkedHashSet<String>()
+    private const val MAX = 50
+
+    /** True the first time a poll is seen this app session. The server
+     *  re-sends the open poll every time you join a channel, and the
+     *  "opened a poll" chat notice was repeating on every rejoin. */
+    @Synchronized fun firstSighting(key: String): Boolean {
+        if (!announced.add(key)) return false
+        while (announced.size > MAX) announced.remove(announced.first())
+        return true
+    }
+
+    @Synchronized fun get(key: String): Int? = votes[key]
+
+    @Synchronized fun put(key: String, option: Int) {
+        votes.remove(key)
+        votes[key] = option
+        while (votes.size > MAX) votes.remove(votes.keys.first())
+    }
+}
+
+/** Identifies one poll in one channel, across rejoins (the server keeps its
+ *  creation timestamp). */
+private fun pollVoteKey(channel: String, poll: Poll) = "$channel|${poll.timestamp}|${poll.title}"
+
+/** Private messages received that haven't been seen yet — see
+ *  ChannelViewModel.markPmsRead. [from] is the most recent sender. */
+data class UnreadPm(val from: String, val count: Int)
+
+/** Progress/result of adding a video from the playlist panel's link box. */
+data class QueueStatus(val message: String, val isError: Boolean = false, val inProgress: Boolean = false)
 
 data class ChannelUiState(
     val channel: String = "",
@@ -114,8 +160,14 @@ data class ChannelUiState(
      *  stopPersonalPick) so a downgrade never outlives the item that caused
      *  it. Meaningless for any player type other than NATIVE. */
     val nativeQualityIndex: Int = 0,
-    /** The channel's currently running poll, or null when none is active. */
+    /** The channel's current poll, or the last one after it closes (see
+     *  Poll.closed) until the next opens or it's dismissed; null if none. */
     val poll: Poll? = null,
+    /** Whether the channel's "pollvote" permission lets us vote. The server
+     *  silently ignores votes from anyone below it, so the panel disables
+     *  voting rather than showing a vote that was never counted. True until
+     *  the channel's permissions arrive. */
+    val canVotePoll: Boolean = true,
     /** Which option the local user tapped this session. The server has no
      *  "your vote" field (see CyTube's own client, which tracks this the same
      *  way — button state only), so this is reset whenever the poll changes. */
@@ -137,7 +189,21 @@ data class ChannelUiState(
     /** The channel's own real current item, kept up to date by every
      *  changeMedia even while [personalPickActive] is true and [media] is
      *  showing something else entirely — see onMediaChanged/stopPersonalPick. */
-    val channelCurrentMedia: MediaFrame? = null
+    val channelCurrentMedia: MediaFrame? = null,
+    /** Whether this user may add videos / add them to play next, per the
+     *  channel's permissions, their rank and whether the playlist is locked
+     *  (see ChannelViewModel.refreshQueuePermissions). The server silently
+     *  ignores a queue request from someone without permission, so the add
+     *  box is only shown when this is true. */
+    val canQueue: Boolean = false,
+    val canQueueNext: Boolean = false,
+    /** Shown under the playlist panel's add box; null when there's nothing to say. */
+    val queueStatus: QueueStatus? = null,
+    /** Who the chat box is currently sending private messages to, or null
+     *  for normal public chat — see startPm/cancelPm. Phone only; TV never
+     *  sets it. */
+    val pmTarget: String? = null,
+    val unreadPm: UnreadPm? = null
 ) {
     val isLeader: Boolean get() = leader != null && leader == localUser
 }
@@ -348,7 +414,21 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
 
-                is CyTubeEvent.RankChanged -> update { it.copy(localRank = event.rank) }
+                is CyTubeEvent.RankChanged -> {
+                    update { it.copy(localRank = event.rank) }
+                    refreshPermissions()
+                }
+                is CyTubeEvent.PermissionsChanged -> {
+                    channelPermissions = event.permissions
+                    refreshPermissions()
+                }
+                is CyTubeEvent.PlaylistLocked -> {
+                    playlistOpen = !event.locked
+                    refreshPermissions()
+                }
+                is CyTubeEvent.QueueFailed ->
+                    if (pendingQueueJob?.isActive == true) finishQueue(QueueStatus(event.message, isError = true))
+                    else showTransientStatus(event.message)
 
                 is CyTubeEvent.MediaChanged -> onMediaChanged(event.media)
                 is CyTubeEvent.MediaTimeUpdate -> {
@@ -366,10 +446,21 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.toPersistentList()) }
                 is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid) }
-                is CyTubeEvent.ItemQueued -> update { s ->
-                    val idx = s.playlist.indexOfFirst { it.uid == event.afterUid }
-                    val next = if (idx >= 0) s.playlist.add(idx + 1, event.item) else s.playlist.add(event.item)
-                    s.copy(playlist = next)
+                is CyTubeEvent.ItemQueued -> {
+                    update { s ->
+                        val idx = s.playlist.indexOfFirst { it.uid == event.afterUid }
+                        val next = if (idx >= 0) s.playlist.add(idx + 1, event.item) else s.playlist.add(event.item)
+                        s.copy(playlist = next)
+                    }
+                    // Our own add landing. Matched on who queued it rather
+                    // than the media id: a YouTube playlist link arrives as
+                    // many items, none with the playlist's id.
+                    val me = _state.value.localUser
+                    if (pendingQueueJob?.isActive == true && me != null &&
+                        event.item.queueby.equals(me, ignoreCase = true)
+                    ) {
+                        finishQueue(QueueStatus("Added: ${event.item.title}"))
+                    }
                 }
                 is CyTubeEvent.ItemDeleted -> update { s ->
                     s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
@@ -408,7 +499,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             // Shadow-muted messages are only meant for moderators; the
                             // server already filters delivery, but drop them defensively.
                             if (event.message.shadow && s.localRank < 2) s
-                            else s.copy(messages = appendChat(s.messages, event.message))
+                            else s.copy(
+                                messages = appendChat(s.messages, event.message),
+                                unreadPm = nextUnreadPm(s, event.message)
+                            )
                         }
                     }
                 }
@@ -448,17 +542,47 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.MotdChanged -> update { it.copy(motd = event.html) }
 
-                is CyTubeEvent.PollOpened ->
+                is CyTubeEvent.PollOpened -> {
                     update { it.copy(poll = event.poll, myPollVote = null) }
+                    // Back in a poll we'd already voted in (rejoined, or the
+                    // connection dropped): the server removed that vote when
+                    // we left, so cast it again — see PollVoteMemory.
+                    PollVoteMemory.get(pollVoteKey(_state.value.channel, event.poll))?.let { option ->
+                        if (option in event.poll.options.indices && _state.value.canVotePoll) {
+                            client.vote(option)
+                            update { it.copy(myPollVote = option) }
+                        }
+                    }
+                    // The website announces a new poll in chat; the app only
+                    // showed a bottom-bar button, easy to miss while typing
+                    // or in fullscreen. Once per poll per app session: the
+                    // server re-sends the open poll on every (re)join.
+                    val p = event.poll
+                    if (PollVoteMemory.firstSighting(pollVoteKey(_state.value.channel, p))) {
+                        appendLocalNotice(
+                            ChatMessage(
+                                username = "",
+                                html = "${escapeHtml(p.initiator.ifBlank { "Someone" })} opened a poll: " +
+                                    "\"${escapeHtml(unwrapImageTags(p.title))}\"",
+                                timestamp = p.timestamp,
+                                addClass = null,
+                                shadow = false
+                            )
+                        )
+                    }
+                }
                 is CyTubeEvent.PollUpdated -> update { s ->
                     val current = s.poll ?: return@update s
                     // Positional: server sends counts parallel to the options
                     // already on screen, so pad/truncate to match rather than
                     // trust the incoming length blindly.
                     val counts = List(current.options.size) { i -> event.counts.getOrElse(i) { -1 } }
-                    s.copy(poll = current.copy(counts = counts))
+                    s.copy(poll = current.copy(counts = counts, hiddenFromOthers = event.hiddenFromOthers))
                 }
-                is CyTubeEvent.PollClosed -> update { it.copy(poll = null, myPollVote = null) }
+                // Kept, marked closed, rather than dropped: the server sends
+                // a hidden poll's real counts right before closing it, and
+                // dropping it here meant nobody in the app ever saw them.
+                is CyTubeEvent.PollClosed -> update { it.copy(poll = it.poll?.copy(closed = true)) }
 
                 is CyTubeEvent.ErrorMessage -> showTransientStatus(event.message)
 
@@ -1105,9 +1229,43 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- actions ----
 
+    /** Public chat, or a private message while a PM target is set. */
     fun sendChat(text: String) {
         if (text.isBlank()) return
-        client.sendChat(text.trim())
+        val target = _state.value.pmTarget
+        if (target != null) client.sendPm(target, text.trim())
+        else client.sendChat(text.trim())
+    }
+
+    // ---- private messages ----
+
+    /** Switches the chat box to private messages to [name]. Replying to or
+     *  opening a PM also counts as reading that person's unread ones. */
+    fun startPm(name: String) {
+        val me = _state.value.localUser ?: return   // not joined with a name yet
+        if (name.isBlank() || name.equals(me, ignoreCase = true)) return
+        update {
+            it.copy(
+                pmTarget = name,
+                unreadPm = it.unreadPm?.takeUnless { u -> u.from.equals(name, ignoreCase = true) }
+            )
+        }
+    }
+
+    fun cancelPm() = update { it.copy(pmTarget = null) }
+
+    fun markPmsRead() = update { if (it.unreadPm == null) it else it.copy(unreadPm = null) }
+
+    private fun nextUnreadPm(s: ChannelUiState, message: ChatMessage): UnreadPm? {
+        if (!message.isPm) return s.unreadPm
+        val me = s.localUser
+        if (me != null && message.username.equals(me, ignoreCase = true)) return s.unreadPm   // our own, echoed
+        val previous = s.unreadPm
+        return if (previous != null && previous.from.equals(message.username, ignoreCase = true)) {
+            previous.copy(count = previous.count + 1)
+        } else {
+            UnreadPm(message.username, (previous?.count ?: 0) + 1)
+        }
     }
 
     fun submitPassword(pw: String) = client.sendPassword(pw)
@@ -1239,6 +1397,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * the numbers and will correct this if the vote is rejected.
      */
     fun votePoll(option: Int) {
+        val s = _state.value
+        val poll = s.poll ?: return
+        if (poll.closed || !s.canVotePoll || option !in poll.options.indices) return
+        PollVoteMemory.put(pollVoteKey(s.channel, poll), option)
         update { it.copy(myPollVote = option) }
         client.vote(option)
     }
@@ -1302,6 +1464,124 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private var transientStatusJob: Job? = null
 
+    // ---- adding videos ----
+
+    private var channelPermissions: Permissions? = null
+    /** CyTube's "open playlist" (unlocked) state; see Permissions.allowsPlaylistAction. */
+    private var playlistOpen = false
+    /** Waiting on the server's answer to our last queue request; also the timeout. */
+    private var pendingQueueJob: Job? = null
+    private var queueStatusClearJob: Job? = null
+
+    private fun refreshPermissions() {
+        val perms = channelPermissions
+        val rank = _state.value.localRank
+        val canAdd = perms?.allowsPlaylistAction("playlistadd", rank, playlistOpen) == true
+        val canNext = canAdd && perms?.allowsPlaylistAction("playlistnext", rank, playlistOpen) == true
+        val canVote = perms?.allows("pollvote", rank) ?: true
+        update {
+            if (it.canQueue == canAdd && it.canQueueNext == canNext && it.canVotePoll == canVote) it
+            else it.copy(canQueue = canAdd, canQueueNext = canNext, canVotePoll = canVote)
+        }
+    }
+
+    /** Clears a closed poll from the panel (a running one can't be dismissed). */
+    fun dismissPoll() = update {
+        if (it.poll?.closed == true) it.copy(poll = null, myPollVote = null) else it
+    }
+
+    /** Puts a message generated by the app itself (not the server) into
+     *  chat, through the same dedupe as real messages. */
+    private fun appendLocalNotice(message: ChatMessage) {
+        if (!seenChatFingerprints.add(message.fingerprint())) return
+        if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
+            seenChatFingerprints.remove(seenChatFingerprints.first())
+        }
+        update { it.copy(messages = appendChat(it.messages, message)) }
+    }
+
+    private fun escapeHtml(text: String): String = text
+        .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+    /**
+     * Adds a pasted link to the channel's playlist, at the end or to play
+     * next. Returns false (and says why under the box) if the link isn't one
+     * CyTube can take, so the panel keeps the text for the user to fix.
+     */
+    fun queueLink(link: String, playNext: Boolean): Boolean {
+        val s = _state.value
+        if (!s.canQueue || (playNext && !s.canQueueNext)) return false
+        if (s.connection != ConnectionState.CONNECTED) {
+            setQueueStatus(QueueStatus("Not connected to the channel.", isError = true))
+            return false
+        }
+        val parsed = MediaLink.parse(link).getOrElse {
+            setQueueStatus(QueueStatus(it.message ?: "Couldn't read that link.", isError = true))
+            return false
+        }
+        queueStatusClearJob?.cancel()
+        if (MediaLink.shouldFollowRedirects(parsed)) {
+            // A short/redirect link (t.co, bit.ly, on.soundcloud.com…) from a
+            // share sheet: find out where it really goes, then add THAT, so
+            // it reaches the server as e.g. a YouTube video rather than as a
+            // "raw file" it would reject.
+            update { it.copy(queueStatus = QueueStatus("Checking link…", inProgress = true)) }
+            viewModelScope.launch {
+                val finalUrl = withContext(Dispatchers.IO) { finalUrlAfterRedirects(parsed.id) }
+                val target = finalUrl?.let { MediaLink.parse(it).getOrNull() } ?: parsed
+                if (target != parsed) Log.i(TAG, "queue: ${parsed.id} redirects to ${target.type}:${target.id}")
+                submitQueue(target, playNext)
+            }
+        } else {
+            submitQueue(parsed, playNext)
+        }
+        return true
+    }
+
+    /** Where [url] ends up after its redirects, or null if that couldn't be
+     *  found out (offline, timeout...) — the caller then uses the link as is.
+     *  HEAD, so no page or file body is downloaded; OkHttp follows the
+     *  redirects itself and the final request's address is the answer. */
+    private fun finalUrlAfterRedirects(url: String): String? = runCatching {
+        val request = Request.Builder().url(url).head().build()
+        redirectHttp.newCall(request).execute().use { it.request.url.toString() }
+    }.getOrNull()
+
+    private val redirectHttp by lazy {
+        Graph.http.newBuilder().callTimeout(8, TimeUnit.SECONDS).build()
+    }
+
+    private fun submitQueue(parsed: MediaLink.Parsed, playNext: Boolean) {
+        client.queue(parsed.id, parsed.type, atEnd = !playNext)
+        update { it.copy(queueStatus = QueueStatus("Adding…", inProgress = true)) }
+        pendingQueueJob?.cancel()
+        pendingQueueJob = viewModelScope.launch {
+            delay(QUEUE_TIMEOUT_MS)
+            // The server answers every accepted or refused request, EXCEPT a
+            // refusal for lacking permission, which it drops silently.
+            finishQueue(QueueStatus(
+                "No reply from the channel. You may not be allowed to add videos right now.",
+                isError = true
+            ))
+        }
+    }
+
+    private fun finishQueue(status: QueueStatus) {
+        pendingQueueJob?.cancel()
+        pendingQueueJob = null
+        setQueueStatus(status)
+    }
+
+    /** Sets the add box's status line; results clear themselves after a while. */
+    private fun setQueueStatus(status: QueueStatus) {
+        update { it.copy(queueStatus = status) }
+        queueStatusClearJob?.cancel()
+        queueStatusClearJob = viewModelScope.launch {
+            delay(if (status.isError) QUEUE_ERROR_VISIBLE_MS else QUEUE_RESULT_VISIBLE_MS)
+            update { if (it.queueStatus == status) it.copy(queueStatus = null) else it }
+        }
+    }
+
     /**
      * Server error notices (errorMsg / validationError / queueFail — "queue
      * failed", chat rate limits and the like) share statusMessage with the
@@ -1341,6 +1621,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         /** How long a server error notice stays in the header — see
          *  showTransientStatus. */
         const val TRANSIENT_STATUS_MS = 6_000L
+
+        /** See queueLink. The server normally answers within a second or two
+         *  (YouTube lookups included). */
+        const val QUEUE_TIMEOUT_MS = 12_000L
+        const val QUEUE_RESULT_VISIBLE_MS = 4_000L
+        const val QUEUE_ERROR_VISIBLE_MS = 8_000L
 
         /** Minimum time between actual [refresh] runs — the anti-spam gate
          *  on tapping the channel name. Comfortably longer than the 600ms

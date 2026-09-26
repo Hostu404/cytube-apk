@@ -35,6 +35,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -54,6 +55,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -199,6 +201,9 @@ fun ChannelScreen(
     val onPersonalPick = remember(vm) { vm::pickPersonal }
     val onPlaybackEnded = remember(vm) { vm::onPlaybackEnded }
     val onPlaybackStall = remember(vm) { vm::onPlaybackStall }
+    val onQueueLink = remember(vm) { vm::queueLink }
+    val onStartPm = remember(vm) { vm::startPm }
+    val onCancelPm = remember(vm) { vm::cancelPm }
 
     // The single player surface, hoisted so it survives moving between the
     // compact layout, the fullscreen layout and the PiP layout below. Before
@@ -708,9 +713,22 @@ fun ChannelScreen(
             onExit = { fullscreen = false },
             chatOverlayOn = chatOverlayOn,
             nekoState = nekoState,
-            playerContent = playerContent
+            playerContent = playerContent,
+            // Chat isn't on screen in fullscreen, so a new PM gets a pill;
+            // tapping it drops back to the windowed layout ready to reply.
+            onOpenPm = {
+                state.unreadPm?.from?.let(onStartPm)
+                vm.markPmsRead()
+                fullscreen = false
+            }
         )
         return
+    }
+
+    // Windowed phone layout: chat is right there below the video, so a PM
+    // that arrives now is seen as it lands.
+    LaunchedEffect(state.unreadPm) {
+        if (state.unreadPm != null) vm.markPmsRead()
     }
 
     CyTubeChannelTheme {
@@ -834,6 +852,7 @@ fun ChannelScreen(
                     userCount = state.userCount,
                     playlistCount = state.playlist.size,
                     pollOpen = state.poll != null,
+                    pollClosed = state.poll?.closed == true,
                     onOpen = { openPanel = it }
                 )
             }
@@ -1033,6 +1052,11 @@ fun ChannelScreen(
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
                 onSend = onSendChat,
+                highlightName = state.localUser,
+                // PMs need a name to send as (guests count, once joined).
+                onStartPm = if (state.localUser != null) onStartPm else null,
+                pmTarget = state.pmTarget,
+                onCancelPm = onCancelPm,
                 modifier = Modifier.weight(1f)
             )
         }
@@ -1052,16 +1076,30 @@ fun ChannelScreen(
                     syncEnabled = state.syncEnabled,
                     personalPickUid = state.personalPickUid,
                     onPersonalPick = onPersonalPick,
+                    // Phone only by construction (TV has its own playlist
+                    // view and returns before this layout), but explicit so
+                    // it can't leak onto TV, where a text box here would be
+                    // the same kind of D-pad trap the search box once was.
+                    canAdd = state.canQueue && !isTv,
+                    canAddNext = state.canQueueNext,
+                    queueStatus = state.queueStatus,
+                    onAddLink = onQueueLink,
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
                 Panel.USERS -> UsersPanel(
                     users = state.users,
+                    localName = state.localUser,
+                    onStartPm = if (state.localUser != null) {
+                        { name -> onStartPm(name); openPanel = null }
+                    } else null,
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
                 Panel.POLL -> PollPanel(
                     poll = state.poll,
                     myVote = state.myPollVote,
                     onVote = vm::votePoll,
+                    canVote = state.canVotePoll,
+                    onDismiss = { vm.dismissPoll(); openPanel = null },
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
             }
@@ -1287,7 +1325,13 @@ private fun NowPlayingBar(title: String, leader: String?) {
  * so it only ever affects the touch UI.
  */
 @Composable
-private fun PanelBar(userCount: Int, playlistCount: Int, pollOpen: Boolean, onOpen: (Panel) -> Unit) {
+private fun PanelBar(
+    userCount: Int,
+    playlistCount: Int,
+    pollOpen: Boolean,
+    onOpen: (Panel) -> Unit,
+    pollClosed: Boolean = false
+) {
     // The stock NavigationBar this replaced pads itself for the system nav
     // bar automatically; a plain Surface doesn't, so on 3-button navigation
     // this row was sitting flush against the bottom edge and getting
@@ -1305,10 +1349,12 @@ private fun PanelBar(userCount: Int, playlistCount: Int, pollOpen: Boolean, onOp
                 Modifier.weight(1f)
             ) { onOpen(Panel.PLAYLIST) }
             PanelBarButton("Users ($userCount)", Modifier.weight(1f)) { onOpen(Panel.USERS) }
-            // Only shown while a poll is actually running — nothing to vote on
-            // otherwise, so the button would just open an empty panel.
+            // Only shown while there's a poll — running, or just closed with
+            // its final results (until the next one or it's dismissed).
             if (pollOpen) {
-                PanelBarButton("Poll", Modifier.weight(1f)) { onOpen(Panel.POLL) }
+                PanelBarButton(if (pollClosed) "Poll results" else "Poll", Modifier.weight(1f)) {
+                    onOpen(Panel.POLL)
+                }
             }
         }
     }
@@ -1574,6 +1620,7 @@ private fun TvChatView(
             showEmotes = state.showEmotes,
             emotes = state.emotes,
             onSend = onSendChat,
+            highlightName = state.localUser,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             // No D-pad interaction with individual messages on TV — the
             // list stays pinned to the latest message and is never a focus
@@ -1808,7 +1855,8 @@ private fun FullscreenPlayer(
     onExit: () -> Unit,
     chatOverlayOn: Boolean,
     nekoState: NekoOverlayState,
-    playerContent: @Composable () -> Unit
+    playerContent: @Composable () -> Unit,
+    onOpenPm: () -> Unit = {}
 ) {
     Box(
         Modifier.fillMaxSize().background(Color.Black)
@@ -1871,6 +1919,32 @@ private fun FullscreenPlayer(
                         state.media?.title.orEmpty(),
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // Stays up regardless of the auto-hiding controls: it's the only sign
+        // of a new PM while chat is off screen.
+        state.unreadPm?.let { unread ->
+            Surface(
+                onClick = onOpenPm,
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.MailOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (unread.count > 1) "PM from ${unread.from} (+${unread.count - 1})" else "PM from ${unread.from}",
+                        style = MaterialTheme.typography.labelLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )

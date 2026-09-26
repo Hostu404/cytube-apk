@@ -149,7 +149,11 @@ class CyTubeClient(
         }
         obj(s, "errorMsg") { CyTubeEvent.ErrorMessage(it.optString("msg", "Unknown error")) }
         obj(s, "validationError") { CyTubeEvent.ErrorMessage(it.optString("msg", "Validation error")) }
-        obj(s, "queueFail") { CyTubeEvent.ErrorMessage(it.optString("msg", "Queue failed")) }
+        obj(s, "queueFail") {
+            CyTubeEvent.QueueFailed(it.optString("msg", "Couldn't add that video"), it.optString("id").ifBlank { null })
+        }
+        // Added, but with a caveat (e.g. blocked in some countries).
+        obj(s, "queueWarn") { CyTubeEvent.ErrorMessage(it.optString("msg", "Added with a warning")) }
         obj(s, "announcement") {
             CyTubeEvent.Announcement(it.optString("title", ""), it.optString("text", ""))
         }
@@ -210,7 +214,10 @@ class CyTubeClient(
         obj(s, "newPoll") { CyTubeEvent.PollOpened(Poll.from(it)) }
         obj(s, "updatePoll") {
             val counts = it.optJSONArray("counts")
-            CyTubeEvent.PollUpdated(Poll.parseCounts(counts, counts?.length() ?: 0))
+            CyTubeEvent.PollUpdated(
+                Poll.parseCounts(counts, counts?.length() ?: 0),
+                Poll.countsHiddenFromOthers(counts)
+            )
         }
         s.on("closePoll") { emit(CyTubeEvent.PollClosed) }
     }
@@ -250,6 +257,16 @@ class CyTubeClient(
 
     fun sendChat(message: String) {
         socket?.emit("chatMsg", JSONObject().apply {
+            put("msg", message)
+            put("meta", JSONObject())
+        })
+    }
+
+    /** A private message. CyTube echoes it back to us as a "pm" frame too
+     *  (with `to` set), which is what puts it in our own chat. */
+    fun sendPm(to: String, message: String) {
+        socket?.emit("pm", JSONObject().apply {
+            put("to", to)
             put("msg", message)
             put("meta", JSONObject())
         })
