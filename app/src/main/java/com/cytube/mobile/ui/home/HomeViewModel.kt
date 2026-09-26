@@ -48,6 +48,16 @@ data class HomeUiState(
                 CHANNEL_NAME_REGEX.matches(q) &&
                 filtered.none { it.name.equals(q, true) }
         }
+
+    /** What the keyboard's Go key opens: the listed channel with exactly
+     *  this name (the direct-entry card is hidden then, which used to make
+     *  Go do nothing), or else the direct entry. */
+    val submitName: String?
+        get() {
+            val q = query.trim()
+            filtered.firstOrNull { it.name.equals(q, true) }?.let { return it.name }
+            return directEntryName
+        }
 }
 
 class HomeViewModel(app: Application) : AndroidViewModel(app) {

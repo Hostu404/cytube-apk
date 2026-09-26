@@ -52,12 +52,13 @@ fun HomeScreen(
     val focusManager = LocalFocusManager.current
     val initialFocusRequester = remember { FocusRequester() }
 
-    // Fires every time this composable is (re)composed -- which, under
-    // Navigation-Compose, is every time the homepage is actually navigated
-    // to, not just once: leaving "home" for a channel/login/settings screen
-    // tears this composable down, and coming back rebuilds it fresh. That
-    // makes this the one place responsible for "the public channel list
-    // should be current whenever the homepage is on screen" -- see
+    // Runs each time Home enters composition -- which, under
+    // Navigation-Compose, is every time the homepage is navigated to:
+    // leaving "home" for a channel/login/settings screen tears this
+    // composable down, and coming back rebuilds it fresh. (Not when the app
+    // returns from the background to Home; the list is refreshed next time
+    // Home is navigated to, or with the Refresh button.) That makes this
+    // the one place responsible for keeping the public channel list current -- see
     // HomeViewModel's own init{} doc comment for why refresh() was moved
     // here instead of living there. vm.refresh() (no force) still respects
     // ChannelIndexRepository's 60s cache, so bouncing in and out of a
@@ -119,7 +120,7 @@ fun HomeScreen(
                 SearchField(
                     query = state.query,
                     onQueryChange = vm::setQuery,
-                    onSubmit = { state.directEntryName?.let(onOpenChannel) },
+                    onSubmit = { state.submitName?.let(onOpenChannel) },
                     isTv = isTv
                 )
             }

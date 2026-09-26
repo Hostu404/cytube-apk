@@ -1,7 +1,6 @@
 package com.cytube.mobile
 
 import android.app.PictureInPictureParams
-import android.app.UiModeManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -11,7 +10,6 @@ import android.content.res.Configuration
 import android.graphics.drawable.Icon
 import android.app.PendingIntent
 import android.app.RemoteAction
-import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import androidx.activity.ComponentActivity
@@ -24,6 +22,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavType
@@ -47,18 +46,9 @@ import com.cytube.mobile.ui.theme.CyTubeTheme
 
 class MainActivity : ComponentActivity() {
 
-    private var fullscreen by mutableStateOf(false)
     private var pendingChannel by mutableStateOf<String?>(null)
     private var inPip by mutableStateOf(false)
     private var playbackHost by mutableStateOf<PlaybackHost?>(null)
-
-    /** True between onStop and onStart — Home/Recents/screen-off, but NOT
-     *  PiP (PiP keeps the Activity started, so onStop never fires for it;
-     *  see the class doc on onStop/onStart below). Read by ChannelScreen to
-     *  drop the ExoPlayer video track and back off the socket reconnect
-     *  cadence while nothing's on screen — see ChannelScreen's
-     *  isAppInBackground param and CyTubeClient.setBackgrounded. */
-    private var appInBackground by mutableStateOf(false)
 
     /** Last isPlaying value refreshPipParams() actually applied, so
      *  onPlaybackHostChange (which fires on every recomposition — every
@@ -78,7 +68,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         lastNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        pendingChannel = channelFromIntent(intent)
+        // Only on a fresh start: when Android recreates the Activity (e.g.
+        // after the process was killed in the background) it restores the
+        // screen stack itself, and re-reading the same launch link would
+        // open a second copy of the channel on top.
+        if (savedInstanceState == null) pendingChannel = channelFromIntent(intent)
 
         ContextCompat.registerReceiver(
             this,
@@ -109,11 +103,14 @@ class MainActivity : ComponentActivity() {
 
                 // Deep link support: a cytu.be/r/<channel> link (cold start or
                 // while the app is already running, via onNewIntent below)
-                // lands here once the nav graph exists to navigate on.
+                // lands here once the nav graph exists to navigate on. Any
+                // channel already open is closed first (popUpTo home): two
+                // open channels meant two connections, and for a logged-in
+                // user the server kicks one as a duplicate login.
                 val pending = pendingChannel
                 if (pending != null) {
                     androidx.compose.runtime.LaunchedEffect(pending) {
-                        nav.navigate("channel/$pending")
+                        nav.navigate("channel/$pending") { popUpTo("home") }
                         pendingChannel = null
                     }
                 }
@@ -149,9 +146,7 @@ class MainActivity : ComponentActivity() {
                         ChannelScreen(
                             channel = entry.arguments?.getString("name").orEmpty(),
                             onBack = { nav.popBackStack() },
-                            onFullscreenChange = { fullscreen = it },
                             isInPictureInPicture = inPip,
-                            isAppInBackground = appInBackground,
                             onPlaybackHostChange = { host ->
                                 playbackHost = host
                                 if (inPip && host != null && host.isPlaying != lastPipIsPlaying) {
@@ -161,13 +156,24 @@ class MainActivity : ComponentActivity() {
                             }
                         )
                     }
-                    composable("login") { LoginScreen(onBack = { nav.popBackStack() }) }
+                    composable("login") {
+                        // Same Appearance handling as home and settings.
+                        val context = LocalContext.current
+                        val isTv = remember { isTvDevice(context) }
+                        if (isTv) {
+                            LoginScreen(onBack = { nav.popBackStack() })
+                        } else {
+                            CyTubeSettingsTheme(darkTheme = isDark) {
+                                LoginScreen(onBack = { nav.popBackStack() })
+                            }
+                        }
+                    }
                     composable("settings") {
                         // Follows the Appearance setting (default: system
-                        // light/dark), unlike the rest of the app — per user
-                        // request, since this is a plain preferences screen
-                        // with no CyTube look to protect. See isDark above
-                        // and CyTubeSettingsTheme's doc comment.
+                        // light/dark), like home and login — the channel
+                        // screen keeps its own always-dark look. See isDark
+                        // above and CyTubeSettingsTheme's doc comment. (On TV
+                        // the option is hidden, so this is the system mode.)
                         CyTubeSettingsTheme(darkTheme = isDark) {
                             SettingsScreen(onBack = { nav.popBackStack() })
                         }
@@ -185,16 +191,14 @@ class MainActivity : ComponentActivity() {
 
     /**
      * PiP on leaving the app — but only while something is actually eligible
-     * for it (a native player showing video) and the user has the Settings
+     * for it (a Media3 player showing video) and the user has the Settings
      * toggle on. When it isn't (disabled, ineligible item, or the OS
-     * declines), playback is deliberately left alone rather than paused:
-     * Home/Recents should let video and audio keep playing in the
-     * background using ExoPlayer/NewPipe's own normal lifecycle, the same
-     * way PiP's floating window already does — not something this Activity
-     * has to drive. onStop()/onStart() below intentionally do nothing to
-     * *playback itself* (still no pause-on-background) — they only flip
-     * appInBackground, which trims what's decoded/how eagerly we reconnect
-     * while backgrounded. See its own doc comment.
+     * declines), playback is deliberately left alone rather than paused: it
+     * carries on in the background for as long as Android lets the app run
+     * (without a foreground service, Android usually freezes the app within
+     * seconds to minutes). onStop()/onStart() below only set AppVisibility,
+     * which ChannelViewModel uses to drop the video track while nothing's on
+     * screen and to keep the playlist moving while it can.
      */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
@@ -202,28 +206,30 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Home/Recents/screen-off — but NOT PiP: entering PiP keeps this
+     * Home/Recents/screen-off — but NOT entering PiP: that keeps this
      * Activity in the started state (that's what lets its video keep
-     * rendering into the floating window), so onStop() never fires while
-     * PiP is active, only once the user dismisses the PiP window too. No
+     * rendering into the floating window). It does fire when the PiP window
+     * is closed (see onPictureInPictureModeChanged), or the screen turns off
+     * with the PiP window up. No
      * new permission needed for any of this — it's plain Activity
-     * lifecycle plus an ExoPlayer track selection flip and a couple of
-     * socket.io Manager field writes, not a real foreground service (which
-     * would need FOREGROUND_SERVICE / FOREGROUND_SERVICE_MEDIA_PLAYBACK /
-     * POST_NOTIFICATIONS and wouldn't fit that constraint).
+     * lifecycle plus an ExoPlayer track selection flip, not a real
+     * foreground service (which would need FOREGROUND_SERVICE /
+     * FOREGROUND_SERVICE_MEDIA_PLAYBACK / POST_NOTIFICATIONS and wouldn't
+     * fit that constraint).
+     *
+     * AppVisibility rather than Compose state: Compose doesn't run while
+     * the Activity is stopped, so a Compose-state flag set here was never
+     * seen by anything until it had already flipped back.
      */
     override fun onStop() {
         super.onStop()
-        appInBackground = true
-
-        val uiModeManager = getSystemService(UI_MODE_SERVICE) as? UiModeManager
-        val isTv = uiModeManager?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
-                packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
-
         // Never while the Activity is only being recreated for a
-        // configuration change: onStop runs as part of that too, and exiting
-        // there would close the app instead of just rebuilding the screen.
-        if (isTv && !isChangingConfigurations) {
+        // configuration change: onStop runs as part of that too, but the app
+        // isn't leaving the screen — and on TV, exiting there would close
+        // the app instead of just rebuilding the screen.
+        if (isChangingConfigurations) return
+        AppVisibility.set(true)
+        if (isTvDevice(this)) {
             finishAndRemoveTask()
             System.exit(0)
         }
@@ -251,7 +257,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        appInBackground = false
+        AppVisibility.set(false)
     }
 
     override fun onDestroy() {
@@ -266,12 +272,18 @@ class MainActivity : ComponentActivity() {
         // so the next time PiP is active it gets synced fresh at least once,
         // rather than possibly skipping the very first update after re-entry.
         lastPipIsPlaying = null
+        // Leaving PiP with the Activity already stopped means the window was
+        // closed, not expanded (Android's documented way to tell them
+        // apart). Closing a video should stop it, not leave the sound
+        // playing with no screen.
+        if (!isInPictureInPictureMode) {
+            playbackHost?.onPipLeft?.invoke(lifecycle.currentState == Lifecycle.State.CREATED)
+        }
     }
 
     private fun maybeEnterPip(): Boolean {
         val host = playbackHost ?: return false
         if (!host.pipEnabled || !host.canPip) return false
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
         lastPipIsPlaying = host.isPlaying
         return runCatching { enterPictureInPictureMode(pipParams(host.isPlaying)) }.getOrDefault(false)
@@ -279,26 +291,24 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshPipParams() {
         val host = playbackHost ?: return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         runCatching { setPictureInPictureParams(pipParams(host.isPlaying)) }
     }
 
     private fun pipParams(isPlaying: Boolean): PictureInPictureParams {
-        val builder = PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val icon = Icon.createWithResource(
-                this,
-                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-            )
-            val pending = PendingIntent.getBroadcast(
-                this, 0,
-                Intent(ACTION_PIP_PLAY_PAUSE).setPackage(packageName),
-                PendingIntent.FLAG_IMMUTABLE
-            )
-            val label = if (isPlaying) "Pause" else "Play"
-            builder.setActions(listOf(RemoteAction(icon, label, label, pending)))
-        }
-        return builder.build()
+        val icon = Icon.createWithResource(
+            this,
+            if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        )
+        val pending = PendingIntent.getBroadcast(
+            this, 0,
+            Intent(ACTION_PIP_PLAY_PAUSE).setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE
+        )
+        val label = if (isPlaying) "Pause" else "Play"
+        return PictureInPictureParams.Builder()
+            .setAspectRatio(Rational(16, 9))
+            .setActions(listOf(RemoteAction(icon, label, label, pending)))
+            .build()
     }
 
     /** `https://cytu.be/r/<channel>` only; validated against CyTube's own

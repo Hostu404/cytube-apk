@@ -3,6 +3,7 @@ package com.cytube.mobile.player
 import android.content.Context
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
@@ -34,11 +35,21 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     // reach the process-wide singleton cache (Graph.mediaCache).
     private val appContext = context.applicationContext
 
-    @Volatile private var isReleased = false
+    @Volatile override var isReleased = false
+        private set
 
     override var mediaId: String? = null; private set
     override var mediaType: String? = null; private set
     override var mediaLengthSeconds: Int = 0; private set
+
+    /**
+     * Exactly what was last loaded (see [loadKey]), set only once a load has
+     * gone through. Lets the player surface skip loading something this
+     * handle already has: ChannelViewModel loads the next item itself while
+     * the app is in the background (the UI can't), and when the UI catches
+     * up it must not load that same item a second time and restart it.
+     */
+    var loadedKey: String? = null; private set
 
     override val isPaused: Boolean
         get() = if (isReleased) true else runCatching { !exo.playWhenReady }.getOrDefault(true)
@@ -52,12 +63,6 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         get() = if (isReleased) false else runCatching { exo.isPlaying }.getOrDefault(false)
 
     override val isNative: Boolean get() = true
-
-    override val estimatedBitrate: Long?
-        get() = if (isReleased) null else runCatching {
-            val estimate = DefaultBandwidthMeter.getSingletonInstance(appContext).bitrateEstimate
-            if (estimate > 0) estimate else null
-        }.getOrNull()
 
     /**
      * Every byte fetched for playback — whether the raw source straight off
@@ -153,6 +158,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             }
             exo.prepare()
             exo.playWhenReady = !media.paused
+            loadedKey = loadKey(media, url)
         }.onFailure { e ->
             Log.w("CyTubePlayer", "loadUrl failed in NativePlayerHandle: ${e.message}", e)
         }
@@ -164,7 +170,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * reported through the Media3 error listener instead, which lets the
      * channel offer Compatibility View rather than crashing.
      */
-    override fun load(media: MediaFrame, qualityIndex: Int) {
+    /** [qualityIndex] indexes into media.direct (sorted highest-to-lowest —
+     *  see DirectSource.parse), for ChannelViewModel's quality adaptation;
+     *  out of range, or no direct sources at all, falls back to
+     *  [MediaFrame.bestSource]. */
+    fun load(media: MediaFrame, qualityIndex: Int = 0) {
         if (isReleased) return
         val isQualityChange = (mediaId == media.id &&
             exo.playbackState != Player.STATE_ENDED &&
@@ -218,6 +228,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             }
             exo.prepare()
             exo.playWhenReady = !media.paused
+            loadedKey = loadKey(media, qualityIndex)
         }.onFailure { e ->
             Log.w("CyTubePlayer", "load failed in NativePlayerHandle: ${e.message}", e)
         }
@@ -315,6 +326,27 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         else runCatching { (exo.currentPosition / 1000.0).coerceAtLeast(0.0) }.getOrDefault(0.0)
     }
 
+    /**
+     * Turns video decoding off and on, leaving audio playing: off while the
+     * app is in the background (outside picture-in-picture), where decoding
+     * frames nobody can see just costs battery. Driven by ChannelViewModel
+     * from AppVisibility. It saves decoding, not data: YouTube streams and
+     * plain files carry sound and picture together, so the same bytes are
+     * downloaded either way. When video comes back on, the picture may take
+     * a moment to reappear (the sound carries on throughout).
+     */
+    fun setVideoEnabled(enabled: Boolean) {
+        if (isReleased) return
+        runCatching {
+            val params = exo.trackSelectionParameters
+            val disabled = C.TRACK_TYPE_VIDEO in params.disabledTrackTypes
+            if (disabled == !enabled) return
+            exo.trackSelectionParameters = params.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
+                .build()
+        }
+    }
+
     override fun setVolume(volume: Float) {
         if (isReleased) return
         if (volume.isNaN() || volume.isInfinite()) return
@@ -327,9 +359,17 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         runCatching { exo.release() }
     }
 
-    private companion object {
+    companion object {
         /** A target this close to the end of the buffer is treated as
          *  unbuffered: EXACT still needs data past it before it can resume. */
-        const val SEEK_BUFFER_MARGIN_MS = 1_000L
+        private const val SEEK_BUFFER_MARGIN_MS = 1_000L
+
+        /** Identifies a [load] of [media] at [qualityIndex]. */
+        fun loadKey(media: MediaFrame, qualityIndex: Int): String =
+            "${media.type}:${media.id}:q$qualityIndex"
+
+        /** Identifies a [loadUrl] of [media] from the resolved [url]. */
+        fun loadKey(media: MediaFrame, url: String): String =
+            "${media.type}:${media.id}:$url"
     }
 }

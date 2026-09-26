@@ -29,7 +29,6 @@
         android:banner="@drawable/tv_banner"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.CyTube">
 
@@ -45,20 +44,18 @@
              is the ONLY thing moving anything, so there's exactly one shift,
              not two.
 
-             configChanges covers everything the UI can react to on its own
-             (Compose re-reads configuration, density and dark mode itself).
-             Any change NOT listed here recreates the Activity, which tears
-             down and rebuilds the player: dark mode switching on at sunset
-             (uiMode), a font-size or language change, or a Bluetooth
-             keyboard/gamepad connecting (keyboard/navigation). On TV a
-             recreation also runs onStop, which exits the app. -->
+             configChanges lists every change the UI can react to on its own
+             (Compose re-reads configuration, density and dark mode itself;
+             MainActivity.onConfigurationChanged re-applies the status-bar
+             style). A change NOT listed here — rare ones like a SIM swap
+             (mcc/mnc) — recreates the Activity, which tears down and
+             rebuilds the player. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:supportsPictureInPicture="true"
-            android:resizeableActivity="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|layoutDirection|uiMode|density|fontScale|locale|keyboard|navigation|touchscreen"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|layoutDirection|uiMode|density|fontScale|fontWeightAdjustment|locale|keyboard|navigation|touchscreen"
             android:banner="@drawable/tv_banner"
             android:theme="@style/Theme.CyTube"
             android:windowSoftInputMode="adjustResize">
@@ -72,7 +69,7 @@
             </intent-filter>
 
             <!-- Open cytu.be channel links directly in the app. -->
-            <intent-filter android:autoVerify="false">
+            <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />

@@ -113,13 +113,8 @@ internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
  * recomposition via [onPlaybackHostChange], and cleared (null) when the
  * screen leaves composition entirely.
  *
- * Used to also carry onPauseForBackground/onResumeForForeground so the
- * Activity could pause playback on Home/Recents — removed along with that
- * behavior: leaving the app without entering PiP now simply lets playback
- * keep running in the background (see MainActivity's onStop/onStart, which
- * no longer do anything to it), same as PiP's own floating window already
- * did, instead of the screen going dark and silent every time you check
- * another app.
+ * Leaving the app without entering PiP doesn't pause anything: playback
+ * carries on in the background for as long as Android lets the app run.
  */
 data class PlaybackHost(
     val pipEnabled: Boolean,
@@ -127,7 +122,10 @@ data class PlaybackHost(
      *  (a whole web page, not a video) or no media loaded yet. */
     val canPip: Boolean,
     val isPlaying: Boolean,
-    val onTogglePlayPause: () -> Unit
+    val onTogglePlayPause: () -> Unit,
+    /** The PiP window went away: closed by the user (true), or expanded
+     *  back into the app (false). */
+    val onPipLeft: (closed: Boolean) -> Unit
 )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -135,15 +133,7 @@ data class PlaybackHost(
 fun ChannelScreen(
     channel: String,
     onBack: () -> Unit,
-    onFullscreenChange: (Boolean) -> Unit,
     isInPictureInPicture: Boolean = false,
-    /** True while MainActivity is stopped (Home/Recents/screen off), from its
-     *  onStop/onStart. Drives two battery-saving effects below: dropping the
-     *  ExoPlayer video track (audioOnly) and backing off the socket's
-     *  reconnect cadence (vm.onAppBackgroundChanged) — neither needs a new
-     *  permission, unlike a real foreground service would. Always false in
-     *  PiP, even while backgrounded: PiP's whole point is a visible video. */
-    isAppInBackground: Boolean = false,
     onPlaybackHostChange: (PlaybackHost?) -> Unit = {},
     vm: ChannelViewModel = viewModel()
 ) {
@@ -176,11 +166,6 @@ fun ChannelScreen(
 
     LaunchedEffect(channel) { vm.start(channel) }
 
-    // Lets the reconnect backoff back off while nobody's watching — see
-    // CyTubeClient.setBackgrounded. Cheap to call on every flip; it's just a
-    // couple of field writes on the socket.io Manager.
-    LaunchedEffect(isAppInBackground) { vm.onAppBackgroundChanged(isAppInBackground) }
-
     // Standard keep-screen-on: the view holds the flag while something is
     // actually playing and drops it the moment playback stops or this screen
     // leaves composition. No timers, nothing to leak.
@@ -209,19 +194,12 @@ fun ChannelScreen(
     // compact layout, the fullscreen layout and the PiP layout below. Before
     // this, each of those was a structurally different composable subtree, so
     // toggling fullscreen made Compose tear down and rebuild the whole
-    // ExoPlayer from scratch (see ExoSurface's remember(epoch) { ... }) —
+    // ExoPlayer from scratch (see ExoSurface's remember { ExoPlayer... }) —
     // that rebuild-and-reconnect was the actual cause of the lag on
     // entering/exiting fullscreen. movableContentOf instead moves the same
     // already-playing instance to wherever it's called from.
     val pipModeState = rememberUpdatedState(isInPictureInPicture)
 
-    // Same rememberUpdatedState pattern as pipModeState just above, for the
-    // same reason: playerContent below is captured once by remember{}, so a
-    // plain read of a changing parameter inside it would freeze at whatever
-    // value was current on the very first composition. Never true while in
-    // PiP — floating video with no video track would just show a blank
-    // window, defeating the point of PiP.
-    val audioOnlyState = rememberUpdatedState(isAppInBackground && !isInPictureInPicture)
     val ambientGlowEnabledState = rememberUpdatedState(state.ambientGlowEnabled)
 
     // Dominant color behind the windowed player (see WindowedAmbientGlow
@@ -247,12 +225,11 @@ fun ChannelScreen(
                 showControls = !fullscreen && !pipModeState.value && !isTv,
                 onHandle = onAttachPlayer,
                 onFailed = vm::reportPlaybackFailure,
-                epoch = state.playerEpoch,
                 qualityIndex = state.nativeQualityIndex,
                 modifier = Modifier.fillMaxSize(),
                 // Each sample here is ONE instant of the video, and on
                 // fast-cutting content (an action scene, a music video) two
-                // consecutive samples 4s apart can land on wildly different
+                // consecutive samples 3s apart can land on wildly different
                 // frames — a dark shot, then an explosion, then a close-up.
                 // Feeding each raw sample straight to the crossfade made the
                 // glow visibly yank toward a new hue every few seconds,
@@ -266,15 +243,16 @@ fun ChannelScreen(
                 // first sample of a new item (ambientColor still null there,
                 // per the LaunchedEffect above) so a fresh item still snaps
                 // to its own color immediately rather than easing up from
-                // the previous item's leftover one. Only active when glow is
-                // enabled and video is not running audio-only.
-                onFrameSnapshot = if (ambientGlowEnabledState.value && !audioOnlyState.value) {
+                // the previous item's leftover one. Only when the glow is on,
+                // and never on TV, which has no windowed layout to show it
+                // in (and whose setting is hidden, so it stays at its
+                // default of on).
+                onFrameSnapshot = if (ambientGlowEnabledState.value && !isTv) {
                     { bitmap ->
                         val sample = averageColor(bitmap)
                         ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
                     }
                 } else null,
-                audioOnly = audioOnlyState.value,
                 onEnded = onPlaybackEnded,
                 onStall = onPlaybackStall
             )
@@ -285,19 +263,19 @@ fun ChannelScreen(
     // (play vs. pause, whether PiP is even applicable right now) stays
     // current, and cleared when this screen goes away.
     val onTogglePlayPause = remember(vm) { vm::togglePlaybackFromPip }
+    val onPipLeft = remember(vm) { vm::onPipLeft }
     SideEffect {
         onPlaybackHostChange(
             PlaybackHost(
                 pipEnabled = state.pipEnabled,
-                // EMBED has no PlayerHandle behind it (see PlayerSurface's
-                // EmbedSurface) — nothing for the PiP overlay's play/pause
-                // button to actually control — so it's excluded the same way
-                // WEB already was.
+                // Only Media3-played items: EMBED and WEB are web pages,
+                // whose players and controls aren't set up for a PiP window.
                 canPip = state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
                     state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED &&
                     state.media != null,
                 isPlaying = state.playing,
-                onTogglePlayPause = onTogglePlayPause
+                onTogglePlayPause = onTogglePlayPause,
+                onPipLeft = onPipLeft
             )
         )
     }
@@ -365,8 +343,14 @@ fun ChannelScreen(
     // interruption until the (still-async) timeout below hands it off.
     var settlingFromPip by remember { mutableStateOf(false) }
     if (justExitedPip) settlingFromPip = true
-    LaunchedEffect(justExitedPip) {
-        if (justExitedPip) {
+    // Keyed on the flag itself, not on justExitedPip: that is true for one
+    // composition only, and writing wasInPip above schedules another
+    // straight away — which changed this effect's key back to false and
+    // cancelled the delay, so the flag was never cleared and the screen
+    // stayed on the PiP-only layout (video, no chat or controls) until the
+    // channel was left.
+    LaunchedEffect(settlingFromPip) {
+        if (settlingFromPip) {
             delay(220)
             settlingFromPip = false
         }
@@ -396,7 +380,6 @@ fun ChannelScreen(
         if (justExitedPip) delay(150)
 
         val immersive = fullscreen
-        onFullscreenChange(immersive)
         // Android throws IllegalStateException("Only fullscreen activities
         // can request orientation") if setRequestedOrientation is called
         // while the activity is in — or still transitioning out of —
@@ -571,7 +554,6 @@ fun ChannelScreen(
             }
         }
         LaunchedEffect(Unit) {
-            onFullscreenChange(true)
             runCatching { videoFocusRequester.requestFocus() }
             runCatching {
                 activity?.window?.let { window ->
@@ -627,9 +609,8 @@ fun ChannelScreen(
                     }
             ) {
                 if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
-                    // Not wired to audioOnlyState — see WebCompatView's own
-                    // doc comment on why backgrounding deliberately leaves
-                    // it running rather than pausing it.
+                    // Left running when the app goes to the background,
+                    // like the other players.
                     WebCompatView(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
@@ -926,11 +907,12 @@ fun ChannelScreen(
 
             // A slow, independent brightness pulse on top of the hue drift
             // above — the actual "hypnotic" part. Only animated when the glow
-            // is visually active (playing, in foreground, with a non-null
-            // color sample) to avoid keeping the 60/120Hz render loop running
-            // endlessly during pause, background audio, or before the video starts.
+            // is visually active (playing, with a non-null color sample) to
+            // avoid keeping the 60/120Hz render loop running endlessly during
+            // pause or before the video starts. Nothing to check for the
+            // background: Compose stops animating when the app isn't visible.
             val isGlowVisuallyActive = ambientGlowActive && state.playing &&
-                !isAppInBackground && ambientColor != null
+                ambientColor != null
 
             val glowPulse = if (isGlowVisuallyActive) {
                 rememberInfiniteTransition(label = "ambientPulse").animateFloat(
@@ -993,9 +975,8 @@ fun ChannelScreen(
                 if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
                     // Compatibility View is the whole CyTube page again, not a
                     // player surface. It owns the channel entirely while it is up.
-                    // Not wired to audioOnlyState — see WebCompatView's own
-                    // doc comment on why backgrounding deliberately leaves
-                    // it running rather than pausing it.
+                    // Left running when the app goes to the background,
+                    // like the other players.
                     WebCompatView(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
@@ -1076,11 +1057,10 @@ fun ChannelScreen(
                     syncEnabled = state.syncEnabled,
                     personalPickUid = state.personalPickUid,
                     onPersonalPick = onPersonalPick,
-                    // Phone only by construction (TV has its own playlist
-                    // view and returns before this layout), but explicit so
-                    // it can't leak onto TV, where a text box here would be
-                    // the same kind of D-pad trap the search box once was.
-                    canAdd = state.canQueue && !isTv,
+                    // Phone only: TV has its own playlist view and returns
+                    // before this layout (a text box here would be a D-pad
+                    // trap there, like the search box once was).
+                    canAdd = state.canQueue,
                     canAddNext = state.canQueueNext,
                     queueStatus = state.queueStatus,
                     onAddLink = onQueueLink,

@@ -24,8 +24,8 @@ object PeerTubeResolver {
 
     private const val TAG = "CyTubePeerTube"
 
-    // Shared with MediaTypes.knownEmbedUrl's own pt-id validation — this used
-    // to be its own byte-for-byte duplicate of that regex.
+    // Shape check for the video id (short or UUID form) before it goes into
+    // a URL; same rule as the embed pages' SAFE_EMBED_ID_REGEX.
     private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9_-]{1,64}$")
 
     data class Resolved(val url: String, val mimeType: String?, val label: String)
@@ -37,6 +37,12 @@ object PeerTubeResolver {
      *  fresh one instead of reusing the dead link until the cache expires.
      *  Called from ChannelViewModel.reportPlaybackFailure. */
     fun invalidate(id: String) = cache.remove(id)
+
+    /** The cached result for [id] if there's a fresh one, without any
+     *  network work — lets the player surface show an item straight away
+     *  (and keep its existing player) when it was already resolved, e.g.
+     *  loaded while the app was in the background. */
+    fun cached(id: String): Resolved? = cache.get(id)
 
     suspend fun resolve(http: OkHttpClient, id: String): Result<Resolved> = withContext(Dispatchers.IO) {
         val parts = id.split(";", limit = 2)

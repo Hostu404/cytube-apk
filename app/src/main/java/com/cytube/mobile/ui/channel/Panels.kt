@@ -519,6 +519,15 @@ internal fun openInBrowser(context: Context, url: String) {
     }.onFailure { Log.w("CyTube", "No handler for chat link") }
 }
 
+/** One flying comment's motion, tracked per lane so new comments can trail
+ *  safely behind earlier ones without colliding. */
+class LaneOccupant(
+    val spawnAtMs: Long,
+    val speedPxPerMs: Float,
+    val widthPx: Float,
+    val clearAtMs: Long
+)
+
 /**
  * Everything NekoChatOverlay remembers, hoisted out and owned by the caller
  * (ChannelScreen) instead of the overlay itself. The overlay now has two call
@@ -533,15 +542,6 @@ internal fun openInBrowser(context: Context, url: String) {
  * time the overlay stays switched on) is what makes the swap invisible.
  */
 
-/** One flying comment's motion, tracked per lane so new comments can trail
- *  safely behind earlier ones without colliding. */
-class LaneOccupant(
-    val spawnAtMs: Long,
-    val speedPxPerMs: Float,
-    val widthPx: Float,
-    val clearAtMs: Long
-)
-
 class NekoOverlayState {
     val active = mutableStateListOf<FlyingComment>()
     var lastSpawnedSeq = -1L
@@ -553,10 +553,17 @@ class NekoOverlayState {
     var nextLaneIndex = 0
     var hasCaughtUp = false
 
-    /** Messages waiting for a lane to free up. Never dropped under flood —
-     *  the continuous trailing lane model provides high throughput at normal,
-     *  comfortable reading speeds. */
+    /** Messages waiting for a lane to free up. At most NEKO_MAX_QUEUE:
+     *  under spam the oldest waiting ones are dropped (see [trimPending]) so
+     *  the overlay stays close to live chat instead of falling minutes
+     *  behind. A gap (the app coming back from the background) is also
+     *  capped on arrival; see NEKO_MAX_BURST. The chat panel itself always
+     *  shows everything. */
     val pending = ArrayDeque<ChatMessage>()
+
+    fun trimPending() {
+        while (pending.size > NEKO_MAX_QUEUE) pending.removeFirst()
+    }
 
     /** Wakes the drain loop in [NekoChatOverlay] the instant something is
      *  enqueued, instead of polling on a fixed timer. */
@@ -620,13 +627,18 @@ fun NekoChatOverlay(
             }
         }
 
-        // Fresh arrivals are enqueued here and drained smoothly. All messages
-        // are preserved and displayed without dropping.
+        // Fresh arrivals are enqueued here and drained smoothly. Normally
+        // that's a message or two at a time. After the app has been in the
+        // background it's everything said meanwhile (this effect doesn't run
+        // while the app is out of sight) — hundreds on a busy channel, which
+        // took minutes to fly past — so only the latest NEKO_MAX_BURST of a
+        // gap like that are shown.
         LaunchedEffect(messages) {
             val fresh = ArrayList<ChatMessage>()
             for (i in messages.indices.reversed()) {
                 val m = messages[i]
                 if (m.seq <= state.lastSpawnedSeq) break
+                if (fresh.size >= NEKO_MAX_BURST) break
                 // Never PMs: this flies messages across the video for
                 // anyone looking at the screen (a TV, a screen share).
                 if (!m.isServerMessage && !m.isPm) fresh.add(m)
@@ -635,6 +647,7 @@ fun NekoChatOverlay(
             for (msg in fresh) {
                 state.pending.addLast(msg)
             }
+            state.trimPending()
             if (fresh.isNotEmpty()) state.wakeSignal.trySend(Unit)
             if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
         }
@@ -643,6 +656,10 @@ fun NekoChatOverlay(
         // Multiple comments naturally trail each other in each lane with
         // guaranteed safe margins, producing high throughput at a steady,
         // comfortable reading pace without chaotic speed jumps or text walls.
+        // The loop below runs for as long as the overlay is up; read these
+        // through state so its width estimates follow emote changes.
+        val currentShowEmotes by rememberUpdatedState(showEmotes)
+        val currentEmotes by rememberUpdatedState(emotes)
         LaunchedEffect(state, laneCount, screenWidthPx) {
             while (true) {
                 if (state.pending.isEmpty()) {
@@ -651,7 +668,7 @@ fun NekoChatOverlay(
                 }
                 val now = System.currentTimeMillis()
                 val msg = state.pending.first()
-                val estimatedWidthPx = estimateCommentWidthPx(msg, showEmotes, emotes, density)
+                val estimatedWidthPx = estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, density)
                 val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx)
                 val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
 
@@ -752,6 +769,10 @@ private const val NEKO_MAX_LANES = 12
 /** How many already-buffered messages replay immediately when the overlay
  *  is turned on. */
 private const val NEKO_CATCHUP_COUNT = 5
+/** Most new messages queued in one go — see the LaunchedEffect(messages). */
+private const val NEKO_MAX_BURST = 20
+/** Most messages waiting to fly at once — see NekoOverlayState.pending. */
+private const val NEKO_MAX_QUEUE = 50
 
 private val NEKO_LINK_COLOR = Color(0xFF80D8FF)
 

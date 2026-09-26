@@ -1,11 +1,10 @@
 package com.cytube.mobile.player
 
-import com.cytube.mobile.net.MediaFrame
-
 /**
- * One interface, three backends. SyncEngine talks only to this, so the
- * synchronisation algorithm is written once and is identical whether the item
- * is playing through Media3 or through a provider embed in a WebView.
+ * One interface, two backends: NativePlayerHandle (Media3) and the embed
+ * handle in PlayerSurface (a provider's player in a WebView). SyncEngine
+ * talks only to this, so the synchronisation algorithm is written once.
+ * Loading an item is backend-specific and isn't part of it.
  */
 interface PlayerHandle {
     val mediaId: String?
@@ -24,8 +23,9 @@ interface PlayerHandle {
     /** True for native ExoPlayer backend, false for WebView embed controllers. */
     val isNative: Boolean get() = true
 
-    /** Estimated throughput in bits per second, if available from the backend. */
-    val estimatedBitrate: Long? get() = null
+    /** True once [release] has run. ChannelViewModel treats a released
+     *  player as detached. */
+    val isReleased: Boolean
 
     /** Seconds of media buffered ahead of the playhead, or NaN if the backend
      *  can't tell. SyncEngine won't speed-nudge a player that's nearly dry. */
@@ -35,14 +35,6 @@ interface PlayerHandle {
      *  without a seek. Backends that can't do it just ignore it. */
     fun setPlaybackRate(rate: Float) {}
 
-    /** [qualityIndex] indexes into media.direct (already sorted
-     *  highest-to-lowest — see DirectSource.parse), for the NATIVE backend's
-     *  own lightweight quality auto-adaptation (see ChannelViewModel's
-     *  onPlaybackStall). Out of range, or a media with
-     *  no [MediaFrame.direct] entries at all, falls back to
-     *  [MediaFrame.bestSource] exactly like before this parameter existed —
-     *  callers that don't care just pass 0. */
-    fun load(media: MediaFrame, qualityIndex: Int = 0)
     fun play()
     fun pause()
     fun seekTo(seconds: Double)

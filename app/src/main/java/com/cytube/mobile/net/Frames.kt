@@ -31,8 +31,7 @@ data class MediaFrame(
     val paused: Boolean,
     val direct: List<DirectSource>,
     val embedSrc: String?,
-    val scuri: String?,
-    val thumbnail: String?
+    val scuri: String?
 ) {
     val isLivestream: Boolean get() = seconds <= 0
     val hasDirect: Boolean get() = direct.isNotEmpty()
@@ -81,8 +80,7 @@ data class MediaFrame(
                 paused = o.optBoolean("paused", false),
                 direct = DirectSource.parse(meta.optJSONObject("direct")),
                 embedSrc = embed?.optString("src")?.ifBlank { null },
-                scuri = meta.optString("scuri").ifBlank { null },
-                thumbnail = meta.optString("thumbnail").ifBlank { null }
+                scuri = meta.optString("scuri").ifBlank { null }
             )
         }
 
@@ -116,8 +114,7 @@ data class MediaFrame(
             paused = false,
             direct = emptyList(),
             embedSrc = null,
-            scuri = null,
-            thumbnail = null
+            scuri = null
         )
 
         /** Parses "H:MM:SS" or "MM:SS" (CyTube's formatTime output) back into
@@ -227,22 +224,15 @@ data class ChatMessage(
 data class ChannelUser(
     val name: String,
     val rank: Double,
-    val afk: Boolean,
-    val muted: Boolean,
-    val profileImage: String?,
-    val profileText: String?
+    val afk: Boolean
 ) {
     companion object {
         fun from(o: JSONObject): ChannelUser {
             val meta = o.optJSONObject("meta") ?: JSONObject()
-            val profile = o.optJSONObject("profile")
             return ChannelUser(
                 name = o.optString("name", ""),
                 rank = o.optDouble("rank", 0.0),
-                afk = meta.optBoolean("afk", false),
-                muted = meta.optBoolean("muted", false) || meta.optBoolean("smuted", false),
-                profileImage = profile?.optString("image")?.ifBlank { null },
-                profileText = profile?.optString("text")?.ifBlank { null }
+                afk = meta.optBoolean("afk", false)
             )
         }
 
@@ -260,8 +250,7 @@ data class PlaylistItem(
     val duration: String,
     val type: String,
     val mediaId: String,
-    val queueby: String,
-    val temp: Boolean
+    val queueby: String
 ) {
     companion object {
         fun from(o: JSONObject): PlaylistItem {
@@ -272,8 +261,7 @@ data class PlaylistItem(
                 duration = media.optString("duration", ""),
                 type = media.optString("type", ""),
                 mediaId = media.optString("id", ""),
-                queueby = o.optString("queueby", ""),
-                temp = o.optBoolean("temp", false)
+                queueby = o.optString("queueby", "")
             )
         }
 

@@ -34,6 +34,12 @@ object StreamableResolver {
      *  Called from ChannelViewModel.reportPlaybackFailure. */
     fun invalidate(id: String) = cache.remove(id)
 
+    /** The cached result for [id] if there's a fresh one, without any
+     *  network work — lets the player surface show an item straight away
+     *  (and keep its existing player) when it was already resolved, e.g.
+     *  loaded while the app was in the background. */
+    fun cached(id: String): Resolved? = cache.get(id)
+
     suspend fun resolve(http: OkHttpClient, id: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_ID_REGEX.matches(id)) {
             Log.w(TAG, "rejected malformed Streamable video id ($id)")

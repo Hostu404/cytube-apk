@@ -2,7 +2,7 @@
 
 **A native CyTube client for Android, Android TV and Amazon Fire TV.**
 
-Watch synchronized videos with others, chat in real time, browse channels, manage playlists and use CyTube custom emotes — without relying on a browser.
+Watch videos in sync with others, chat in real time, add to the playlist and use channel emotes, as a real Android app rather than the CyTube website wrapped in a WebView. The interface adapts to phones, tablets and TVs.
 
 [**Download the latest APK →**](https://github.com/Hostu404/CyTube-APK/releases/latest)
 
@@ -11,19 +11,6 @@ Watch synchronized videos with others, chat in real time, browse channels, manag
 ## Screenshots
 
 <img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
-
-
----
-
-## What is CyTube APK?
-
-CyTube APK brings the CyTube experience to Android devices as a dedicated native application.
-
-It is designed for phones, tablets, Android TV and Amazon Fire TV, with the interface adapting to the device you're using.
-
-You can join CyTube channels, watch synchronized media with other people, participate in chat and manage playlists directly from the app.
-
-This is a **native Android application**, not simply the CyTube website wrapped inside a WebView.
 
 ---
 
@@ -42,72 +29,51 @@ use out of it:
 
 ## Features
 
-* Browse and join channels
-* Channel information
-* User list
-* Playlists
-* Polls
-* Favourites
-* Recently joined channels
-* Guest access
-* Native video playback (YouTube — including live streams, direct files, HLS, Google Drive and more)
-* Embedded playback for Dailymotion, Streamable, Peertube, 8chan, and Vimeo — plays inside the app itself (chat, playlist and sync all stay native) rather than dropping straight to Compatibility View
-* Automatic fallback to Compatibility View for sources native and embedded playback can't handle (e.g. Twitch, which needs the real page's own domain to work at all)
-* Playback stays in sync with the room, with an adjustable sync tolerance
-* Turn off "stay in sync" to browse the playlist and watch your own picks independently — the app auto-advances to your next pick when one finishes, without affecting anyone else in the room
-* Custom CyTube emotes
-* NicoNico Chat - Enable by tapping the square.
-* Quick tap to reply/repost emotes
-* Real-time channel chat
-* User messages and system messages
-* Mute toggle
-* Ambient glow behind the video
-* Fullscreen playback
-* Tap the channel name to refresh chat and playback (rate-limited)
-* Password-protected channel support
-* Opens `cytu.be/r/<channel>` links directly into the app
+### Watching
 
-### TV support
+* Playback stays in sync with the room, with an adjustable sync tolerance. Small drift is corrected by briefly speeding up or slowing down rather than jumping.
+* Native playback for YouTube, direct files, HLS, Google Drive, Streamable and PeerTube
+* Embedded playback for YouTube live streams, Dailymotion, Vimeo and custom embeds (such as 8chan) — the video plays inside the app while chat, playlist and sync stay native
+* Compatibility View (the full CyTube page) as a fallback for sources neither can handle, such as Twitch
+* For videos offered in several qualities, picks one your connection can handle, steps down if playback stalls and back up when it can
+* Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
+* Fullscreen, mute toggle, and an ambient glow behind the video
 
-Designed to work on:
+### Chat
 
-* Android TV
-* Amazon Fire TV
-* TV remotes and D-pad navigation
-* Large-screen displays
+* Real-time chat with custom channel emotes
+* Messages that mention your name are highlighted
+* Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
+* Tap an emote in chat to reuse it
+* Niconico-style chat overlay across the video; tap the square to turn it on
 
-**Accessing chat and the playlist on TV:** from the video, press **Down** on the D-pad.
+### Channels
 
-* If "stay in sync" is **on** (Settings), Down opens a dedicated full-screen chat view.
-* If "stay in sync" is **off**, Down opens a full-screen playlist view instead, with a search bar for quickly filtering items and the same personal-pick behaviour as on phone — chat isn't reachable while in this mode.
+* Browse and join channels, with favourites and recently joined
+* Add videos to the playlist from a link (phone), with **Play next** if the channel allows it. Links from your phone's share sheet work as they are: YouTube mobile, Shorts and youtu.be links, links pasted with a title around them, and short links like t.co
+* Vote in polls; results stay visible after a poll closes
+* User list, channel notice, password-protected channels and guest access
+* Tap the channel name to refresh chat and playback
+* Opens `cytu.be/r/<channel>` links straight into the app
 
-Press **Up** or **Back** to return to the video from either view.
+### Android TV / Fire TV
 
-The same APK can be sideloaded onto supported Android TV and Fire TV devices.
+Works with a TV remote's D-pad. From the video, press **Down**:
+
+* With "stay in sync" **on** (Settings), Down opens a full-screen chat view.
+* With "stay in sync" **off**, Down opens a full-screen playlist with a search bar, for picking your own videos (chat isn't available in this mode).
+
+Press **Up** or **Back** to return to the video. Adding videos and private messages are phone-only.
 
 ---
 
 ## Download
 
-### Android
+Download the APK from the [releases page](https://github.com/Hostu404/CyTube-APK/releases/latest), open it on your device and install it. You may need to allow installing apps from unknown sources.
 
-Download the latest release:
+**Android TV / Fire TV:** the easiest way is [Downloader](https://amzn.to/2Ihmizw) (search "Downloader" on the Fire TV Appstore). Enter the direct link to the APK and it installs it for you. You'll need "Apps from Unknown Sources" turned on for Downloader, under Settings → My Fire TV → Developer Options.
 
-[**Download the latest APK**](https://github.com/Hostu404/CyTube-APK/releases/latest)
-
-Then open the APK on your Android device and install it.
-
-You may need to allow installation from unknown sources depending on your device.
-
-### Android TV / Fire TV
-
-The easiest path is [Downloader](https://amzn.to/2Ihmizw) (search "Downloader" on the Fire TV
-Appstore) — enter the direct link to the APK and it installs it for you.
-You'll need "Apps from Unknown Sources" turned on for whichever app you
-used to download it, under Settings → My Fire TV → Developer Options.
-
-There's no Play Store or Amazon Appstore listing — this is a hobby project,
-distributed as an open-source APK.
+There's no Play Store or Amazon Appstore listing — this is a hobby project, distributed as an open-source APK.
 
 ---
 
@@ -117,52 +83,35 @@ distributed as an open-source APK.
 * Internet connection
 * A CyTube account is optional
 
-Some media sources may have additional playback requirements or compatibility limitations.
-
 ---
 
 ## Privacy & Security
 
-CyTube APK is open source.
+Your password is sent once, directly to your CyTube server, the same way the CyTube website logs in — it is never written to disk. If you choose to stay logged in, only the signed session cookie the server returns is saved, encrypted on your device. Logging out clears it locally and tells the server to invalidate it too.
 
-CyTube credentials are handled locally by the application.
-
-Your password is sent once, directly to your CyTube server, the same way the CyTube website itself logs in — it is never written to disk. If you choose to stay logged in, only the signed session cookie the server returns is saved, encrypted on your device. Logging out clears it locally and tells the server to invalidate it too.
-
-The source code is available in this repository for inspection.
+The full source code is in this repository for anyone to inspect.
 
 ---
 
 ## Current limitations
 
-CyTube supports a large variety of media sources, and compatibility can vary between them.
-
-Known limitations include:
-
+* CyTube supports a huge range of media sources, and some play better than others.
 * Some playback synchronisation edge cases remain.
-* Picture-in-picture support is still being improved
+* Picture-in-picture support is still being improved.
 
-The application is actively being developed, so behaviour may change between releases.
-
-If you find a problem, please report it with enough information to reproduce it.
+The app is actively being developed, so behaviour may change between releases.
 
 ---
 
 ## Reporting a problem
 
-Found a bug?
-
 [**Open an issue →**](https://github.com/Hostu404/CyTube-APK/issues)
 
-When reporting an issue, include:
+Please include:
 
-* Device model
-* Android version
-* App version
-* CyTube channel, if relevant
-* What you expected to happen
-* What actually happened
-* Steps to reproduce the problem
+* Device model, Android version and app version
+* The CyTube channel, if relevant
+* What you expected to happen, what actually happened, and steps to reproduce it
 
 Screenshots or logs are useful when available.
 
@@ -170,23 +119,17 @@ Screenshots or logs are useful when available.
 
 ## For developers
 
-CyTube APK is built as a native Android application.
-
-The project is structured around separate components for the CyTube connection, playback handling, chat and application UI.
-
-The source code is available here on GitHub.
+The project is split into separate parts for the CyTube connection, playback, chat and the app's UI.
 
 ### Build from source
-
-Clone the repository:
 
 ```bash
 git clone https://github.com/Hostu404/CyTube-APK.git
 ```
 
-Open the project in Android Studio and allow Gradle to synchronise.
+Open the project in Android Studio and let Gradle sync, or build from the command line with `./gradlew assembleRelease` (`.\gradlew assembleRelease` on Windows).
 
-Build the application using the standard Android Studio build tools.
+Release builds are signed only if you add a `keystore.properties` file (see `keystore.properties.example`); without one, the project still builds unsigned.
 
 ---
 

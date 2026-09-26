@@ -79,6 +79,12 @@ object YouTubeResolver {
      *  Called from ChannelViewModel.reportPlaybackFailure. */
     fun invalidate(videoId: String) = cache.remove(videoId)
 
+    /** The cached result for [videoId] if there's a fresh one, without any
+     *  network work — lets the player surface show an item straight away
+     *  (and keep its existing player) when it was already resolved, e.g.
+     *  loaded while the app was in the background. */
+    fun cached(videoId: String): Resolved? = cache.get(videoId)
+
     suspend fun resolve(videoId: String): Result<Resolved> = withContext(Dispatchers.IO) {
         if (!SAFE_VIDEO_ID_REGEX.matches(videoId)) {
             Log.w(TAG, "rejected malformed YouTube video id: $videoId")

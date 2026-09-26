@@ -30,24 +30,9 @@ import androidx.compose.ui.viewinterop.AndroidView
  * for anything the native path genuinely cannot do, and for that it needs the
  * actual page: the channel's own layout, its scripts, its chat, its player.
  */
-@Composable
-fun WebCompatView(
-    baseUrl: String,
-    channel: String,
-    authCookie: String?,
-    modifier: Modifier = Modifier
-) {
-    InProcessWebCompatView(
-        baseUrl = baseUrl,
-        channel = channel,
-        authCookie = authCookie,
-        modifier = modifier
-    )
-}
-
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-private fun InProcessWebCompatView(
+fun WebCompatView(
     baseUrl: String,
     channel: String,
     authCookie: String?,
@@ -56,13 +41,18 @@ private fun InProcessWebCompatView(
     val context = LocalContext.current
     val homeHost = remember(baseUrl) { Uri.parse(baseUrl).host }
     var isLoaded by remember(baseUrl, channel) { mutableStateOf(false) }
+    // Bumped when the WebView's renderer process dies, so key() below
+    // builds a fresh WebView and reloads the page — before, the dead one
+    // was just removed and nothing replaced it, leaving a black area until
+    // the user switched mode or channel.
+    var rendererGeneration by remember { mutableStateOf(0) }
     val alpha by animateFloatAsState(
         targetValue = if (isLoaded) 1f else 0f,
         animationSpec = tween(durationMillis = 200),
         label = "webCompatAlpha"
     )
 
-    key(baseUrl, channel) {
+    key(baseUrl, channel, rendererGeneration) {
         AndroidView(
             modifier = modifier
                 .fillMaxSize()
@@ -107,14 +97,18 @@ private fun InProcessWebCompatView(
                             isLoaded = true
                         }
 
+                        // Handled (true) so the app doesn't crash with it. The
+                        // dead WebView comes off screen now and is destroyed
+                        // by onRelease below once a new one replaces it — up
+                        // to MAX_RENDERER_RESTARTS times, so a page that
+                        // keeps crashing its renderer can't loop forever.
                         override fun onRenderProcessGone(
                             view: WebView?,
                             detail: RenderProcessGoneDetail?
                         ): Boolean {
-                            view?.let {
-                                (it.parent as? ViewGroup)?.removeView(it)
-                                it.destroy()
-                            }
+                            view?.let { (it.parent as? ViewGroup)?.removeView(it) }
+                            isLoaded = false
+                            if (rendererGeneration < MAX_RENDERER_RESTARTS) rendererGeneration++
                             return true
                         }
                     }
@@ -138,3 +132,5 @@ private fun InProcessWebCompatView(
         )
     }
 }
+
+private const val MAX_RENDERER_RESTARTS = 3

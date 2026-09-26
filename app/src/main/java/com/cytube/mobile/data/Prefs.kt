@@ -38,11 +38,13 @@ data class Settings(
      *  On by default — unlike PiP this is pure decoration with nothing to
      *  misbehave, so there's no reason to make people opt in. */
     val ambientGlowEnabled: Boolean = true,
-    /** Display name used to join chat as a guest. Blank means "not chosen
-     *  yet" — one is generated and saved the first time it's needed. */
+    /** Display name used to join chat as a guest, set on the Account
+     *  screen. Blank means "not chosen": each connection then uses a fresh
+     *  random GuestNNNN name, which isn't saved. */
     val guestName: String = "",
-    /** Manual override for CyTubeSettingsTheme (home + settings screens).
-     *  SYSTEM follows the phone's own light/dark setting. */
+    /** Manual override for CyTubeSettingsTheme (home, settings and account
+     *  screens, phone only). SYSTEM follows the phone's own light/dark
+     *  setting. */
     val themeMode: ThemeMode = ThemeMode.SYSTEM
 )
 

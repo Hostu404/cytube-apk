@@ -12,9 +12,10 @@ import android.content.res.Configuration
  * and it's what an Android TV/Fire TV emulator or device reports correctly.
  * Also checks leanback and television system features for TV / Fire TV form factors.
  *
- * Shared by ChannelScreen (phone chrome vs. straight-to-fullscreen D-pad
- * layout), SettingsScreen (hiding the two rows — Ambient glow, PiP — that
- * stay unavailable on TV), and PlayerSurface (TV-specific decoder and surface workarounds).
+ * Used throughout: the channel and home screens (D-pad layouts), Settings
+ * (rows hidden on TV), PlayerSurface (TV decoder and buffer settings),
+ * MainActivity (the app exits when it leaves the screen on TV) and the
+ * default sync tolerance below.
  */
 fun isTvDevice(context: Context): Boolean {
     val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager

@@ -48,9 +48,10 @@ object ChatHtml {
      *  [Rendered.soloEmoteCount], since a message can never show more. */
     private const val MAX_EMOTES_PER_MESSAGE = 3
 
-    /** Parsed messages kept. The chat panel holds 300 messages, each can be
-     *  rendered in a couple of link colours (chat, Niconico overlay), so this
-     *  is sized to keep a full scrollback warm rather than thrash. */
+    /** Parsed messages kept (and, separately, link-coloured copies). The
+     *  chat panel holds 300 messages, and a message can be parsed with
+     *  different options (spoilers revealed, images dropped), so this keeps
+     *  a full scrollback warm with room to spare. */
     private const val RENDER_CACHE_SIZE = 600
 
     /** Threaded through [walk]/[styled] for the lifetime of a single
@@ -134,7 +135,11 @@ object ChatHtml {
         raw: String,
         greentext: Boolean,
         showImages: Boolean,
-        emotes: EmoteSet = EmoteSet.EMPTY
+        emotes: EmoteSet = EmoteSet.EMPTY,
+        /** Must match what the chat panel will pass (true on TV) — it's part
+         *  of the cache key, so a mismatch makes every prewarm a wasted
+         *  parse and every row a fresh one on the main thread. */
+        revealSpoilers: Boolean = false
     ) {
         // Pre-parse using Unspecified link color; ChatHtml.render will hit cache
         // or fast path with zero contention on UI layout passes.
@@ -143,7 +148,8 @@ object ChatHtml {
             greentext = greentext,
             linkColor = Color.Unspecified,
             showImages = showImages,
-            emotes = emotes
+            emotes = emotes,
+            revealSpoilers = revealSpoilers
         )
     }
 
@@ -320,13 +326,12 @@ object ChatHtml {
                         when {
                             ctx.dropImages -> Unit
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
-                            // Cap applies to real emote images (a src is
-                            // present) whether or not they're drawn as
-                            // pictures — a message with images off but 40
-                            // emote codes in it is exactly the spam this
-                            // guards against too. Once the budget is spent,
-                            // the rest are left out entirely per spec (no
-                            // alt-text placeholder either).
+                            // Cap applies to every image with a src,
+                            // whether or not it's drawn as a picture. (With
+                            // images off, emote codes aren't turned into
+                            // images in the first place and stay as text.)
+                            // Once the budget is spent, the rest are left
+                            // out entirely (no alt-text placeholder either).
                             !ctx.budget.take() -> {
                                 ctx.droppedEmote = true
                                 ctx.swallowLeadingSpace = true

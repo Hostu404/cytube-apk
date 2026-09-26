@@ -6,9 +6,13 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.cytube.mobile.net.CyTubeClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
@@ -31,8 +35,6 @@ import org.jsoup.Jsoup
  * restart, via EncryptedSharedPreferences — a successful login always
  * counts for the rest of THIS process's lifetime regardless (see
  * inMemorySession below); only the durable copy is conditional.
- *
- * Socket login remains as a fallback for the session only; it is never stored.
  */
 class AuthRepository(context: Context, private val http: OkHttpClient, private val baseUrl: String) {
 
@@ -49,7 +51,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     sealed interface LoginOutcome {
         data class Success(val session: Session) : LoginOutcome
         data class Failure(val message: String) : LoginOutcome
-        /** CSRF/cookie flow unavailable; caller may fall back to socket login. */
+        /** The login page couldn't be used (no CSRF token, network error). */
         data class WebFlowUnavailable(val reason: String) : LoginOutcome
     }
 
@@ -100,44 +102,60 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     fun credentialForSession(): CyTubeClient.Credential? =
         savedSession()?.let { CyTubeClient.Credential.Cookie(it.authCookie, it.name) }
 
+    /** Outlives any screen: a logout's clean-up and server-side revoke must
+     *  finish even if the user leaves the Account screen straight away. */
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     /**
-     * Clears the local session and, best-effort, asks the server to invalidate
-     * the cookie too (CyTube's own `/logout`). The local clear always happens
-     * even if that request fails or the server is unreachable — a logout
-     * should never get "stuck" behind a network call — but a real logout
-     * should revoke the credential, not just forget it on this device.
+     * Forgets the session straight away, then, in the background, clears the
+     * stored copy and asks the server to invalidate the cookie too (CyTube's
+     * own `/logout`). Used to do the network call first, so on a bad
+     * connection the app stayed logged in — and kept handing the session to
+     * channel joins — for up to the full connect + read timeout.
      */
-    suspend fun logout() = withContext(Dispatchers.IO) {
+    fun logout() {
         // An unremembered session never made it into prefs at all (see
-        // inMemorySession's doc comment), so it has to be checked here too
-        // or logging out of one would skip the server-side /logout call
-        // entirely and just silently drop the in-memory copy below.
+        // inMemorySession's doc comment), so its cookie has to be taken from
+        // memory or logging out of one would skip the server-side /logout.
+        // All done here, not in the background job: a login straight after
+        // must not have its new session wiped by this one's clean-up.
         val cookie = inMemorySession?.authCookie ?: prefs.getString(KEY_COOKIE, null)
-        if (cookie != null) {
-            runCatching {
-                val req = Request.Builder()
-                    .url("$baseUrl/logout")
-                    .header("Cookie", "auth=$cookie")
-                    .get()
-                    .build()
-                http.newCall(req).execute().close()
-            }
-        }
         inMemorySession = null
         prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
         persistedSession = null
         persistedLoaded = true
 
-        // WebCompatView shares the auth cookie into Android's WebView
-        // CookieManager so the user isn't asked to log in twice there. That
-        // store is process-wide and disk-persisted, entirely separate from
-        // the EncryptedSharedPreferences cleared above — left alone, a
-        // logged-out user who had ever opened Compatibility Mode would still
-        // be shown as logged in when they opened it again.
-        runCatching {
-            CookieManager.getInstance().apply {
-                removeAllCookies(null)
-                flush()
+        backgroundScope.launch {
+
+            // WebCompatView shares the auth cookie into Android's WebView
+            // CookieManager so the user isn't asked to log in twice there.
+            // That store is process-wide and disk-persisted, separate from
+            // the prefs above — left alone, a logged-out user who had ever
+            // opened Compatibility View would still be logged in there. Only
+            // the auth cookie is expired: other sites' cookies (embedded
+            // players) are none of logout's business. Both the host-only
+            // form WebCompatView sets and a domain-wide one the site itself
+            // may have set.
+            runCatching {
+                CookieManager.getInstance().apply {
+                    val expired = "auth=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"
+                    setCookie(baseUrl, expired)
+                    baseUrl.toHttpUrlOrNull()?.host?.let { host ->
+                        setCookie(baseUrl, "$expired; Domain=$host")
+                    }
+                    flush()
+                }
+            }
+
+            if (cookie != null) {
+                runCatching {
+                    val req = Request.Builder()
+                        .url("$baseUrl/logout")
+                        .header("Cookie", "auth=$cookie")
+                        .get()
+                        .build()
+                    http.newCall(req).execute().close()
+                }
             }
         }
     }
