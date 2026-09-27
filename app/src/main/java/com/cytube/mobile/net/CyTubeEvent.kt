@@ -10,6 +10,8 @@ sealed interface CyTubeEvent {
 
     data class LoginResult(val success: Boolean, val name: String?, val error: String?) : CyTubeEvent
     data class RankChanged(val rank: Double) : CyTubeEvent
+    /** Our saved login cookie was refused: the server treats us as anonymous. */
+    data object SessionExpired : CyTubeEvent
     data class NeedPassword(val wrongPasswordTried: Boolean) : CyTubeEvent
     data object PasswordAccepted : CyTubeEvent
     /** partitionChange: the channel moved backend. Re-resolve socketconfig. */
@@ -56,6 +58,8 @@ sealed interface CyTubeEvent {
      *  ("viewvoteskip", moderators by default). [need] is 0 when no vote is
      *  running (the server resets it on every item change). */
     data class VoteskipCount(val count: Int, val need: Int) : CyTubeEvent
+    /** The server dropped our skip vote (we went AFK); we may vote again. */
+    data object VoteskipVoteCleared : CyTubeEvent
     /** The server refused a "queue" request (bad link, not allowed, rate
      *  limited...). [id] is the media id it was about, when given. */
     data class QueueFailed(val message: String, val id: String?) : CyTubeEvent

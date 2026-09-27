@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -278,6 +280,9 @@ fun ChatPanel(
             val info = listState.layoutInfo
             val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
             val itemsBelow = info.totalItemsCount - 1 - last.index
+            // Fresh, not the rate from the last batch: after a flood ends
+            // that would still say ~100/s and pull the user back down.
+            arrivalsPerSecond = arrivals.perSecond(android.os.SystemClock.uptimeMillis())
             val slack = 3 + (arrivalsPerSecond * 0.5f).toInt()
             following = !listState.canScrollForward ||
                 (!listState.lastScrolledBackward && itemsBelow <= slack)
@@ -287,11 +292,13 @@ fun ChatPanel(
         }
     }
     var countedUpToSeq by remember { mutableLongStateOf(Long.MIN_VALUE) }
-    // Keeps the rate falling once a burst stops, while the button's showing.
+    // Keeps the rate falling once a burst stops, while the button could be
+    // showing — starting straight away, or the button flashed up on the
+    // stale end-of-flood rate before the first update.
     LaunchedEffect(following) {
         while (!following) {
-            delay(500)
             arrivalsPerSecond = arrivals.perSecond(android.os.SystemClock.uptimeMillis())
+            delay(500)
         }
     }
 
@@ -603,15 +610,6 @@ internal fun openInBrowser(context: Context, url: String) {
     }.onFailure { Log.w("CyTube", "No handler for chat link") }
 }
 
-/** One flying comment's motion, tracked per lane so new comments can trail
- *  safely behind earlier ones without colliding. */
-class LaneOccupant(
-    val spawnAtMs: Long,
-    val speedPxPerMs: Float,
-    val widthPx: Float,
-    val clearAtMs: Long
-)
-
 /**
  * Everything NekoChatOverlay remembers, hoisted out and owned by the caller
  * (ChannelScreen) instead of the overlay itself. The overlay now has two call
@@ -777,13 +775,16 @@ fun NekoChatOverlay(
                             msg = msg,
                             lane = lane,
                             widthPx = estimatedWidthPx,
-                            durationMs = durationMs
+                            durationMs = durationMs,
+                            spawnAtMs = now
                         )
                     )
                     // Gentle stagger so consecutive comments stream in with pleasant pacing
                     delay(NEKO_SPAWN_STAGGER_MS)
                 } else {
-                    val waitMs = calculateNextSafeWaitMs(now, laneCount, gapPx, state)
+                    val waitMs = calculateNextSafeWaitMs(
+                        now, laneCount, gapPx, screenWidthPx, estimatedWidthPx, speedPxPerMs, state
+                    )
                     withTimeoutOrNull(waitMs) { state.wakeSignal.receive() }
                 }
             }
@@ -812,7 +813,11 @@ data class FlyingComment(
     val msg: ChatMessage,
     val lane: Int,
     val widthPx: Float,
-    val durationMs: Int
+    val durationMs: Int,
+    /** System.currentTimeMillis() when it set off — so a comment that's
+     *  drawn afresh (switching in or out of fullscreen, rotating) carries on
+     *  from where it had got to instead of starting again from the right. */
+    val spawnAtMs: Long
 )
 
 /**
@@ -924,24 +929,8 @@ private fun findBestLane(
         }
 
         val last = occupants.last()
-        val elapsed = now - last.spawnAtMs
-        val distanceTraveled = elapsed * last.speedPxPerMs
-
-        // 1. Entry clearance: has previous occupant cleared the right edge by at least gapPx?
-        if (distanceTraveled < last.widthPx + gapPx) {
-            continue
-        }
-
-        // 2. Overtake check: if candidate is faster than previous occupant, will it catch up before previous exits?
-        if (candidateSpeedPxPerMs > last.speedPxPerMs) {
-            val remainMs = last.clearAtMs - now
-            val candidateTravel = remainMs * candidateSpeedPxPerMs
-            if (candidateTravel > screenWidthPx + candidateWidthPx - gapPx) {
-                continue
-            }
-        }
-
-        safeOccupiedLanes.add(lane to distanceTraveled)
+        if (laneWaitMs(last, now, candidateWidthPx, candidateSpeedPxPerMs, gapPx, screenWidthPx) > 0L) continue
+        safeOccupiedLanes.add(lane to (now - last.spawnAtMs) * last.speedPxPerMs)
     }
 
     if (safeEmptyLanes.isNotEmpty()) {
@@ -959,33 +948,27 @@ private fun findBestLane(
     return null
 }
 
-/** Calculates the shortest time in ms until any lane could satisfy entry clearance. */
+/** How long until some lane will take this comment (see laneWaitMs), so the
+ *  drain loop sleeps that long instead of re-checking every frame. Capped:
+ *  a new message arriving meanwhile wakes it anyway. */
 private fun calculateNextSafeWaitMs(
     now: Long,
     laneCount: Int,
     gapPx: Float,
+    screenWidthPx: Float,
+    candidateWidthPx: Float,
+    candidateSpeedPxPerMs: Float,
     state: NekoOverlayState
 ): Long {
     var minWaitMs = Long.MAX_VALUE
     for (lane in 0 until laneCount) {
-        val occupants = state.laneOccupants[lane]
-        if (occupants.isNullOrEmpty()) return 0L
-        val last = occupants.last()
-        val neededDistance = last.widthPx + gapPx
-        val elapsed = now - last.spawnAtMs
-        val distanceTraveled = elapsed * last.speedPxPerMs
-        if (distanceTraveled >= neededDistance) {
-            return 16L
-        }
-        val remainingDist = neededDistance - distanceTraveled
-        if (last.speedPxPerMs > 0f) {
-            val waitMs = (remainingDist / last.speedPxPerMs).toLong()
-            if (waitMs in 1 until minWaitMs) {
-                minWaitMs = waitMs
-            }
-        }
+        val last = state.laneOccupants[lane]?.lastOrNull() ?: return 16L
+        minWaitMs = minOf(
+            minWaitMs,
+            laneWaitMs(last, now, candidateWidthPx, candidateSpeedPxPerMs, gapPx, screenWidthPx)
+        )
     }
-    return if (minWaitMs != Long.MAX_VALUE) minWaitMs.coerceIn(16L, 250L) else 150L
+    return minWaitMs.coerceIn(16L, 1_000L)
 }
 
 @Composable
@@ -1005,12 +988,25 @@ private fun FlyingCommentItem(
 
     var measuredWidthPx by remember(comment.id) { mutableFloatStateOf(comment.widthPx) }
 
-    val x = remember(comment.id) { Animatable(screenWidthPx) }
+    // Where it should be by now, from when it set off: the same share of its
+    // journey across whatever width this overlay has. Also the starting
+    // value, so a comment drawn afresh doesn't show for a frame at the edge.
+    fun progressNow(): Float =
+        ((System.currentTimeMillis() - comment.spawnAtMs).toFloat() / comment.durationMs).coerceIn(0f, 1f)
+    fun xAt(progress: Float, width: Float): Float = screenWidthPx - progress * (screenWidthPx + width)
+    val x = remember(comment.id) { Animatable(xAt(progressNow(), comment.widthPx)) }
     LaunchedEffect(comment.id, screenWidthPx) {
-        val targetX = -maxOf(measuredWidthPx, comment.widthPx)
+        val width = maxOf(measuredWidthPx, comment.widthPx)
+        val progress = progressNow()
+        val remainingMs = ((1f - progress) * comment.durationMs).toLong()
+        if (remainingMs <= 0L) {
+            onFinished()
+            return@LaunchedEffect
+        }
+        x.snapTo(xAt(progress, width))
         x.animateTo(
-            targetValue = targetX,
-            animationSpec = tween(durationMillis = comment.durationMs, easing = LinearEasing)
+            targetValue = -width,
+            animationSpec = tween(durationMillis = remainingMs.toInt(), easing = LinearEasing)
         )
         onFinished()
     }
@@ -1127,6 +1123,14 @@ private fun EmotePicker(
     }
 }
 
+/** Revealed spoiler indices, saved as an IntArray (see ChatRow). */
+private val SPOILER_SET_SAVER = Saver<Set<Int>, IntArray>(
+    // Nothing saved for a message with no spoilers opened, or every chat
+    // row that ever scrolled away would leave an entry behind.
+    save = { if (it.isEmpty()) null else it.toIntArray() },
+    restore = { it.toSet() }
+)
+
 /** How many emotes the picker shows before "Show more" — a channel with a
  *  few thousand custom emotes shouldn't hand LazyVerticalGrid the whole list
  *  (and a Coil request per tile) the moment the sheet opens. */
@@ -1154,12 +1158,12 @@ private fun ChatRow(
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     // Which of THIS message's own spoilers (by index — see ChatHtml.SPOILER_TAG)
-    // have been tapped open. Keyed on msg.seq (a stable per-message id, unlike
-    // the row's own recomposition) so scrolling a spoiler off-screen and back
-    // doesn't forget it was revealed, but a genuinely different message next
-    // in the same row slot starts fresh rather than inheriting the previous
-    // message's reveal state.
-    var revealedSpoilers by remember(msg.seq) { mutableStateOf(emptySet<Int>()) }
+    // have been tapped open. Saveable, so scrolling a spoiler off-screen and
+    // back doesn't hide it again (the chat list keeps saved state per message
+    // key while its row is gone; plain remember was dropped with the row).
+    var revealedSpoilers by rememberSaveable(msg.seq, stateSaver = SPOILER_SET_SAVER) {
+        mutableStateOf(emptySet<Int>())
+    }
     val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes, revealSpoilers, revealedSpoilers) {
         ChatHtml.render(
             msg.html, msg.addClass == "greentext", linkColor, showEmotes, emotes,
@@ -1283,21 +1287,20 @@ private fun ChatRow(
                                 pos.y in (box.top - tolerancePx)..(box.bottom + tolerancePx)
                         }?.item
                     }
-                    // Checked ahead of links deliberately: a spoiler can wrap
-                    // a link (or anything else) inside it, and revealing it
-                    // is the only thing a tap on still-hidden text should
-                    // do — a second tap, now that it reads normally, is what
-                    // reaches whatever's underneath. Skipped outright when
-                    // revealSpoilers is on (TV) — nothing is ever hidden
-                    // there, so a tap should behave as if this branch didn't
-                    // exist rather than eating one for no visible effect.
+                    // A tap on a hidden spoiler only ever reveals it (the
+                    // links and emotes inside aren't drawn as such until
+                    // then — see ChatHtml.spoiler). Once revealed, a link or
+                    // emote in it works like anywhere else, and a tap on its
+                    // plain text hides it again. Skipped outright when
+                    // revealSpoilers is on (TV): nothing is hidden there.
                     val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(rendered.text, offset) else null
+                    val link = ChatHtml.linkAt(rendered.text, offset)
                     when {
+                        spoilerIndex != null && spoilerIndex !in revealedSpoilers ->
+                            revealedSpoilers = revealedSpoilers + spoilerIndex
                         emote != null -> onEmoteClick(emote)
-                        spoilerIndex != null -> revealedSpoilers =
-                            if (spoilerIndex in revealedSpoilers) revealedSpoilers - spoilerIndex
-                            else revealedSpoilers + spoilerIndex
-                        else -> ChatHtml.linkAt(rendered.text, offset)?.let(onLinkClick)
+                        link != null -> onLinkClick(link)
+                        spoilerIndex != null -> revealedSpoilers = revealedSpoilers - spoilerIndex
                     }
                 }
             }

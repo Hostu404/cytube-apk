@@ -2,7 +2,6 @@ package com.cytube.mobile
 
 import android.app.Application
 import android.os.Build
-import android.graphics.Bitmap
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
@@ -114,12 +113,12 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                     .maxSizeBytes(if (isTv) 64L * 1024 * 1024 else 128L * 1024 * 1024)
                     .build()
             }
-            .apply {
-                if (isTv) {
-                    bitmapConfig(Bitmap.Config.RGB_565)
-                    allowHardware(false)
-                }
-            }
+            // No forced RGB_565 on TV: the GIF decoder draws see-through
+            // animated emotes in whatever format is asked for, and 565 has no
+            // transparency, so they got black boxes behind them.
+            // allowRgb565(true) above already uses it where it's safe
+            // (images with no transparency).
+            .apply { if (isTv) allowHardware(false) }
             .respectCacheHeaders(false)   // emote URLs are effectively immutable
             .crossfade(false)             // no animation cost in a scrolling list
             .build()

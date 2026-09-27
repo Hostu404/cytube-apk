@@ -24,8 +24,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.7.5 - Pocket Rocket"
+        versionCode = 18
+        versionName = "1.8.0 - Lazarus"
     }
 
     signingConfigs {
@@ -75,7 +75,6 @@ android {
         // Needed to reference BuildConfig.VERSION_NAME from the home screen's
         // title bar; AGP 8+ no longer generates BuildConfig unless asked.
         buildConfig = true
-        aidl = true
     }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     testOptions {
@@ -92,7 +91,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
-    implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material.icons.extended)
     // Stable collection types Compose's compiler can actually recognize as
@@ -108,7 +106,6 @@ dependencies {
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.exoplayer.hls)
     implementation(libs.androidx.media3.exoplayer.dash)
-    implementation(libs.androidx.media3.exoplayer.rtsp)
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.datasource.okhttp)
     // Backs the on-disk media cache (see Graph.mediaCache / NativePlayerHandle) —

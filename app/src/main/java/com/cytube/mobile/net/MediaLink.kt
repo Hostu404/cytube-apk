@@ -103,7 +103,9 @@ object MediaLink {
             ?.map { it.split('=', limit = 2) }
             ?.firstOrNull { it[0] == name }
             ?.getOrNull(1)
-            ?.let { URLDecoder.decode(it, "UTF-8") }
+            // decode throws on a bad escape ("…?v=abc%"). URI() above already
+            // refuses those, so this is only a guard should that change.
+            ?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrNull() }
         fun firstSegment(after: String): String = path.removePrefix(after).substringBefore('/')
 
         when (host) {

@@ -8,8 +8,10 @@ package com.cytube.mobile.net
  */
 object MediaTypes {
 
-    /** The media id is itself a playable URL. */
-    private val PLAYABLE_ID = setOf("fi", "hl", "rt")
+    /** The media id is itself a playable URL. Not "rt" (RTMP): Media3
+     *  needs a separate RTMP extension the app doesn't include, so those
+     *  go the WebView route rather than fail natively first. */
+    private val PLAYABLE_ID = setOf("fi", "hl")
 
     val LABELS = mapOf(
         "yt" to "YouTube", "vi" to "Vimeo", "dm" to "Dailymotion",

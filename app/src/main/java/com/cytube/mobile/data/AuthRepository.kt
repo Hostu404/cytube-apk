@@ -1,6 +1,8 @@
 package com.cytube.mobile.data
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
 import android.webkit.CookieManager
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -16,6 +18,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
+import java.security.KeyStore
 
 /**
  * Login strategy, and why it is this way.
@@ -38,13 +41,42 @@ import org.jsoup.Jsoup
  */
 class AuthRepository(context: Context, private val http: OkHttpClient, private val baseUrl: String) {
 
-    private val prefs = EncryptedSharedPreferences.create(
-        context,
-        "cytube_auth",
-        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-    )
+    /** Null only if encrypted storage can't be opened at all, even fresh:
+     *  logins then still work, they just aren't remembered. */
+    private val prefs: SharedPreferences? = openPrefs(context)
+
+    /**
+     * Opening EncryptedSharedPreferences throws when its Keystore key has
+     * gone or no longer matches the file (a Keystore reset, some OS updates,
+     * data restored onto another phone). That used to crash the app on every
+     * launch. The saved login can't be recovered in that state anyway, so
+     * start over with a fresh file and key; the user just logs in again.
+     */
+    private fun openPrefs(context: Context): SharedPreferences? {
+        fun open() = EncryptedSharedPreferences.create(
+            context,
+            PREFS_FILE,
+            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+        return try {
+            open()
+        } catch (e: Exception) {
+            Log.w("CyTubeAuth", "saved login unreadable (${e.javaClass.simpleName}); starting afresh")
+            context.deleteSharedPreferences(PREFS_FILE)
+            runCatching {
+                KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+                    .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            }
+            try {
+                open()
+            } catch (e2: Exception) {
+                Log.w("CyTubeAuth", "encrypted storage unavailable; logins won't be remembered")
+                null
+            }
+        }
+    }
 
     data class Session(val name: String, val authCookie: String)
 
@@ -83,8 +115,8 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     fun savedSession(): Session? {
         inMemorySession?.let { return it }
         if (!persistedLoaded) {
-            val name = prefs.getString(KEY_NAME, null)
-            val cookie = prefs.getString(KEY_COOKIE, null)
+            val name = prefs?.getString(KEY_NAME, null)
+            val cookie = prefs?.getString(KEY_COOKIE, null)
             persistedSession = if (name != null && cookie != null) Session(name, cookie) else null
             persistedLoaded = true
         }
@@ -102,26 +134,23 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     fun credentialForSession(): CyTubeClient.Credential? =
         savedSession()?.let { CyTubeClient.Credential.Cookie(it.authCookie, it.name) }
 
-    /** Outlives any screen: a logout's clean-up and server-side revoke must
-     *  finish even if the user leaves the Account screen straight away. */
+    /** Outlives any screen: a logout's clean-up must finish even if the
+     *  user leaves the Account screen straight away. */
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * Forgets the session straight away, then, in the background, clears the
-     * stored copy and asks the server to invalidate the cookie too (CyTube's
-     * own `/logout`). Used to do the network call first, so on a bad
-     * connection the app stayed logged in — and kept handing the session to
-     * channel joins — for up to the full connect + read timeout.
+     * Forgets the session on this device: the in-memory and stored copies at
+     * once, and the copy shared with Compatibility View's WebView in the
+     * background. There's nothing to tell the server: CyTube keeps no list
+     * of logins to cancel (the cookie carries its own expiry and a hash tied
+     * to the account's password, so only a password change or the expiry
+     * ends it), and its /logout only clears the cookie in a browser.
      */
     fun logout() {
-        // An unremembered session never made it into prefs at all (see
-        // inMemorySession's doc comment), so its cookie has to be taken from
-        // memory or logging out of one would skip the server-side /logout.
         // All done here, not in the background job: a login straight after
         // must not have its new session wiped by this one's clean-up.
-        val cookie = inMemorySession?.authCookie ?: prefs.getString(KEY_COOKIE, null)
         inMemorySession = null
-        prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
+        prefs?.edit()?.remove(KEY_NAME)?.remove(KEY_COOKIE)?.apply()
         persistedSession = null
         persistedLoaded = true
 
@@ -144,17 +173,6 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                         setCookie(baseUrl, "$expired; Domain=$host")
                     }
                     flush()
-                }
-            }
-
-            if (cookie != null) {
-                runCatching {
-                    val req = Request.Builder()
-                        .url("$baseUrl/logout")
-                        .header("Cookie", "auth=$cookie")
-                        .get()
-                        .build()
-                    http.newCall(req).execute().close()
                 }
             }
         }
@@ -198,8 +216,8 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                     // comment for why the in-memory one can't also be gated on it.
                     inMemorySession = session
                     if (remember) {
-                        prefs.edit().putString(KEY_NAME, username)
-                            .putString(KEY_COOKIE, auth).apply()
+                        prefs?.edit()?.putString(KEY_NAME, username)
+                            ?.putString(KEY_COOKIE, auth)?.apply()
                         persistedSession = session
                         persistedLoaded = true
                     }
@@ -240,6 +258,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     }
 
     private companion object {
+        const val PREFS_FILE = "cytube_auth"
         const val KEY_NAME = "name"
         const val KEY_COOKIE = "auth_cookie"
     }

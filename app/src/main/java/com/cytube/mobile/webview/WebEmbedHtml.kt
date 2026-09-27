@@ -161,16 +161,6 @@ fun youtubeIframeApiHtml(id: String, initialTime: Double = 0.0, initialPaused: B
           tag.src = 'https://www.youtube.com/iframe_api';
           document.getElementsByTagName('script')[0].parentNode.insertBefore(tag, document.getElementsByTagName('script')[0]);
 
-          window.addEventListener('error', function(e) {
-            console.log('DIAG window error: ' + (e.message || e) + ' @ ' + (e.filename || '?') + ':' + (e.lineno || '?'));
-          });
-          window.addEventListener('unhandledrejection', function(e) {
-            console.log('DIAG unhandledrejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
-          });
-          document.addEventListener('visibilitychange', function() {
-            console.log('DIAG visibilitychange -> ' + document.visibilityState);
-          });
-
           var player = null;
           // Last volume the app asked for (null: never asked). The player
           // starts muted so autoplay is allowed and is unmuted once it
@@ -449,6 +439,7 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
           var lastKnownPaused = ${if (initialPaused) "true" else "false"};
           var lastKnownTime = $startSeconds;
           var finishing = false;
+          var finishTimer = null;
           var unmuted = false;
           // Last volume the app asked for (null: never asked) — see the
           // one-time unmute in the 'play' handler.
@@ -499,11 +490,16 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
             });
             player.on('timeupdate', function(time) {
               if (typeof time.seconds === 'number') lastKnownTime = time.seconds;
-              if (finishing) return;
-              if (typeof time.duration === 'number' && typeof time.seconds === 'number' &&
-                  time.duration - time.seconds < 1) {
+              var nearEnd = typeof time.duration === 'number' && typeof time.seconds === 'number' &&
+                  time.duration - time.seconds < 1;
+              if (finishing && !nearEnd) {
+                // Seeked back out of the last second: not ending after all.
+                clearTimeout(finishTimer);
+                finishing = false;
+              } else if (!finishing && nearEnd) {
                 finishing = true;
-                setTimeout(function() {
+                finishTimer = setTimeout(function() {
+                  finishing = false;
                   console.log('$EMBED_ENDED_SENTINEL');
                 }, (time.duration - time.seconds) * 1000);
               }

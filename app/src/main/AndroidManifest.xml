@@ -68,7 +68,10 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
-            <!-- Open cytu.be channel links directly in the app. -->
+            <!-- Lets cytu.be channel links open in the app. The app can't be
+                 verified for cytu.be (only the site's owner can publish
+                 that), so on Android 12+ this only takes effect once the
+                 user turns on "Open supported links" for the app. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
