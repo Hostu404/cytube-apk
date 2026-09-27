@@ -199,7 +199,11 @@ fun PlayerSurface(
      *  backend should load — see NativePlayerHandle.load. Meaningless
      *  for every other player type, which never reads CyTube's own quality
      *  list to begin with. */
-    qualityIndex: Int = 0
+    qualityIndex: Int = 0,
+    /** Where to open a fresh item, given the item and the address it will
+     *  stream from — ChannelViewModel.plannedStart, which opens a synced
+     *  item joined partway through a little ahead of the room. */
+    planStart: (MediaFrame, String) -> MediaFrame = { m, _ -> m }
 ) {
     // embedSrc/scuri fallback logic lives in MediaFrame.embedPlayableSrc —
     // see its own comment for what this covers now beyond cu/bc/bn.
@@ -210,7 +214,7 @@ fun PlayerSurface(
             player == MediaTypes.Player.NATIVE || StreamResolvers.handles(player) ->
                 Media3Surface(
                     media, player, showControls, onHandle, onFailed, onFrameSnapshot, onEnded,
-                    onStall, qualityIndex
+                    onStall, qualityIndex, planStart
                 )
             player == MediaTypes.Player.EMBED && embedSrc != null ->
                 // key() here is load-bearing, not decorative: EmbedSurface's
@@ -664,7 +668,8 @@ private fun EmbedSurface(
  * cache hit — always the case for an item ChannelViewModel loaded while the
  * app was in the background) the same ExoPlayer carries on, even across
  * types, instead of being thrown away and reloaded. A lookup that has to go
- * to the network shows a spinner meanwhile, which does replace the player.
+ * to the network shows a spinner over the player meanwhile; the previous item
+ * is stopped, but the player (and its media session) stays for the new one.
  */
 @Composable
 private fun Media3Surface(
@@ -676,7 +681,8 @@ private fun Media3Surface(
     onFrameSnapshot: ((Bitmap) -> Unit)?,
     onEnded: (() -> Unit)?,
     onStall: ((Long) -> Unit)?,
-    qualityIndex: Int
+    qualityIndex: Int,
+    planStart: (MediaFrame, String) -> MediaFrame
 ) {
     val needsResolve = player != MediaTypes.Player.NATIVE
     // Already resolved (typically: loaded while the app was in the
@@ -712,20 +718,25 @@ private fun Media3Surface(
             }
     }
 
-    when {
-        error != null -> Message(error!!)
-        needsResolve && resolved == null -> CircularProgressIndicator()
-        else -> ExoSurface(
+    val waiting = needsResolve && resolved == null
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        ExoSurface(
             media = if (needsResolve) resolvedMedia else media,
             resolved = resolved,
+            waitingForStream = waiting,
             showControls = showControls,
             onHandle = onHandle,
             onFailed = onFailed,
             onFrameSnapshot = onFrameSnapshot,
             onEnded = onEnded,
             onStall = onStall,
-            qualityIndex = qualityIndex
+            qualityIndex = qualityIndex,
+            planStart = planStart
         )
+        when {
+            error != null -> Message(error!!)
+            waiting -> CircularProgressIndicator()
+        }
     }
 }
 
@@ -734,13 +745,17 @@ private fun Media3Surface(
 private fun ExoSurface(
     media: MediaFrame,
     resolved: ResolvedStream?,
+    /** [media]'s stream is still being looked up (or the lookup failed):
+     *  stop the previous item and load nothing yet. */
+    waitingForStream: Boolean,
     showControls: Boolean,
     onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
     onFrameSnapshot: ((Bitmap) -> Unit)?,
     onEnded: (() -> Unit)?,
     onStall: ((Long) -> Unit)?,
-    qualityIndex: Int
+    qualityIndex: Int,
+    planStart: (MediaFrame, String) -> MediaFrame
 ) {
     val context = LocalContext.current
     val isTv = remember { isTvDevice(context) }
@@ -751,6 +766,7 @@ private fun ExoSurface(
     val currentOnEnded by rememberUpdatedState(onEnded)
     val currentOnStall by rememberUpdatedState(onStall)
     val currentOnFrameSnapshot by rememberUpdatedState(onFrameSnapshot)
+    val currentPlanStart by rememberUpdatedState(planStart)
     val exo = remember(isTv) {
         val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(context)
         val renderersFactory = object : DefaultRenderersFactory(context) {
@@ -994,7 +1010,12 @@ private fun ExoSurface(
             // waiting for the slow, high-bitrate stream to finish gathering
             // seconds of data that will just be discarded on reload.
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED) currentOnEnded?.invoke()
+                // Not for an emptied player (see NativePlayerHandle.stop):
+                // a play command from the media session while it waits for
+                // the next stream "ends" its empty playlist straight away.
+                if (playbackState == Player.STATE_ENDED && handle.loadedKey != null) {
+                    currentOnEnded?.invoke()
+                }
                 when (playbackState) {
                     Player.STATE_READY -> {
                         stallJob?.cancel()
@@ -1130,14 +1151,24 @@ private fun ExoSurface(
     // qualityIndex is a key too, so automatic quality adaptation switches
     // streams directly on the existing handle without tearing down the
     // player.
-    LaunchedEffect(media.id, media.type, resolved, qualityIndex) {
+    LaunchedEffect(media.id, media.type, resolved, qualityIndex, waitingForStream) {
+        if (waitingForStream) {
+            // Nothing to load yet. Stop the previous item rather than let it
+            // play on under the spinner; the ViewModel keeps this handle,
+            // and SyncEngine leaves it alone while it holds no item.
+            if (!handle.hasLoaded(media)) handle.stop()
+            return@LaunchedEffect
+        }
         // Already loaded into this player — ChannelViewModel does that itself
         // when the playlist moves on (or quality steps down) while the app
         // is in the background, because this effect can't run then. Loading
         // it again here would restart it from the (now old) start position.
-        val key = if (resolved != null) NativePlayerHandle.loadKey(media, resolved.url)
-            else NativePlayerHandle.loadKey(media, qualityIndex)
-        if (handle.loadedKey != key) {
+        // A looked-up stream counts as loaded whichever URL it came from: the
+        // ViewModel may have resolved the same item separately (the app went
+        // to the background mid-lookup) and got a different signed URL.
+        val loaded = if (resolved != null) handle.hasLoaded(media)
+            else handle.loadedKey == NativePlayerHandle.loadKey(media, qualityIndex)
+        if (!loaded) {
             // When adapting quality in place for the same media item, capture the last
             // rendered video frame so it stays displayed as an overlay while the decoder
             // flushes and buffers the new stream, preventing a black screen flash.
@@ -1153,10 +1184,18 @@ private fun ExoSurface(
                     }
                 }
             }
+            // A fresh open (not a quality switch, which keeps its place)
+            // starts where the ViewModel says: for a synced item joined
+            // partway through, a little ahead of the room, because opening
+            // a big file there takes a while — see SyncEngine.planStart.
+            val fresh = handle.mediaId != media.id
             if (resolved != null) {
-                handle.loadUrl(media, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
+                val start = if (fresh) currentPlanStart(media, resolved.url) else media
+                handle.loadUrl(start, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
             } else {
-                handle.load(media, qualityIndex)
+                val url = NativePlayerHandle.sourceUrl(media, qualityIndex)
+                val start = if (fresh) currentPlanStart(media, url) else media
+                handle.load(start, qualityIndex)
             }
         }
         onHandle(handle)
@@ -1173,7 +1212,7 @@ private fun ExoSurface(
                     .inflate(layoutId, null, false) as PlayerView
                 view.apply {
                     this.player = exo
-                    useController = showControls
+                    useController = showControls && !waitingForStream
                     // Media3's own default is 3s — shares ChannelScreen's
                     // CONTROLS_AUTO_HIDE_MS instead so this controller's
                     // scrubber/play-pause bar fades on the same schedule as
@@ -1189,7 +1228,9 @@ private fun ExoSurface(
                 if (view.player !== exo) {
                     view.player = exo
                 }
-                view.useController = showControls
+                // No controls over the spinner: they'd only offer to play
+                // the stopped previous item.
+                view.useController = showControls && !waitingForStream
                 playerViewRef[0] = view
             },
             onRelease = { view ->

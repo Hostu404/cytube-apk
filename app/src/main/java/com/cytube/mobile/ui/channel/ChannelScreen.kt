@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -69,6 +70,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -180,6 +182,7 @@ fun ChannelScreen(
     val onJumpTo = remember(vm) { vm::jumpTo }
     val onDeleteItem = remember(vm) { vm::deleteItem }
     val onAttachPlayer = remember(vm) { vm::attachPlayer }
+    val onPlanStart = remember(vm) { vm::plannedStart }
     // Personal/unsynced playlist browsing — see ChannelViewModel's own doc
     // comment on pickPersonal for why this exists and what it does and does
     // not touch.
@@ -226,6 +229,7 @@ fun ChannelScreen(
                 onHandle = onAttachPlayer,
                 onFailed = vm::reportPlaybackFailure,
                 qualityIndex = state.nativeQualityIndex,
+                planStart = onPlanStart,
                 modifier = Modifier.fillMaxSize(),
                 // Each sample here is ONE instant of the video, and on
                 // fast-cutting content (an action scene, a music video) two
@@ -722,6 +726,15 @@ fun ChannelScreen(
                                 }
                         )
                     }
+                    if (state.canVoteskip && !state.personalPickActive &&
+                        state.channelCurrentMedia != null
+                    ) {
+                        VoteskipButton(
+                            voted = state.votedSkip,
+                            tally = state.voteskipTally?.toString(),
+                            onVote = vm::voteSkip
+                        )
+                    }
                     IconButton(onClick = vm::toggleFavourite) {
                         Icon(
                             if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
@@ -1212,6 +1225,46 @@ private fun NowPlayingBar(title: String, leader: String?) {
         )
         leader?.let {
             AssistChip(onClick = {}, label = { Text("Leader: $it", maxLines = 1) })
+        }
+    }
+}
+
+/**
+ * Vote to skip, in the top bar between the Niconico square and the star.
+ * Only there when the channel allows it and our rank may vote (and not on a
+ * personal pick — the vote is on the channel's item). Once voted it stays,
+ * dimmed, until the next video: the server counts one vote per video. While
+ * a vote is running the count sits above the icon like a fraction ("2/5");
+ * the server only sends that to ranks allowed to see it (moderators, by
+ * default).
+ */
+@Composable
+private fun VoteskipButton(voted: Boolean, tally: String?, onVote: () -> Unit) {
+    IconButton(
+        onClick = onVote,
+        enabled = !voted,
+        modifier = Modifier.semantics {
+            contentDescription = when {
+                voted && tally != null -> "Voted to skip, $tally"
+                voted -> "Voted to skip"
+                tally != null -> "Vote to skip this video, $tally"
+                else -> "Vote to skip this video"
+            }
+        }
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            if (tally != null) {
+                Text(
+                    tally,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
+                    maxLines = 1
+                )
+            }
+            Icon(
+                Icons.Default.SkipNext,
+                contentDescription = null,
+                modifier = Modifier.size(if (tally != null) 18.dp else 24.dp)
+            )
         }
     }
 }

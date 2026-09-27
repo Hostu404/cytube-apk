@@ -193,7 +193,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         // both fall back to bestSource, same as if this parameter never
         // existed.
         runCatching {
-            val source = media.direct.getOrNull(qualityIndex) ?: media.bestSource
+            val source = sourceFor(media, qualityIndex)
             val metadata = MediaMetadata.Builder().setTitle(media.title).build()
             val item = if (source != null) {
                 MediaItem.Builder()
@@ -353,6 +353,32 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         runCatching { exo.volume = volume.coerceIn(0f, 1f) }
     }
 
+    /**
+     * Stops and unloads the current item while the next one's stream is
+     * still being looked up, so it doesn't carry on playing meanwhile. The
+     * player itself stays, ready for the next load. The item is cleared out
+     * of ExoPlayer too, not just stopped: a play command from the media
+     * session (a headset, a TV remote) would otherwise prepare it again and
+     * play the previous video under the spinner. With no [mediaId],
+     * SyncEngine and the leader clock leave the player alone until the new
+     * item is loaded.
+     */
+    fun stop() {
+        if (isReleased) return
+        loadedKey = null
+        mediaId = null
+        mediaType = null
+        mediaLengthSeconds = 0
+        runCatching {
+            exo.stop()
+            exo.clearMediaItems()
+        }
+    }
+
+    /** Whether [media] is loaded (from whichever stream) and not stopped. */
+    fun hasLoaded(media: MediaFrame): Boolean =
+        loadedKey != null && mediaId == media.id && mediaType == media.type
+
     override fun release() {
         if (isReleased) return
         isReleased = true
@@ -363,6 +389,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         /** A target this close to the end of the buffer is treated as
          *  unbuffered: EXACT still needs data past it before it can resume. */
         private const val SEEK_BUFFER_MARGIN_MS = 1_000L
+
+        private fun sourceFor(media: MediaFrame, qualityIndex: Int) =
+            media.direct.getOrNull(qualityIndex) ?: media.bestSource
+
+        /** The address [load] plays for [media] at [qualityIndex]. */
+        fun sourceUrl(media: MediaFrame, qualityIndex: Int): String =
+            sourceFor(media, qualityIndex)?.link ?: media.id
 
         /** Identifies a [load] of [media] at [qualityIndex]. */
         fun loadKey(media: MediaFrame, qualityIndex: Int): String =

@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
@@ -24,6 +26,7 @@ import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
@@ -67,6 +70,7 @@ import androidx.compose.ui.unit.Density
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.text.input.ImeAction
@@ -247,20 +251,53 @@ fun ChatPanel(
     var showEmotePicker by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
+    // How fast messages are arriving, for the jump button below.
+    val arrivals = remember { ChatArrivals() }
+    var arrivalsPerSecond by remember { mutableFloatStateOf(0f) }
+
     // Only follow new messages when the user is already at the bottom. Yanking
     // the list down while someone is reading back is the single most annoying
-    // thing a chat client can do.
-    val pinnedToBottom by remember {
-        derivedStateOf {
+    // thing a chat client can do. Not recomputed from the layout on every
+    // message any more: chat now lands in batches (ChannelViewModel.
+    // runChatPump), and right after a batch is laid out the last visible row
+    // is several short of the end even for someone sitting at the bottom.
+    //  - Reaching the very end (by any means) always means follow.
+    //  - A scroll that ends having moved UP, or well short of the end, stops.
+    //  - One that ends near the end without moving up (a touch at the bottom
+    //    while a flood keeps landing) keeps following, and catches up on
+    //    what arrived while the finger was down.
+    var following by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }.collect { canScroll ->
+            if (!canScroll) following = true
+        }
+    }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) return@collect
             val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()
-            last == null || last.index >= info.totalItemsCount - 2
+            val last = info.visibleItemsInfo.lastOrNull() ?: return@collect
+            val itemsBelow = info.totalItemsCount - 1 - last.index
+            val slack = 3 + (arrivalsPerSecond * 0.5f).toInt()
+            following = !listState.canScrollForward ||
+                (!listState.lastScrolledBackward && itemsBelow <= slack)
+            if (following && listState.canScrollForward && info.totalItemsCount > 0) {
+                listState.scrollToItem(info.totalItemsCount - 1)
+            }
+        }
+    }
+    var countedUpToSeq by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    // Keeps the rate falling once a burst stops, while the button's showing.
+    LaunchedEffect(following) {
+        while (!following) {
+            delay(500)
+            arrivalsPerSecond = arrivals.perSecond(android.os.SystemClock.uptimeMillis())
         }
     }
 
     // The very first time this channel's history actually has anything in
     // it, land on the newest message unconditionally — not gated on
-    // pinnedToBottom, which reads the LazyColumn's own layoutInfo and can
+    // following, since the LazyColumn's own layout can
     // still be settling from the empty-list state at the exact moment the
     // whole chat backlog arrives in one burst right after joining. There is
     // no way the user could have scrolled away from a chat that had nothing
@@ -278,13 +315,38 @@ fun ChatPanel(
     // would silently stop autoscrolling for the rest of the session.
     LaunchedEffect(messages.lastOrNull()?.seq) {
         if (messages.isEmpty()) return@LaunchedEffect
+        val now = android.os.SystemClock.uptimeMillis()
+        if (countedUpToSeq != Long.MIN_VALUE) {
+            arrivals.record(now, messages.count { it.seq > countedUpToSeq })
+        }
+        countedUpToSeq = messages.last().seq
+        arrivalsPerSecond = arrivals.perSecond(now)
         if (!hasJumpedToInitialBottom) {
             hasJumpedToInitialBottom = true
+            following = true
             listState.scrollToItem(messages.lastIndex)
-        } else if (pinnedToBottom) {
+        } else if (following && !listState.isScrollInProgress) {
+            // Not mid-swipe: someone starting to scroll up must not be
+            // yanked back down by the next batch before they let go.
             listState.scrollToItem(messages.lastIndex)
         }
     }
+
+    // "Jump to latest", when getting back down by hand would take more than
+    // a few seconds — see ChatJump. Touch only (TV has no scrolled-up chat).
+    val showJump by remember(messagesFocusable) {
+        derivedStateOf {
+            if (!messagesFocusable || following) return@derivedStateOf false
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf false
+            ChatJump.shouldShow(
+                itemsBelow = info.totalItemsCount - 1 - lastVisible.index,
+                visibleItems = info.visibleItemsInfo.size,
+                arrivalsPerSecond = arrivalsPerSecond
+            )
+        }
+    }
+    val scope = rememberCoroutineScope()
 
     // The app calls enableEdgeToEdge() (MainActivity), and nothing else in
     // the tree ever consumed the IME inset before this — confirmed via a
@@ -301,9 +363,10 @@ fun ChatPanel(
     // some OS versions from ALSO panning the window on top of this, which is
     // what was pushing the input field far higher than the keyboard needs.)
     Column(modifier.fillMaxSize()) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth()
+            modifier = Modifier.fillMaxSize()
                 // Swallowing Up/Down here (rather than relying on every
                 // ChatRow's clickable bits somehow not being focusable) is
                 // what actually guarantees this: it stops D-pad focus from
@@ -363,6 +426,27 @@ fun ChatPanel(
                     onPmReply = onStartPm
                 )
             }
+        }
+        // Qualified: inside a Box inside a Column, the bare name resolves to
+        // ColumnScope's version, which can't be called from the Box.
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showJump,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+        ) {
+            FilledTonalButton(
+                onClick = {
+                    following = true
+                    scope.launch { if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex) }
+                },
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Icon(Icons.Default.ArrowDownward, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Jump to latest")
+            }
+        }
         }
 
         HorizontalDivider()
@@ -772,7 +856,7 @@ private const val NEKO_CATCHUP_COUNT = 5
 /** Most new messages queued in one go — see the LaunchedEffect(messages). */
 private const val NEKO_MAX_BURST = 20
 /** Most messages waiting to fly at once — see NekoOverlayState.pending. */
-private const val NEKO_MAX_QUEUE = 50
+private const val NEKO_MAX_QUEUE = 30
 
 private val NEKO_LINK_COLOR = Color(0xFF80D8FF)
 
