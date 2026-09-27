@@ -71,7 +71,8 @@ object StreamableResolver {
             val resolved = bestStream(files)
                 ?: throw IllegalStateException("No playable MP4 found for Streamable video")
 
-            Log.i(TAG, "resolved $id -> ${resolved.label} (${resolved.url})")
+            // Host only: the full address is a signed link to the stream.
+            Log.i(TAG, "resolved $id -> ${resolved.label} (${android.net.Uri.parse(resolved.url).host})")
             cache.put(id, resolved)
             resolved
         }.onFailure {

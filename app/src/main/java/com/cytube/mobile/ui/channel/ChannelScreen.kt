@@ -23,7 +23,6 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
@@ -90,8 +89,8 @@ private enum class Panel { PLAYLIST, USERS, POLL }
  *  exists. Low on purpose: a single sample should nudge the color, not set
  *  it, so a fast-cutting video's glow drifts with the overall footage
  *  instead of snapping to whatever one frame happened to look like. Kept
- *  gentle enough that, combined with the long near-continuous crossfade in
- *  WindowedAmbientGlow, the color's motion stays subtle rather than a
+ *  gentle enough that, combined with the long near-continuous crossfade
+ *  behind the windowed player, the color's motion stays subtle rather than a
  *  series of visible steps. */
 private const val AMBIENT_SAMPLE_BLEND = 0.22f
 
@@ -183,6 +182,9 @@ fun ChannelScreen(
     val onDeleteItem = remember(vm) { vm::deleteItem }
     val onAttachPlayer = remember(vm) { vm::attachPlayer }
     val onPlanStart = remember(vm) { vm::plannedStart }
+    // Held like the others: a fresh function reference on every state
+    // change counted as a new argument, so the player area couldn't skip.
+    val onPlaybackFailed = remember(vm) { vm::reportPlaybackFailure }
     // Personal/unsynced playlist browsing — see ChannelViewModel's own doc
     // comment on pickPersonal for why this exists and what it does and does
     // not touch.
@@ -205,8 +207,8 @@ fun ChannelScreen(
 
     val ambientGlowEnabledState = rememberUpdatedState(state.ambientGlowEnabled)
 
-    // Dominant color behind the windowed player (see WindowedAmbientGlow
-    // below) — a single stable holder for the whole life of this screen, not
+    // Dominant color behind the windowed player (the glow drawn behind it
+    // in the windowed layout below) — a single stable holder for the whole life of this screen, not
     // re-remembered per media id, since the callback captured inside
     // playerContent (created exactly once, just below) needs to keep
     // writing to the SAME state object for as long as this screen exists.
@@ -227,7 +229,7 @@ fun ChannelScreen(
                 // transition (video <-> chat) added for TV below.
                 showControls = !fullscreen && !pipModeState.value && !isTv,
                 onHandle = onAttachPlayer,
-                onFailed = vm::reportPlaybackFailure,
+                onFailed = onPlaybackFailed,
                 qualityIndex = state.nativeQualityIndex,
                 planStart = onPlanStart,
                 modifier = Modifier.fillMaxSize(),
@@ -247,11 +249,15 @@ fun ChannelScreen(
                 // first sample of a new item (ambientColor still null there,
                 // per the LaunchedEffect above) so a fresh item still snaps
                 // to its own color immediately rather than easing up from
-                // the previous item's leftover one. Only when the glow is on,
-                // and never on TV, which has no windowed layout to show it
-                // in (and whose setting is hidden, so it stays at its
-                // default of on).
-                onFrameSnapshot = if (ambientGlowEnabledState.value && !isTv) {
+                // the previous item's leftover one. Only when the glow is on
+                // and can be seen: never on TV, which has no windowed layout
+                // to show it in (and whose setting is hidden, so it stays at
+                // its default of on), and not in fullscreen or PiP, where
+                // it isn't drawn — sampling there was a frame grab every few
+                // seconds for nothing.
+                onFrameSnapshot = if (ambientGlowEnabledState.value && !isTv &&
+                    !fullscreen && !pipModeState.value
+                ) {
                     { bitmap ->
                         val sample = averageColor(bitmap)
                         ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
@@ -267,7 +273,16 @@ fun ChannelScreen(
     // (play vs. pause, whether PiP is even applicable right now) stays
     // current, and cleared when this screen goes away.
     val onTogglePlayPause = remember(vm) { vm::togglePlaybackFromPip }
-    val onPipLeft = remember(vm) { vm::onPipLeft }
+    // Set when the PiP window is closed (not expanded); see justExitedPip.
+    // A plain holder, not state: MainActivity reports this in the same
+    // callback that ends PiP, before the recomposition that reads it.
+    val pipWindowClosed = remember { booleanArrayOf(false) }
+    val onPipLeft: (Boolean) -> Unit = remember(vm) {
+        { closed: Boolean ->
+            if (closed) pipWindowClosed[0] = true
+            vm.onPipLeft(closed)
+        }
+    }
     SideEffect {
         onPlaybackHostChange(
             PlaybackHost(
@@ -303,7 +318,14 @@ fun ChannelScreen(
     // to whatever `fullscreen` happened to be before backgrounding, or to
     // the physical orientation at the moment (see the guard on
     // lastOrientation below for why that alone isn't reliable either).
-    if (justExitedPip) fullscreen = true
+    // Only when it was expanded, though. Closed with its X, the Activity is
+    // stopped and doesn't recompose until the app is opened again — which
+    // used to land here too, and forced landscape fullscreen on someone
+    // holding the phone upright.
+    if (justExitedPip) {
+        if (!pipWindowClosed[0]) fullscreen = true
+        pipWindowClosed[0] = false
+    }
 
     // Fullscreen: prefer landscape, hide chrome, restore cleanly on exit.
     // "Chrome" here includes Android's own system bars — without hiding
@@ -726,8 +748,12 @@ fun ChannelScreen(
                                 }
                         )
                     }
+                    // Compatibility View drops this connection (the page has
+                    // its own), and a vote while disconnected goes nowhere.
                     if (state.canVoteskip && !state.personalPickActive &&
-                        state.channelCurrentMedia != null
+                        state.channelCurrentMedia != null &&
+                        state.connection == ConnectionState.CONNECTED &&
+                        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
                     ) {
                         VoteskipButton(
                             voted = state.votedSkip,
@@ -798,8 +824,8 @@ fun ChannelScreen(
 
             // The fullscreen toggle used to just sit on screen forever — a
             // bare white icon with nothing behind it reads as a stray white
-            // square parked over the video. Fading it out after a few
-            // idle seconds, and back in the instant the player is touched,
+            // square parked over the video. Fading it out after a moment
+            // idle (CONTROLS_AUTO_HIDE_MS), and back in the instant the player is touched,
             // matches how the true-fullscreen controls below already work.
             var windowedControlsVisible by remember { mutableStateOf(true) }
             LaunchedEffect(windowedControlsVisible, webMode) {

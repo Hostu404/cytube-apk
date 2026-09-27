@@ -88,8 +88,7 @@ fun LoginScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Button(
-                    // logout() forgets the session at once; the server-side
-                    // revoke runs in the background and never blocks this.
+                    // logout() forgets the session at once and never blocks.
                     onClick = {
                         session = null
                         auth.logout()

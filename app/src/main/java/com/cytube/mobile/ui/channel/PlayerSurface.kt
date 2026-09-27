@@ -160,6 +160,11 @@ private const val STALL_TRIGGER_MS = 3_000L
  *  not counted as a bandwidth stall — see ExoSurface's listener. */
 private const val SEEK_BUFFERING_WINDOW_MS = 1_000L
 
+/** Buffering that begins this soon after video is switched on or off (the
+ *  app leaving or returning from the background) is that switch's cost, not
+ *  a bandwidth stall — see NativePlayerHandle.videoToggledAtMs. */
+private const val VIDEO_TOGGLE_BUFFERING_WINDOW_MS = 2_000L
+
 @Composable
 fun PlayerSurface(
     media: MediaFrame?,
@@ -373,6 +378,7 @@ private fun EmbedSurface(
     // in onPageFinished (a provider page's video is inside a cross-origin
     // iframe that script can't reach).
     val isProviderPage = type in PROVIDER_EMBED_TYPES
+    val isTv = remember { isTvDevice(context) }
     var isReady by remember { mutableStateOf(false) }
     var failureReported by remember { mutableStateOf(false) }
     fun reportFailure(reason: String) {
@@ -434,22 +440,20 @@ private fun EmbedSurface(
                         request: WebResourceRequest
                     ): Boolean {
                         if (!request.isForMainFrame) return false
-                        if (sameSite(request.url.host, embedHost)) return false
-                        openInBrowser(context, request.url.toString())
+                        // A provider page is our own inline HTML, whose main
+                        // frame never navigates by itself: this is a link
+                        // tapped inside the provider's player (its title or
+                        // logo). Followed here it replaced the player with
+                        // the provider's website, and sync with it. A
+                        // directly loaded page may move around its own site.
+                        if (!isProviderPage && sameSite(request.url.host, embedHost)) return false
+                        // A directly loaded link that redirects (a short link,
+                        // a host moving its player) is still the video.
+                        if (!isProviderPage && request.isRedirect) return false
+                        // Only for a tap: a page redirecting by itself must
+                        // not keep throwing the user out to the browser.
+                        if (request.hasGesture()) openInBrowser(context, request.url.toString())
                         return true
-                    }
-
-                    override fun shouldInterceptRequest(
-                        view: WebView,
-                        request: WebResourceRequest
-                    ): android.webkit.WebResourceResponse? {
-                        if (type == "yt") {
-                            Log.d(
-                                "CyTubePlayer",
-                                "yt embed request method=${request.method} host=${request.url.host}"
-                            )
-                        }
-                        return null
                     }
 
                     // A directly loaded link that fails to load at all (dead
@@ -605,7 +609,9 @@ private fun EmbedSurface(
                             return true
                         }
 
-                        Log.w(
+                        // The provider page's own console, for debugging an
+                        // embed that won't play; not a warning in itself.
+                        Log.d(
                             "CyTubePlayer",
                             "embed console [${consoleMessage.messageLevel()}] " +
                                 "${consoleMessage.message()} " +
@@ -640,7 +646,10 @@ private fun EmbedSurface(
                 }
             }
         },
-        update = { it.requestFocus() },
+        // TV only, for the remote. On a phone this took focus from the chat
+        // box, closing the keyboard mid-message, whenever the playlist moved
+        // to an embedded video.
+        update = { if (isTv) it.requestFocus() },
         onRelease = {
             // Releasing is how the ViewModel learns this player is gone —
             // see ChannelViewModel.player.
@@ -987,9 +996,11 @@ private fun ExoSurface(
 
             // STATE_ENDED is ExoPlayer's own terminal state for "ran off the
             // end of the media on its own" — distinct from a seek (which
-            // never leaves STATE_READY) or a manual stop/release (which
-            // tears the listener down via onDispose below before this could
-            // fire). Drives personal/unsynced playlist auto-advance — see
+            // never leaves STATE_READY), a release (the listener is removed
+            // on dispose first), or the empty player NativePlayerHandle.stop
+            // leaves while a stream is looked up (loadedKey is null then; a
+            // play command "ends" its empty playlist at once). Drives
+            // personal/unsynced playlist auto-advance — see
             // PlayerSurface's onEnded doc comment and
             // ChannelViewModel.onPlaybackEnded, the only place that acts on
             // it; normal synced playback never reads it at all.
@@ -1010,9 +1021,6 @@ private fun ExoSurface(
             // waiting for the slow, high-bitrate stream to finish gathering
             // seconds of data that will just be discarded on reload.
             override fun onPlaybackStateChanged(playbackState: Int) {
-                // Not for an emptied player (see NativePlayerHandle.stop):
-                // a play command from the media session while it waits for
-                // the next stream "ends" its empty playlist straight away.
                 if (playbackState == Player.STATE_ENDED && handle.loadedKey != null) {
                     currentOnEnded?.invoke()
                 }
@@ -1050,8 +1058,12 @@ private fun ExoSurface(
                         // Only mid-playback rebuffers count as stalls. The initial buffer-up
                         // (discovering container index/moov atom and seeking to start position on
                         // large files) can take several seconds and is NOT a bandwidth stall.
-                        val seekInduced = SystemClock.elapsedRealtime() - lastSeekAtMs < SEEK_BUFFERING_WINDOW_MS
-                        if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced) {
+                        val nowMs = SystemClock.elapsedRealtime()
+                        val seekInduced = nowMs - lastSeekAtMs < SEEK_BUFFERING_WINDOW_MS
+                        // Likewise video being switched back on when the app
+                        // returns from the background (see videoToggledAtMs).
+                        val videoToggleInduced = nowMs - handle.videoToggledAtMs < VIDEO_TOGGLE_BUFFERING_WINDOW_MS
+                        if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced && !videoToggleInduced) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start
                             stallJob?.cancel()
@@ -1065,6 +1077,8 @@ private fun ExoSurface(
                                     // Still stalled: report what has actually
                                     // accumulated, same as the READY path.
                                     currentOnStall?.invoke(SystemClock.elapsedRealtime() - start + priorStalled)
+                                    // Reported: don't count it again when it ends.
+                                    stallStartedAtMs = 0L
                                 }
                             }
                         }
@@ -1176,7 +1190,13 @@ private fun ExoSurface(
                 val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView
                 if (textureView != null && textureView.isAvailable) {
                     runCatching {
-                        val bmp = textureView.bitmap
+                        // Half size (a quarter of the pixels): it's only on
+                        // screen for the moment the new stream takes to start,
+                        // and a full-size copy is a big main-thread read.
+                        val bmp = textureView.getBitmap(
+                            (textureView.width / 2).coerceAtLeast(1),
+                            (textureView.height / 2).coerceAtLeast(1)
+                        )
                         if (bmp != null) {
                             transitionFreezeFrame?.recycle()
                             transitionFreezeFrame = bmp
@@ -1205,11 +1225,11 @@ private fun ExoSurface(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                // Dynamically inflated: TextureView on standard mobile devices (player_view.xml)
-                // and Android TV / Fire TV (player_view_tv.xml) for smooth transitions and frame capture.
-                val layoutId = if (isTv) R.layout.player_view_tv else R.layout.player_view
+                // Inflated from XML (player_view.xml) because a TextureView
+                // surface can only be chosen there; it's what frame capture
+                // (ambient glow, the quality-switch freeze frame) needs.
                 val view = LayoutInflater.from(ctx)
-                    .inflate(layoutId, null, false) as PlayerView
+                    .inflate(R.layout.player_view, null, false) as PlayerView
                 view.apply {
                     this.player = exo
                     useController = showControls && !waitingForStream

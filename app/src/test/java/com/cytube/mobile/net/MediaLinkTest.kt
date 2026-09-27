@@ -110,4 +110,10 @@ class MediaLinkTest {
         fails("")
         fails("   ")
     }
+
+    @Test fun aStrayPercentSignIsNotACrash() {
+        // URLDecoder throws on an incomplete escape; parse must not.
+        assertTrue(MediaLink.parse("https://youtube.com/watch?v=abc%").isFailure)
+        assertTrue(MediaLink.parse("https://www.youtube.com/watch?v=%zz").isFailure)
+    }
 }

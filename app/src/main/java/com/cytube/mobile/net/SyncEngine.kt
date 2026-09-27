@@ -271,7 +271,7 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 if (opened) {
                     memory.learnOpenLead(
                         openLandingServer,
-                        (openLandingLead + LEAD_LEARN_GAIN * behind).coerceIn(0.0, MAX_OPEN_LEAD_SECONDS)
+                        (openLandingLead + LEAD_LEARN_GAIN * behind).coerceIn(0.0, LeadMemory.MAX_OPEN_LEAD_SECONDS)
                     )
                 }
                 if (-behind >= HOLD_MIN_SECONDS && -behind <= MAX_HOLD_SECONDS) {
@@ -423,7 +423,6 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
 
         /** Below this the server's lead-in covers the load; no open lead. */
         const val MIN_JOIN_POSITION_SECONDS = 10.0
-        const val MAX_OPEN_LEAD_SECONDS = 20.0
         /** Landing less than this far ahead is left to the rate nudge. */
         const val HOLD_MIN_SECONDS = 1.5
         /** Further ahead than this, something else is wrong: correct normally. */
@@ -460,7 +459,7 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
 
     @Synchronized fun restore(saved: Map<String, Double>) {
         for ((server, seconds) in saved) {
-            if (server.isNotBlank() && seconds.isFinite()) learnOpenLead(server, seconds.coerceIn(0.0, 20.0))
+            if (server.isNotBlank() && seconds.isFinite()) learnOpenLead(server, seconds.coerceIn(0.0, MAX_OPEN_LEAD_SECONDS))
         }
     }
 
@@ -470,6 +469,7 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
          *  landing late means a second request, and on a slow server a
          *  second long wait — so this errs on the generous side. */
         const val DEFAULT_OPEN_LEAD_SECONDS = 6.0
+        const val MAX_OPEN_LEAD_SECONDS = 20.0
         private const val MAX_SERVERS = 50
         val shared = LeadMemory()
 

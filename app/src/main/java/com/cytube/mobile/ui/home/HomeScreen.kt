@@ -205,7 +205,7 @@ fun HomeScreen(
             } else if (state.indexUnavailable && state.filtered.isEmpty()) {
                 item { IndexUnavailableNote() }
             } else {
-                items(state.filtered, key = { it.name }) { channel ->
+                items(state.filtered, key = { "pub-${it.name}" }) { channel ->
                     PublicChannelRow(
                         channel = channel,
                         isFavourite = channel.name in state.favourites,

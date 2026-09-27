@@ -66,7 +66,6 @@ object ChatHtml {
      *  support below) doesn't mean growing every function's parameter list
      *  one more time. */
     private class RenderCtx(
-        val linkColor: Color,
         val showImages: Boolean,
         val dropImages: Boolean,
         val images: MutableList<String>,
@@ -75,12 +74,16 @@ object ChatHtml {
         val revealedSpoilers: Set<Int>
     ) {
         /** Assigns each spoiler span encountered its index, in document
-         *  order; also doubles as the final spoiler count once walking
-         *  finishes (see [render]'s Rendered.spoilerCount). */
+         *  order. */
         var spoilerIndex = 0
 
         /** True once any emote has been left out for being over the cap. */
         var droppedEmote = false
+
+        /** Inside a spoiler that's still hidden: its links and emotes are
+         *  plain (hidden) text until it's revealed, or they'd show through —
+         *  a link in its colour, an emote as a picture. */
+        var inHiddenSpoiler = false
 
         /** Set when an emote is left out, so the whitespace that separated it
          *  from the next word goes with it. Without this, "lol A B C D E ok"
@@ -99,18 +102,16 @@ object ChatHtml {
          * the case where making them bigger doesn't cost anything (there's
          * no surrounding text for a taller row to crowd).
          */
-        val soloEmoteCount: Int = 0,
-        /** How many distinct `[spoiler]` spans this message has. 0 for the
-         *  overwhelming majority of messages — lets ChatRow skip allocating
-         *  any per-message reveal state for those. */
-        val spoilerCount: Int = 0
+        val soloEmoteCount: Int = 0
     )
 
     private data class RenderCacheKey(
         val raw: String,
         val greentext: Boolean,
         val showImages: Boolean,
-        val emotesHash: Int,
+        /** EmoteSet.id, or 0 when emotes don't come into it (neither shown
+         *  nor dropped), so an emote update doesn't re-parse plain text. */
+        val emotesId: Long,
         val dropImages: Boolean,
         val revealSpoilers: Boolean,
         val revealedSpoilers: Set<Int>
@@ -189,7 +190,7 @@ object ChatHtml {
             raw = raw,
             greentext = greentext,
             showImages = showImages,
-            emotesHash = System.identityHashCode(emotes),
+            emotesId = if (showImages || dropImages) emotes.id else 0L,
             dropImages = dropImages,
             revealSpoilers = revealSpoilers,
             revealedSpoilers = revealedSpoilers
@@ -215,7 +216,6 @@ object ChatHtml {
         }
         val raw = key.raw
         val greentext = key.greentext
-        val linkColor = Color.Unspecified
 
         // Emote substitution happens here, exactly as the official client does
         // it on receipt (util.js:1508). Needed whenever emotes will be shown OR
@@ -230,7 +230,7 @@ object ChatHtml {
         if (html.indexOf('<') < 0 && html.indexOf('&') < 0) {
             val plain = buildAnnotatedString {
                 if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
-                appendLinkified(html, linkColor)
+                appendLinkified(html)
                 if (greentext) pop()
             }
             val result = Rendered(plain, emptyList())
@@ -243,7 +243,7 @@ object ChatHtml {
         val images = mutableListOf<String>()
         val body = Jsoup.parseBodyFragment(html).body()
         val ctx = RenderCtx(
-            linkColor, key.showImages, key.dropImages, images, EmoteBudget(),
+            key.showImages, key.dropImages, images, EmoteBudget(),
             key.revealSpoilers, key.revealedSpoilers
         )
 
@@ -258,7 +258,7 @@ object ChatHtml {
             val end = annotated.text.trimEnd().length
             if (end < annotated.length) annotated = annotated.subSequence(0, end)
         }
-        val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.spoilerIndex)
+        val result = Rendered(annotated, images, soloEmoteCount(annotated, images))
         synchronized(renderCache) {
             renderCache.put(key, result)
         }
@@ -304,7 +304,8 @@ object ChatHtml {
                         text = text.trimStart()
                         if (text.isNotEmpty()) ctx.swallowLeadingSpace = false
                     }
-                    builder.appendLinkified(text, ctx.linkColor)
+                    if (ctx.inHiddenSpoiler) builder.append(text)
+                    else builder.appendLinkified(text)
                 }
                 is Element -> when (child.tagName().lowercase()) {
                     "br" -> builder.append("\n")
@@ -336,6 +337,7 @@ object ChatHtml {
                                 ctx.droppedEmote = true
                                 ctx.swallowLeadingSpace = true
                             }
+                            ctx.showImages && ctx.inHiddenSpoiler -> builder.append(alt.ifBlank { "[emote]" })
                             ctx.showImages -> {
                                 ctx.images.add(src)
                                 val code = alt.ifBlank { "[emote]" }
@@ -352,10 +354,10 @@ object ChatHtml {
                         }
                     }
 
-                    "a" -> {
+                    "a" -> if (ctx.inHiddenSpoiler) walk(child, builder, ctx) else {
                         builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
                         builder.pushStyle(
-                            SpanStyle(color = ctx.linkColor, textDecoration = TextDecoration.Underline)
+                            SpanStyle(textDecoration = TextDecoration.Underline)
                         )
                         walk(child, builder, ctx)
                         builder.pop(); builder.pop()
@@ -386,16 +388,20 @@ object ChatHtml {
      * A `[spoiler]`/`<span class="spoiler">` span. Always gets a SPOILER_TAG
      * annotation carrying its own index, whether hidden or not, so ChatRow
      * can find "which spoiler is under this tap" even for one that's already
-     * revealed (tapping it again re-hides it — see ChatRow). Only the style
-     * changes: color-matched-to-background (indistinguishable from a solid
-     * blank run) while hidden, no special style at all once revealed.
+     * revealed (tapping its plain text again re-hides it — see ChatRow).
+     * Hidden: colour-matched to its background (a solid blank run), with any
+     * links and emotes inside drawn as plain hidden text (see
+     * RenderCtx.inHiddenSpoiler). Revealed: no special style at all.
      */
     private fun spoiler(child: Element, builder: AnnotatedString.Builder, ctx: RenderCtx) {
         val index = ctx.spoilerIndex++
         val hidden = !ctx.revealSpoilers && index !in ctx.revealedSpoilers
         builder.pushStringAnnotation(SPOILER_TAG, index.toString())
         builder.pushStyle(if (hidden) SpanStyle(background = SPOILER, color = SPOILER) else SpanStyle())
+        val outer = ctx.inHiddenSpoiler
+        ctx.inHiddenSpoiler = outer || hidden
         walk(child, builder, ctx)
+        ctx.inHiddenSpoiler = outer
         builder.pop(); builder.pop()
     }
 
@@ -425,7 +431,9 @@ object ChatHtml {
      */
     private val URL_PATTERN = Regex("https?://[^\\s<>\"']+")
 
-    private fun AnnotatedString.Builder.appendLinkified(text: String, linkColor: Color) {
+    /** Link colour is added afterwards (see withLinkColor), so one parse
+     *  serves every caller whatever its theme. */
+    private fun AnnotatedString.Builder.appendLinkified(text: String) {
         if (!text.contains("http", ignoreCase = true)) {
             append(text)
             return
@@ -436,7 +444,7 @@ object ChatHtml {
             // Trailing punctuation is almost never part of the URL.
             val url = m.value.trimEnd('.', ',', ')', ']', '!', '?', ';', ':')
             pushStringAnnotation(LINK_TAG, url)
-            pushStyle(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
+            pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
             append(url)
             pop(); pop()
             append(m.value.substring(url.length))

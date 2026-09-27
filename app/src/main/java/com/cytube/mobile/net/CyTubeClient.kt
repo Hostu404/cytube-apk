@@ -18,8 +18,11 @@ import java.net.URI
  *
  * Design note on rejoining: Socket.IO reconnects by itself, but CyTube does NOT
  * restore session or channel membership on its own. Every "connect" must replay
- * login -> joinChannel -> channelPassword. That replay lives here so callers
- * cannot forget it.
+ * login -> joinChannel (with the channel password, if there is one). That
+ * replay lives here so callers cannot forget it.
+ *
+ * Socket.IO calls every handler below on its own thread; the fields they
+ * write are @Volatile because the main thread reads them.
  */
 class CyTubeClient(
     private val http: OkHttpClient,
@@ -36,19 +39,25 @@ class CyTubeClient(
     )
     val events: SharedFlow<CyTubeEvent> = _events.asSharedFlow()
 
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
+
+    /** Bumped by every connect() and disconnect(). A connect() that finds it
+     *  changed after its (suspending) server lookup was overtaken — by a
+     *  newer connect or a disconnect — and must not open a socket, or the
+     *  app ends up with a second live connection nothing can close. */
+    @Volatile private var generation = 0
 
     // Replayed on every reconnect.
-    private var channelName: String? = null
-    private var channelPassword: String? = null
-    private var credential: Credential? = null
+    @Volatile private var channelName: String? = null
+    @Volatile private var channelPassword: String? = null
+    @Volatile private var credential: Credential? = null
 
-    var localUsername: String? = null
-        private set
-    var leaderName: String? = null
-        private set
+    @Volatile private var localUsername: String? = null
+    @Volatile private var leaderName: String? = null
+    /** The server confirmed our login on this connection (see "rank"). */
+    @Volatile private var loginConfirmed = false
 
-    val isLeader: Boolean get() = leaderName != null && leaderName == localUsername
+    private val isLeader: Boolean get() = leaderName != null && leaderName == localUsername
 
     /**
      * A logged-in session cookie (from AuthRepository's web login — no
@@ -61,11 +70,20 @@ class CyTubeClient(
 
     suspend fun connect(channel: String, credential: Credential?, password: String? = null) {
         disconnect()
+        val gen = generation
         channelName = channel
         channelPassword = password
         this.credential = credential
 
-        val serverUrl = resolver.resolve(channel)
+        val serverUrl = try {
+            resolver.resolve(channel)
+        } catch (e: Exception) {
+            // Overtaken meanwhile: the newer connect decides what's shown,
+            // not this one's failure.
+            if (gen != generation) return
+            throw e
+        }
+        if (gen != generation) return
 
         val opts = IO.Options().apply {
             transports = arrayOf("websocket", "polling")
@@ -94,6 +112,7 @@ class CyTubeClient(
             // the old one now; the server sends setLeader after the join if
             // there still is one.
             leaderName = null
+            loginConfirmed = false
             emit(CyTubeEvent.Connected)
             replaySession()
         }
@@ -115,12 +134,22 @@ class CyTubeClient(
 
         obj(s, "login") { o ->
             val ok = o.optBoolean("success", false)
-            if (ok) localUsername = o.optString("name").ifBlank { null }
+            if (ok) {
+                localUsername = o.optString("name").ifBlank { null }
+                loginConfirmed = true
+            }
             CyTubeEvent.LoginResult(ok, o.optString("name").ifBlank { null },
                 o.optString("error").ifBlank { null })
         }
         s.on("rank") { args ->
-            emit(CyTubeEvent.RankChanged((args.firstOrNull() as? Number)?.toDouble() ?: 0.0))
+            val rank = (args.firstOrNull() as? Number)?.toDouble() ?: 0.0
+            // A valid login cookie gets "login" then "rank" as soon as the
+            // socket connects (user.js); an expired or revoked one gets just
+            // rank -1, i.e. treated as anonymous, with nothing else said.
+            if (credential is Credential.Cookie && !loginConfirmed && rank < 0) {
+                emit(CyTubeEvent.SessionExpired)
+            }
+            emit(CyTubeEvent.RankChanged(rank))
         }
         s.on("needPassword") { args ->
             emit(CyTubeEvent.NeedPassword(args.firstOrNull() as? Boolean ?: false))
@@ -206,6 +235,8 @@ class CyTubeClient(
         }
         obj(s, "removeEmote") { CyTubeEvent.EmoteRemoved(it.optString("name", "")) }
         obj(s, "setPermissions") { CyTubeEvent.PermissionsChanged(Permissions(it)) }
+        // The server withdrew our skip vote (we went AFK: user.js setAFK).
+        s.on("clearVoteskipVote") { emit(CyTubeEvent.VoteskipVoteCleared) }
         // Sent on join and whenever a moderator changes the channel settings
         // (src/channel/opts.js). The server's own default is on.
         obj(s, "channelOpts") { CyTubeEvent.VoteskipAllowed(it.optBoolean("allow_voteskip", true)) }
@@ -230,31 +261,34 @@ class CyTubeClient(
     /** Runs on every connect, first or otherwise. */
     private fun replaySession() {
         val s = socket ?: return
-        when (val c = credential) {
-            is Credential.Guest -> s.emit("login", JSONObject().put("name", c.name))
-            is Credential.Cookie -> {
-                // The auth cookie was verified during the handshake by
-                // ioserver.js authUserMiddleware; no login frame is needed.
-                localUsername = c.name
-            }
-            null -> Unit
+        // A cookie login needs no frame: ioserver.js authUserMiddleware
+        // checks the cookie during the handshake, and the server then says
+        // "login" itself (or, for a dead cookie, nothing — see "rank").
+        (credential as? Credential.Guest)?.let { s.emit("login", JSONObject().put("name", it.name)) }
+        // The password goes in the join itself (accesscontrol.js checks
+        // data.pw). Sent as a separate "channelPassword" frame straight
+        // after, it arrived before the server was listening for one and was
+        // dropped, so every reconnect asked for the password again.
+        channelName?.let { name ->
+            s.emit("joinChannel", JSONObject().put("name", name).apply {
+                channelPassword?.let { put("pw", it) }
+            })
         }
-        channelName?.let { s.emit("joinChannel", JSONObject().put("name", it)) }
-        channelPassword?.let { s.emit("channelPassword", it) }
     }
 
     // ---- outbound ----
 
     /**
-     * Re-sends the login frame with a new name after the server rejects a
-     * guest name (usually "already in use"), without tearing the socket down.
-     * No-op if we are not actually a guest — an account login failing is a bad
-     * password, which a new name can't fix.
+     * Re-sends the guest login frame without tearing the socket down: with a
+     * new [name] after the server rejects one (usually "already in use"), or
+     * with the same name (null) after a wait. No-op if we are not actually a
+     * guest.
      */
-    fun retryGuestLogin(name: String) {
-        if (credential !is Credential.Guest) return
-        credential = Credential.Guest(name)
-        socket?.emit("login", JSONObject().put("name", name))
+    fun retryGuestLogin(name: String? = null) {
+        val current = credential as? Credential.Guest ?: return
+        val next = name ?: current.name
+        credential = Credential.Guest(next)
+        socket?.emit("login", JSONObject().put("name", next))
     }
 
     fun sendChat(message: String) {
@@ -319,6 +353,7 @@ class CyTubeClient(
     }
 
     fun disconnect() {
+        generation++
         socket?.let {
             it.off()
             it.disconnect()
@@ -330,6 +365,7 @@ class CyTubeClient(
         channelPassword = null
         credential = null
         localUsername = null
+        loginConfirmed = false
     }
 
     // ---- helpers ----

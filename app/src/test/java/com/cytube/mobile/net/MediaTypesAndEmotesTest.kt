@@ -22,6 +22,8 @@ class MediaTypesAndEmotesTest {
         assertEquals(MediaTypes.Player.PEERTUBE, MediaTypes.playerFor("pt", hasDirect = false))
         assertEquals(MediaTypes.Player.EMBED, MediaTypes.playerFor("vi", hasDirect = false, embedPlayableSrc = "https://player.vimeo.com/video/1"))
         assertEquals(MediaTypes.Player.WEB, MediaTypes.playerFor("tw", hasDirect = false))
+        // RTMP needs a Media3 extension the app doesn't include.
+        assertEquals(MediaTypes.Player.WEB, MediaTypes.playerFor("rt", hasDirect = false))
     }
 
     @Test fun peertubeEmbedUrlRejectsSmuggledHosts() {
@@ -68,7 +70,7 @@ class MediaTypesAndEmotesTest {
         val set = EmoteSet.from(listOf(kappa))
         val renamed = set.withRenamed("Kappa", Emote("KappaPride", kappa.image, ""))
         assertEquals(listOf("KappaPride"), renamed.all.map { it.name })
-        assertTrue(set.withRemoved("Kappa").isEmpty)
+        assertTrue(set.withRemoved("Kappa").all.isEmpty())
     }
 
     @Test fun noEmotesMeansTextUntouched() =

@@ -1,6 +1,7 @@
 package com.cytube.mobile.player
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
@@ -23,9 +24,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Media3 backend. Covers the CyTube types that are genuine media URLs:
- * fi (raw file), hl (HLS), rt (RTMP/RTSP), cm (custom manifest) and Vimeo when
- * meta.direct is set.
+ * Media3 backend. Plays the CyTube types that are genuine media URLs — fi
+ * (raw file), hl (HLS), and anything with meta.direct sources (cm custom
+ * manifests, Vimeo, Drive with userscript metadata) — via [load], and the
+ * streams the resolvers find for YouTube, Drive, Streamable and PeerTube via
+ * [loadUrl].
  */
 @OptIn(UnstableApi::class)
 class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
@@ -126,6 +129,9 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         cacheVariant: String = ""
     ) {
         if (isReleased) return
+        // Cleared first: if the load below throws, the handle must not go on
+        // claiming (see hasLoaded) the PREVIOUS item's key for this new one.
+        loadedKey = null
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
@@ -165,26 +171,29 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     }
 
     /**
-     * Never throws. A player that dies on bad input takes the whole app with
-     * it — an unhandled exception here runs on the main thread. Failures are
+     * Plays [media]'s own URL (or its meta.direct source). Never throws: a
+     * player that dies on bad input takes the whole app with it — an
+     * unhandled exception here runs on the main thread. Failures are
      * reported through the Media3 error listener instead, which lets the
      * channel offer Compatibility View rather than crashing.
+     *
+     * [qualityIndex] indexes into media.direct (sorted highest-to-lowest —
+     * see DirectSource.parse), for ChannelViewModel's quality adaptation;
+     * out of range, or no direct sources at all, falls back to
+     * [MediaFrame.bestSource].
      */
-    /** [qualityIndex] indexes into media.direct (sorted highest-to-lowest —
-     *  see DirectSource.parse), for ChannelViewModel's quality adaptation;
-     *  out of range, or no direct sources at all, falls back to
-     *  [MediaFrame.bestSource]. */
     fun load(media: MediaFrame, qualityIndex: Int = 0) {
         if (isReleased) return
         val isQualityChange = (mediaId == media.id &&
             exo.playbackState != Player.STATE_ENDED &&
             exo.playbackState != Player.STATE_IDLE)
+        loadedKey = null   // see loadUrl
         mediaId = media.id
         mediaType = media.type
         mediaLengthSeconds = media.seconds
 
         // For cm/vi the id is a manifest or a page URL; the playable stream comes
-        // from meta.direct. Only fi/hl/rt have a directly playable id.
+        // from meta.direct. Only fi/hl have a directly playable id.
         //
         // qualityIndex is ChannelViewModel's own quality auto-adaptation
         // (0 = its default, matching bestSource exactly) — out of range for
@@ -341,11 +350,22 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             val params = exo.trackSelectionParameters
             val disabled = C.TRACK_TYPE_VIDEO in params.disabledTrackTypes
             if (disabled == !enabled) return
+            videoToggledAtMs = SystemClock.elapsedRealtime()
             exo.trackSelectionParameters = params.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
                 .build()
         }
     }
+
+    /**
+     * When [setVideoEnabled] last actually switched video on or off. Turning
+     * it back on can make ExoPlayer fetch the picture again from where it
+     * is — a brief rebuffer that is the switch's own cost, not a slow
+     * connection, so the stall tracking in PlayerSurface leaves it out
+     * (otherwise coming back to the app could step the quality down).
+     */
+    @Volatile var videoToggledAtMs: Long = 0L
+        private set
 
     override fun setVolume(volume: Float) {
         if (isReleased) return

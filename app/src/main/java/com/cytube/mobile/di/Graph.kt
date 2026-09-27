@@ -42,9 +42,10 @@ object Graph {
             .build()
     }
 
-    // AuthRepository's login POST needs to read Set-Cookie off the 302 that
-    // CyTube's /login returns, which OkHttp would otherwise follow and discard
-    // before that header is ever seen. Scoped to its own client — built off
+    // AuthRepository's login POST needs to read Set-Cookie off /login's own
+    // response. That's a 200 as the app calls it (a Referer of /login means
+    // "no redirect" to the server), but CyTube redirects when given somewhere
+    // to go back to, and OkHttp following that would drop the header. Scoped to its own client — built off
     // `http` so it still shares its connection pool and dispatcher — rather
     // than disabling redirects on `http` itself, which every other consumer
     // (media byte fetches, the channel-index scrape, Drive/YouTube resolving)

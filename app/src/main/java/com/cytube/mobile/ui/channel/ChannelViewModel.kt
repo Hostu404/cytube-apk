@@ -19,7 +19,6 @@ import com.cytube.mobile.player.StreamResolvers
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.collections.immutable.PersistentList
-import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.Dispatchers
@@ -169,7 +168,7 @@ data class ChannelUiState(
      *  the playlist (see pickPersonal) rather than the channel's own current
      *  item — only ever true while [syncEnabled] is false. [channelCurrentMedia]
      *  keeps tracking the real thing under it the whole time, so turning sync
-     *  back on (or manually clearing the pick) can snap straight back. */
+     *  back on (the only way a pick ends) can snap straight back. */
     val personalPickActive: Boolean = false,
     /** The playlist uid personal picking currently has loaded, or -1 when
      *  none — separate from [currentUid], which is always the channel's own
@@ -277,7 +276,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var chatSeq = 0L
     private var guestRetries = 0
     /** Fingerprints of recently-appended chat messages — see the dedupe check
-     *  in the CyTubeEvent.Chat branch below. Bounded to MAX_CHAT_MESSAGES so
+     *  in applyChat. Bounded to MAX_CHAT_MESSAGES so
      *  a long session can't grow this without limit. */
     private val seenChatFingerprints = LinkedHashSet<String>()
 
@@ -337,8 +336,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     // Sync flipped back on while personally browsing: snap
-                    // straight back to the channel's real current item, same
-                    // as if the user had cleared the pick themselves — see
+                    // straight back to the channel's real current item — see
                     // stopPersonalPick. A personal pick left dangling here
                     // would keep showing a video the rest of the channel
                     // was never watching, now with sync silently back on.
@@ -352,7 +350,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             }
             launch { observeEvents() }
             launch(Dispatchers.Default) { runChatPump() }
-            launch { startSyncTicker() }
+            startSyncTicker()
 
             connect(channel)
         }
@@ -362,15 +360,31 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         playerAttachedAtMs = SystemClock.elapsedRealtime()
         _state.value = _state.value.copy(connection = ConnectionState.CONNECTING)
         guestRetries = 0
+        guestLoginRetryJob?.cancel()
         val credential = savedCredential() ?: CyTubeClient.Credential.Guest(guestName())
-        runCatching { client.connect(channel, credential) }
-            .onFailure {
-                _state.value = _state.value.copy(
-                    connection = ConnectionState.FAILED,
-                    statusMessage = it.message ?: "Could not reach the channel"
-                )
-            }
+        try {
+            // The channel password too: the app's own reconnects (refresh,
+            // retry, coming back after a long time away) used to drop it and
+            // ask again.
+            client.connect(channel, credential, channelPassword)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _state.value = _state.value.copy(
+                connection = ConnectionState.FAILED,
+                statusMessage = e.message ?: "Could not reach the channel"
+            )
+        }
     }
+
+    /** The channel password the user entered this visit, for rejoining. */
+    private var channelPassword: String? = null
+
+    /** The saved login was refused once already; see SessionExpired. */
+    private var loginRefusedOnce = false
+
+    /** Waiting out the server's one-guest-login-a-minute limit; see LoginResult. */
+    private var guestLoginRetryJob: Job? = null
 
     private suspend fun observeEvents() {
         client.events.collect { event ->
@@ -450,8 +464,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
 
-                is CyTubeEvent.NeedPassword ->
+                is CyTubeEvent.NeedPassword -> {
+                    // Asked again after we sent one: it's wrong (or changed).
+                    if (event.wrongPasswordTried) channelPassword = null
                     update { it.copy(needsPassword = true, passwordWasWrong = event.wrongPasswordTried) }
+                }
 
                 is CyTubeEvent.PasswordAccepted ->
                     update { it.copy(needsPassword = false, passwordWasWrong = false) }
@@ -463,20 +480,71 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             statusMessage = if (!event.success) event.error else null
                         )
                     }
-                    // Only guests can collide on a name (an account login failing
-                    // means a bad password, which retrying can't fix). Try a
-                    // fresh random name a few times before giving up and leaving
-                    // the error on screen. This is a one-off retry, not a saved
-                    // preference — it never touches settingsStore, so it doesn't
-                    // clobber a name the user chose on the Account screen.
-                    if (!event.success &&
-                        savedCredential() == null &&
-                        guestRetries < MAX_GUEST_RETRIES
-                    ) {
-                        guestRetries++
-                        client.retryGuestLogin("Guest" + (1000..9999).random())
+                    if (event.success) {
+                        guestRetries = 0
+                        loginRefusedOnce = false
+                    } else if (savedCredential() == null) {
+                        // Only guests are retried (an account's saved login
+                        // either works or is dealt with by SessionExpired).
+                        val waitSeconds = GuestLogin.cooldownSeconds(event.error)
+                        if (waitSeconds != null) {
+                            // The server allows one guest login per IP a
+                            // minute, so a quick reconnect is refused however
+                            // good the name. Wait it out and try the SAME name;
+                            // a random one would be refused just the same.
+                            if (guestLoginRetryJob?.isActive != true) {
+                                update { it.copy(statusMessage = "Joining chat in ${waitSeconds}s…") }
+                                guestLoginRetryJob = viewModelScope.launch {
+                                    delay(waitSeconds * 1000L + 1_000L)
+                                    client.retryGuestLogin()
+                                }
+                            }
+                        } else if (guestRetries < MAX_GUEST_RETRIES) {
+                            // The name itself (taken here, registered,
+                            // reserved): try a fresh random one a few times.
+                            // A one-off retry, not a saved preference — it
+                            // never touches settingsStore, so it doesn't
+                            // clobber a name chosen on the Account screen.
+                            guestRetries++
+                            client.retryGuestLogin("Guest" + (1000..9999).random())
+                        }
                     }
                 }
+
+                is CyTubeEvent.SessionExpired -> {
+                    // The saved login cookie was refused, so the server treats
+                    // us as anonymous — shown as logged in, chat silently
+                    // ignored. The server says the same for an expired cookie,
+                    // a changed password, and a passing database error, so
+                    // unless the cookie has visibly expired, try it once more
+                    // before giving up on it.
+                    val cookie = (savedCredential() as? CyTubeClient.Credential.Cookie)?.authCookie
+                    val expired = cookie != null && SessionCookie.isExpired(cookie, System.currentTimeMillis())
+                    if (!expired && !loginRefusedOnce) {
+                        loginRefusedOnce = true
+                        Log.i(TAG, "saved login was refused; retrying once")
+                        client.disconnect()
+                        delay(2_000)
+                        connect(_state.value.channel)
+                        return@runCatching
+                    }
+                    // Refused for good: forget it and rejoin as a guest.
+                    Log.i(TAG, "saved login was refused; rejoining as a guest")
+                    withContext(Dispatchers.IO) { runCatching { Graph.auth(getApplication()).logout() } }
+                    client.disconnect()
+                    connect(_state.value.channel)
+                    appendLocalNotice(
+                        ChatMessage(
+                            username = "",
+                            html = "Your login has expired, so you've joined as a guest. " +
+                                "Log in again from Account to chat as yourself.",
+                            timestamp = System.currentTimeMillis(),
+                            addClass = null,
+                            shadow = false
+                        )
+                    )
+                }
+                is CyTubeEvent.VoteskipVoteCleared -> update { it.copy(votedSkip = false) }
 
                 is CyTubeEvent.RankChanged -> {
                     update { it.copy(localRank = event.rank) }
@@ -710,8 +778,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
         // Personally browsing: the channel's real item genuinely changed
         // underneath us, but nothing about what's on screen should move —
-        // just keep channelCurrentMedia current so stopPersonalPick (a
-        // manual clear, or sync flipping back on) lands on the right thing.
+        // just keep channelCurrentMedia current so stopPersonalPick (sync
+        // flipping back on) lands on the right thing.
         if (_state.value.personalPickActive) {
             // Still record the new item's time, for when the pick ends (see
             // stopPersonalPick) — otherwise that starts from the previous
@@ -1019,7 +1087,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * plays it whenever the room is playing), so the pause button did
      * nothing and closing the window left the sound playing with no screen.
      * While set, sync leaves the player alone; it clears as soon as playback
-     * resumes by any means (see evaluateSync), or when the app is reopened.
+     * resumes by any means (see evaluateSync), or — for a closed window
+     * ([holdUntilReopened]) — when the app is reopened.
      */
     private var pausedByUser = false
     /** The hold came from closing the PiP window, so reopening the app lifts
@@ -1066,9 +1135,22 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun releasePauseHold() {
         if (!pausedByUser) return
+        val wasClosedWindow = holdUntilReopened
         pausedByUser = false
         holdUntilReopened = false
-        if (!_state.value.personalPickActive) update { it.copy(playing = !isServerPaused) }
+        val s = _state.value
+        if (!s.personalPickActive) update { it.copy(playing = !isServerPaused) }
+        if (wasClosedWindow && s.isLeader && !s.personalPickActive) {
+            // The room carried on without us (see retuneLeaderTicker), and
+            // sync doesn't move a leader's player: catch it up, and start
+            // it again, before it goes back to being the room's clock.
+            val p = player
+            val channelItem = s.channelCurrentMedia
+            if (p != null && channelItem != null && p.mediaId == channelItem.id) {
+                roomTimeNow(channelItem.seconds)?.let { p.seekTo(it) }
+                if (!isServerPaused) p.play()
+            }
+        }
         evaluateSync()
     }
 
@@ -1238,8 +1320,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 // just sits out each tick instead — no worse than any other
                 // leader going briefly idle between items.
                 if (_state.value.personalPickActive) continue
-                val p = player ?: continue
                 val current = _state.value.channelCurrentMedia ?: continue
+                if (holdUntilReopened) {
+                    // The PiP window was closed, stopping our player. With a
+                    // leader the server keeps no clock of its own, so sending
+                    // the stopped player's time paused the whole room until
+                    // we came back. Keep the room's clock going instead: the
+                    // last time the server confirmed (it echoes our own
+                    // updates) plus the time since.
+                    val roomTime = roomTimeNow(current.seconds) ?: continue
+                    client.sendMediaUpdate(current.id, current.type, roomTime, isServerPaused)
+                    continue
+                }
+                val p = player ?: continue
                 // Only ever the channel's own current item: right after the
                 // playlist moves on, the player can still hold the previous
                 // one, and its time means nothing for the new item. The
@@ -1383,7 +1476,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refresh() {
         if (_state.value.refreshing) return
-        val now = android.os.SystemClock.elapsedRealtime()
+        val now = SystemClock.elapsedRealtime()
         if (now - lastRefreshAtMs < REFRESH_COOLDOWN_MS) return
         lastRefreshAtMs = now
         update { it.copy(refreshing = true) }
@@ -1491,7 +1584,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun submitPassword(pw: String) = client.sendPassword(pw)
+    fun submitPassword(pw: String) {
+        channelPassword = pw
+        client.sendPassword(pw)
+    }
     fun jumpTo(uid: Int) = client.jumpTo(uid)
     fun deleteItem(uid: Int) = client.deleteItem(uid)
 
@@ -1579,8 +1675,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             isServerPaused = channelMedia.paused
         }
         val resumed = if (resumeAt != null) channelMedia.copy(currentTime = resumeAt) else channelMedia
-        // The same player carries on with a different item, so attachPlayer
-        // won't restart the grace period; do it here.
+        // Starts the grace period as soon as the switch is made; attachPlayer
+        // restarts it again once the surface has the channel's item loaded.
         playerAttachedAtMs = SystemClock.elapsedRealtime()
         update {
             it.copy(
@@ -1666,23 +1762,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun ChatMessage.fingerprint(): String = "$username $timestamp $isPm $html"
 
     /**
-     * Appends one message and trims the buffer. Previously an ArrayList(current
-     * size - keepFrom + 1) rebuilt from a manual copy loop — a full copy of up
-     * to MAX_CHAT_MESSAGES items on EVERY single incoming chat message, plain
-     * List having no way to share structure between the old and new list.
-     * PersistentList.mutate {} uses a Builder (an efficient, temporarily-mutable
-     * view over the same underlying structure) so add/removeAt here don't copy
-     * the whole buffer — the common case (already at MAX_CHAT_MESSAGES) is one
-     * structural-sharing add plus one removeAt(0), not a fresh 300-element copy
-     * per message. This is what a chat flood was actually paying for, on top of
-     * the Compose recomposition cost fixed by PersistentList's stability.
+     * Appends [messages] (a whole batch — see applyChat) and trims the buffer
+     * to MAX_CHAT_MESSAGES, in one pass. Trimming from the front of a
+     * PersistentList shifts what's left, so doing it once per batch rather
+     * than once per message matters in a flood.
      */
-    private fun appendChat(current: PersistentList<ChatMessage>, message: ChatMessage): PersistentList<ChatMessage> {
-        val tagged = message.copy(seq = ++chatSeq)
-        return current.mutate { list ->
-            list.add(tagged)
-            while (list.size > MAX_CHAT_MESSAGES) list.removeAt(0)
-        }
+    private fun appendChat(current: PersistentList<ChatMessage>, messages: List<ChatMessage>): PersistentList<ChatMessage> {
+        if (messages.isEmpty()) return current
+        val tagged = messages.map { it.copy(seq = ++chatSeq) }
+        val all = current.addAll(tagged)
+        val drop = all.size - MAX_CHAT_MESSAGES
+        return if (drop <= 0) all else all.subList(drop, all.size).toPersistentList()
     }
 
     /**
@@ -1792,9 +1882,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update { s0 ->
             var s = s0
             var messages = s.messages
+            val accepted = ArrayList<ChatMessage>(items.size)
             for (item in items) {
                 when (item) {
-                    ChatInboxItem.Clear -> messages = persistentListOf()
+                    ChatInboxItem.Clear -> {
+                        accepted.clear()
+                        messages = persistentListOf()
+                    }
                     is ChatInboxItem.Message -> {
                         val m = item.message
                         // CyTube resends the channel's recent chat backlog on
@@ -1810,11 +1904,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         // Shadow-muted messages are only meant for moderators; the
                         // server already filters delivery, but drop them defensively.
                         if (m.shadow && s.localRank < 2) continue
-                        messages = appendChat(messages, m)
-                        s = s.copy(unreadPm = nextUnreadPm(s, m))
+                        accepted += m
+                        if (m.isPm) s = s.copy(unreadPm = nextUnreadPm(s, m))
                     }
                 }
             }
+            messages = appendChat(messages, accepted)
             if (messages === s0.messages && s === s0) s0 else s.copy(messages = messages)
         }
     }
