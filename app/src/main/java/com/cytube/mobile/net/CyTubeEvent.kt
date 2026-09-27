@@ -17,8 +17,11 @@ sealed interface CyTubeEvent {
     data class Kicked(val reason: String) : CyTubeEvent
     data class ErrorMessage(val message: String) : CyTubeEvent
 
-    data class MediaChanged(val media: MediaFrame) : CyTubeEvent
-    data class MediaTimeUpdate(val update: TimeUpdate) : CyTubeEvent
+    /** [receivedAtMs]: SystemClock.elapsedRealtime() when the frame came off
+     *  the socket, so the room's clock stays right even if the app is slow
+     *  to get round to it (a chat flood); 0 = unknown, use "now". */
+    data class MediaChanged(val media: MediaFrame, val receivedAtMs: Long = 0L) : CyTubeEvent
+    data class MediaTimeUpdate(val update: TimeUpdate, val receivedAtMs: Long = 0L) : CyTubeEvent
     data class PlaylistReplaced(val items: List<PlaylistItem>) : CyTubeEvent
     data class CurrentItemChanged(val uid: Int) : CyTubeEvent
     /** [afterUid]: the item it goes after — [PlaylistPosition.START] for the
@@ -47,6 +50,12 @@ sealed interface CyTubeEvent {
     data class EmoteRenamed(val oldName: String, val emote: Emote) : CyTubeEvent
     data class EmoteRemoved(val name: String) : CyTubeEvent
     data class PermissionsChanged(val permissions: Permissions) : CyTubeEvent
+    /** channelOpts — only the one option the app acts on so far. */
+    data class VoteskipAllowed(val allowed: Boolean) : CyTubeEvent
+    /** voteskip — the running tally, sent only to ranks allowed to see it
+     *  ("viewvoteskip", moderators by default). [need] is 0 when no vote is
+     *  running (the server resets it on every item change). */
+    data class VoteskipCount(val count: Int, val need: Int) : CyTubeEvent
     /** The server refused a "queue" request (bad link, not allowed, rate
      *  limited...). [id] is the media id it was about, when given. */
     data class QueueFailed(val message: String, val id: String?) : CyTubeEvent
@@ -66,4 +75,13 @@ sealed interface CyTubeEvent {
 object PlaylistPosition {
     const val START = -2
     const val END = -1
+
+    /** The "after" field of queue/moveVideo: an item uid (number, or a
+     *  number in a string), "prepend", or "append"/missing. */
+    fun parse(after: Any?): Int = when (after) {
+        "prepend" -> START
+        is Number -> after.toInt()
+        is String -> after.toIntOrNull() ?: END
+        else -> END
+    }
 }

@@ -30,8 +30,17 @@ import kotlin.math.abs
  *     ([seekLeadSeconds]) equal to what forward seeks have actually been
  *     costing, instead of landing exactly on serverTime and being behind again
  *     by the time the rebuffer finishes.
+ *  4. JOIN AHEAD, THEN WAIT: joining an item partway through opens it ahead
+ *     of the room by what opening files has been costing ([planStart],
+ *     learned in [LeadMemory]); and a player that lands AHEAD after an open
+ *     or a forward seek is held on that frame until the room catches up.
+ *     Opening a big file mid-way can take 10 s or more, so starting at the
+ *     room's time meant always arriving that far behind and then having to
+ *     jump forward — a second request, a second wait, on a buffer too thin
+ *     to ride out a slow patch. Waiting costs no network at all, and the
+ *     buffer keeps filling meanwhile (CyTube's own lead-in works the same way).
  */
-class SyncEngine {
+class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
 
     private var lastNonNativeCorrectionMs: Long = 0L
     private var lastNativeCorrectionMs: Long = 0L
@@ -51,6 +60,70 @@ class SyncEngine {
 
     /** True while a playback-rate nudge is in effect. */
     private var nudging = false
+
+    /** The item [planStart] opened ahead of the room, from which server and
+     *  by how much, until its first frame shows where it actually landed. */
+    private var openLandingFor: String? = null
+    private var openLandingServer = ""
+    private var openLandingLead = 0.0
+
+    /** A forward correction was issued and hasn't reached its first frame. */
+    private var seekLanding = false
+
+    /** Held (paused) at this position until the room reaches it; see 4.
+     *  [holdRoomTime] is where the room was when the hold began. */
+    private var holdAt: Double? = null
+    private var holdRoomTime = 0.0
+
+    /** The item the per-item state above belongs to. */
+    private var lastSeenMediaId: String? = null
+
+    /** True while the player is paused waiting for the room (see 4). */
+    val isHolding: Boolean get() = holdAt != null
+
+    /**
+     * ChannelViewModel stops calling [apply] (leading, sync turned off, a
+     * pause of the user's own, a personal pick): end the nudge and any hold.
+     * With [resume] a held player is started again — otherwise it would sit
+     * paused with nothing left to release it (and a leader's paused player
+     * pauses the whole room).
+     */
+    fun standDown(player: PlayerHandle, resume: Boolean) {
+        stopNudge(player)
+        seekLanding = false
+        openLandingFor = null
+        if (holdAt != null) {
+            holdAt = null
+            if (resume) player.play()
+        }
+    }
+
+    /**
+     * Where to open [mediaId], streamed from [streamUrl], when joining it at
+     * [roomTime]: that far in plus what opening from that server has been
+     * costing, so it's there when the first frame shows. Near the start (the
+     * server's lead-in already gives time to load), while the room is
+     * paused, or for live media, just [roomTime].
+     */
+    fun planStart(
+        mediaId: String,
+        streamUrl: String,
+        roomTime: Double,
+        lengthSeconds: Int,
+        roomPaused: Boolean
+    ): Double {
+        openLandingFor = null
+        if (roomPaused || lengthSeconds <= 0 || roomTime < MIN_JOIN_POSITION_SECONDS) return roomTime
+        val server = LeadMemory.serverOf(streamUrl)
+        val start = (roomTime + memory.openLead(server)).coerceAtMost(lengthSeconds - 1.0)
+        // Near the end the lead gets cut short; learn from what was used.
+        if (start > roomTime) {
+            openLandingFor = mediaId
+            openLandingServer = server
+            openLandingLead = start - roomTime
+        }
+        return maxOf(start, roomTime)
+    }
 
     /**
      * Brings [player] in line with the server's [update]. Only called for
@@ -95,9 +168,23 @@ class SyncEngine {
             lastNativeCorrectionMs = 0L
             playingSinceMs = 0L
             pendingLeadCheck = false
+            seekLanding = false
+            holdAt = null
+            if (openLandingFor != newMediaId) openLandingFor = null
             stopNudge(player)
             return
         }
+        // A new item can also arrive between two calls (loaded while the app
+        // was in the background) without the check above ever seeing the
+        // mismatch: the previous item's hold, landing and lead check belong
+        // to it, not this one.
+        if (player.mediaId != lastSeenMediaId) {
+            lastSeenMediaId = player.mediaId
+            pendingLeadCheck = false
+            seekLanding = false
+            holdAt = null
+        }
+        if (!player.isNative) openLandingFor = null
 
         if (waiting) {
             // Same "already there, don't re-correct" guard as the update.paused
@@ -115,14 +202,36 @@ class SyncEngine {
 
         if (update.paused) {
             stopNudge(player)
+            // A landing measured across a pause says nothing about how long
+            // the open or the seek took.
+            openLandingFor = null
+            seekLanding = false
             if (!player.isPaused) {
                 player.seekTo(currentTime)
                 player.pause()
             }
             return
-        } else if (player.isPaused) {
-            player.play()
         }
+        holdAt?.let { at ->
+            // Waiting for the room to reach where we landed — unless the
+            // player was moved meanwhile (scrubbed), the room jumped back, or
+            // it's absurdly far off; then drop the hold and sync normally.
+            val here = player.currentTimeSeconds()
+            val moved = !here.isNaN() && abs(here - at) > HOLD_SLACK_SECONDS
+            val roomWentBack = currentTime < holdRoomTime - HOLD_SLACK_SECONDS
+            if (moved || roomWentBack || at - currentTime > MAX_HOLD_SECONDS) {
+                holdAt = null
+            } else {
+                // Released a touch early: the next check is up to a second away.
+                if (currentTime >= at - HOLD_RELEASE_EARLY_SECONDS) {
+                    holdAt = null
+                    playingSinceMs = 0L
+                    player.play()
+                }
+                return
+            }
+        }
+        if (player.isPaused) player.play()
 
         // Live/indeterminate-length media (server reports seconds <= 0 — an
         // HLS live channel, a 24/7 loop, an RTMP feed) has no business being
@@ -149,6 +258,38 @@ class SyncEngine {
             return
         }
         if (playingSinceMs == 0L) playingSinceMs = nowMs
+
+        // First frame after opening ahead (planStart) or a forward
+        // correction: see where it landed. Ahead → wait there for the room.
+        if (player.isNative && (seekLanding || openLandingFor == player.mediaId)) {
+            val opened = openLandingFor == player.mediaId
+            seekLanding = false
+            openLandingFor = null
+            val landed = player.currentTimeSeconds()
+            if (!landed.isNaN() && !landed.isInfinite() && landed > 0.0) {
+                val behind = currentTime - landed
+                if (opened) {
+                    memory.learnOpenLead(
+                        openLandingServer,
+                        (openLandingLead + LEAD_LEARN_GAIN * behind).coerceIn(0.0, MAX_OPEN_LEAD_SECONDS)
+                    )
+                }
+                if (-behind >= HOLD_MIN_SECONDS && -behind <= MAX_HOLD_SECONDS) {
+                    if (!opened && pendingLeadCheck) {
+                        // Overshot: forward seeks cost less than the lead.
+                        pendingLeadCheck = false
+                        seekLeadSeconds = (seekLeadSeconds + LEAD_LEARN_GAIN * behind)
+                            .coerceIn(0.0, MAX_SEEK_LEAD_SECONDS)
+                    }
+                    stopNudge(player)
+                    holdAt = landed
+                    holdRoomTime = currentTime
+                    playingSinceMs = 0L
+                    player.pause()
+                    return
+                }
+            }
+        }
 
         if (withinGracePeriod) return
 
@@ -210,6 +351,7 @@ class SyncEngine {
                 // Behind: land ahead of the server by what a forward seek is
                 // currently costing, so we're on time when it resumes.
                 pendingLeadCheck = true
+                seekLanding = true
                 player.seekTo(currentTime + seekLeadSeconds)
             } else {
                 // Ahead: a backward seek normally lands in the back buffer and
@@ -278,5 +420,66 @@ class SyncEngine {
         const val NUDGE_MAX = 0.12
         const val NUDGE_STOP_SECONDS = 0.3
         const val MIN_BUFFER_FOR_SPEEDUP_SECONDS = 4.0
+
+        /** Below this the server's lead-in covers the load; no open lead. */
+        const val MIN_JOIN_POSITION_SECONDS = 10.0
+        const val MAX_OPEN_LEAD_SECONDS = 20.0
+        /** Landing less than this far ahead is left to the rate nudge. */
+        const val HOLD_MIN_SECONDS = 1.5
+        /** Further ahead than this, something else is wrong: correct normally. */
+        const val MAX_HOLD_SECONDS = 20.0
+        const val HOLD_RELEASE_EARLY_SECONDS = 0.4
+        /** A held player further than this from where it was held, or a
+         *  room that went back further than this, ends the hold. */
+        const val HOLD_SLACK_SECONDS = 1.0
+    }
+}
+
+/**
+ * What SyncEngine learns that should outlive one channel visit: how long
+ * opening a file partway through takes, per server (a busy home server and
+ * YouTube's are nothing alike). ChannelViewModel saves it between runs, so
+ * joining a channel again starts from what opening from its server actually
+ * cost last time instead of a guess.
+ */
+class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_SECONDS) {
+    private val openLeads = LinkedHashMap<String, Double>()
+
+    /** How far past the room's time to open an item from [server] that's
+     *  joined partway through; see SyncEngine.planStart. */
+    @Synchronized fun openLead(server: String): Double = openLeads[server] ?: defaultOpenLeadSeconds
+
+    @Synchronized fun learnOpenLead(server: String, seconds: Double) {
+        openLeads.remove(server)
+        openLeads[server] = seconds
+        while (openLeads.size > MAX_SERVERS) openLeads.remove(openLeads.keys.first())
+    }
+
+    /** For saving: server → seconds, oldest first. */
+    @Synchronized fun snapshot(): Map<String, Double> = LinkedHashMap(openLeads)
+
+    @Synchronized fun restore(saved: Map<String, Double>) {
+        for ((server, seconds) in saved) {
+            if (server.isNotBlank() && seconds.isFinite()) learnOpenLead(server, seconds.coerceIn(0.0, 20.0))
+        }
+    }
+
+    companion object {
+        /** A first guess, before any open from a server has been measured.
+         *  Landing early only means waiting on the first frame for a moment;
+         *  landing late means a second request, and on a slow server a
+         *  second long wait — so this errs on the generous side. */
+        const val DEFAULT_OPEN_LEAD_SECONDS = 6.0
+        private const val MAX_SERVERS = 50
+        val shared = LeadMemory()
+
+        /** "rr3---sn-abc.googlevideo.com" and "rr5---sn-xyz.googlevideo.com"
+         *  are the same service: keyed on the last two labels of the host. */
+        fun serverOf(url: String): String {
+            val host = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#:@]+@)?([^/?#:]+)")
+                .find(url)?.groupValues?.get(2)?.lowercase() ?: return ""
+            if (Regex("^[0-9.]+$").matches(host)) return host
+            return host.split('.').takeLast(2).joinToString(".")
+        }
     }
 }

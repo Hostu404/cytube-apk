@@ -180,9 +180,12 @@ object MediaTypes {
     internal val HOSTNAME_REGEX =
         Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 
-    /** PeerTube's own short-UUID charset (base58-ish, no separators) — see
-     *  peertube.js. Deliberately narrow for the same reason as HOSTNAME_REGEX. */
-    private val PEERTUBE_SHORT_ID_REGEX = Regex("^[A-Za-z0-9]{1,64}$")
+    /** A PeerTube video id: the short form (base58-ish, letters and digits)
+     *  or the full UUID (hex with hyphens) — CyTube's link parser keeps
+     *  whichever the link used. Hyphens were missing, so a video added by its
+     *  UUID link could never fall back to the embed page. Still deliberately
+     *  narrow (no '/', '@', '.', '?') for the same reason as HOSTNAME_REGEX. */
+    private val PEERTUBE_SHORT_ID_REGEX = Regex("^[A-Za-z0-9-]{1,64}$")
 
     /**
      * All server-supplied — a channel's own media id, straight off a

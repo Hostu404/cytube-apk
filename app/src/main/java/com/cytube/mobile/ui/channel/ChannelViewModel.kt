@@ -24,6 +24,8 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -184,6 +186,16 @@ data class ChannelUiState(
      *  box is only shown when this is true. */
     val canQueue: Boolean = false,
     val canQueueNext: Boolean = false,
+    /** Whether the channel allows vote skipping and our rank may vote (the
+     *  server ignores a vote otherwise, so the button is hidden). */
+    val canVoteskip: Boolean = false,
+    /** We voted to skip the channel's current item; cleared when it changes
+     *  (the server resets the vote then) or when we reconnect (leaving the
+     *  channel withdraws the vote server-side). */
+    val votedSkip: Boolean = false,
+    /** The tally, for ranks the server shows it to; null otherwise, or when
+     *  no vote is running. */
+    val voteskipTally: VoteskipTally? = null,
     /** Shown under the playlist panel's add box; null when there's nothing to say. */
     val queueStatus: QueueStatus? = null,
     /** Who the chat box is currently sending private messages to, or null
@@ -193,6 +205,12 @@ data class ChannelUiState(
     val unreadPm: UnreadPm? = null
 ) {
     val isLeader: Boolean get() = leader != null && leader == localUser
+}
+
+/** [need] is what the server reports, which leaves out its own "at least one
+ *  vote" floor — hence the max, so a quiet channel reads 0/1, not 0/0. */
+data class VoteskipTally(val count: Int, val need: Int) {
+    override fun toString(): String = "$count/${maxOf(1, need)}"
 }
 
 class ChannelViewModel(app: Application) : AndroidViewModel(app) {
@@ -221,6 +239,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  evaluateSync can tell SyncEngine to give a fresh item a moment before
      *  correcting it (see SYNC_GRACE_MS). */
     private var playerAttachedAtMs: Long = 0L
+    /** The item [player] held when that was last set. The same player carries
+     *  on from item to item, so a new item on it also counts as an attach. */
+    private var attachedMediaId: String? = null
     /** elapsedRealtime() of the last quality step — the debounce for
      *  onPlaybackStall measures against this. Reset to 0 whenever
      *  ChannelUiState.nativeQualityIndex itself resets (a genuine item
@@ -279,6 +300,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
         joined = true
         _state.value = _state.value.copy(channel = channel)
+        restoreLeadMemory()
 
         viewModelScope.launch {
             settings = settingsStore.settings.first()
@@ -329,6 +351,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             launch { observeEvents() }
+            launch(Dispatchers.Default) { runChatPump() }
             launch { startSyncTicker() }
 
             connect(channel)
@@ -370,7 +393,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             connection = ConnectionState.CONNECTED,
                             statusMessage = null,
                             leader = null,
-                            poll = it.poll?.copy(closed = true)
+                            poll = it.poll?.copy(closed = true),
+                            votedSkip = false,
+                            voteskipTally = null
                         )
                     }
                     retuneLeaderTicker()
@@ -461,6 +486,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     channelPermissions = event.permissions
                     refreshPermissions()
                 }
+                is CyTubeEvent.VoteskipAllowed -> {
+                    voteskipAllowed = event.allowed
+                    refreshPermissions()
+                }
+                is CyTubeEvent.VoteskipCount -> update {
+                    it.copy(
+                        voteskipTally = if (event.need > 0 || event.count > 0) {
+                            VoteskipTally(event.count, event.need)
+                        } else null
+                    )
+                }
                 is CyTubeEvent.PlaylistLocked -> {
                     playlistOpen = !event.locked
                     refreshPermissions()
@@ -469,7 +505,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     if (pendingQueueJob?.isActive == true) finishQueue(QueueStatus(event.message, isError = true))
                     else showTransientStatus(event.message)
 
-                is CyTubeEvent.MediaChanged -> onMediaChanged(event.media)
+                is CyTubeEvent.MediaChanged -> onMediaChanged(event.media, event.receivedAtMs)
                 is CyTubeEvent.MediaTimeUpdate -> {
                     // Both of these describe the CHANNEL's own current item —
                     // meaningless while a personal pick (see pickPersonal) is
@@ -483,11 +519,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     ) {
                         update { it.copy(playing = !event.update.paused) }
                     }
-                    onTimeUpdate(event.update)
+                    onTimeUpdate(event.update, event.receivedAtMs)
                 }
 
                 is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.toPersistentList()) }
-                is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid) }
+                // Sent every time an item starts, including a one-item
+                // playlist starting over, which changeMedia alone doesn't
+                // show (same id) but which resets the server's skip vote.
+                is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid, votedSkip = false) }
                 is CyTubeEvent.ItemQueued -> {
                     update { s -> s.copy(playlist = insertAfter(s.playlist, event.item, event.afterUid)) }
                     // Our own add landing. Matched on who queued it rather
@@ -508,48 +547,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
                 }
 
-                is CyTubeEvent.Chat -> {
-                    // CyTube resends the channel's recent chat backlog on
-                    // every joinChannel — CyTubeClient.replaySession runs on
-                    // every socket reconnect, not just the first one — so an
-                    // ordinary mobile-network hiccup on an otherwise-quiet
-                    // channel was replaying the same old messages back in as
-                    // if they'd just been said: duplicating them in the chat
-                    // panel, and making NekoChatOverlay fly them across the
-                    // screen again, since each replay gets a fresh, higher
-                    // seq than anything Neko has already spawned. Dedupe on
-                    // the fields CyTube preserves verbatim on replay (not
-                    // anything this client assigns itself) before any of
-                    // that has a chance to happen.
-                    if (seenChatFingerprints.add(event.message.fingerprint())) {
-                        if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
-                            seenChatFingerprints.remove(seenChatFingerprints.first())
-                        }
-                        val currentEmotes = _state.value.emotes
-                        val currentShowEmotes = _state.value.showEmotes
-                        // Pre-warm parsing/sanitization on Dispatchers.Default so
-                        // expensive HTML parsing & regex matching are kept off the Main thread.
-                        withContext(Dispatchers.Default) {
-                            ChatHtml.prewarm(
-                                raw = event.message.html,
-                                greentext = event.message.addClass == "greentext",
-                                showImages = currentShowEmotes,
-                                emotes = currentEmotes,
-                                revealSpoilers = isTv
-                            )
-                        }
-                        update { s ->
-                            // Shadow-muted messages are only meant for moderators; the
-                            // server already filters delivery, but drop them defensively.
-                            if (event.message.shadow && s.localRank < 2) s
-                            else s.copy(
-                                messages = appendChat(s.messages, event.message),
-                                unreadPm = nextUnreadPm(s, event.message)
-                            )
-                        }
-                    }
-                }
-                is CyTubeEvent.ChatCleared -> update { it.copy(messages = persistentListOf()) }
+                // Handed to the chat pipeline (runChatPump) rather than
+                // handled here: under a flood this loop used to spend its
+                // time on chat while a time update or the next video waited
+                // behind it — and this flow drops its oldest events once 256
+                // are waiting.
+                is CyTubeEvent.Chat -> chatInbox.trySend(ChatInboxItem.Message(event.message))
+                // Through the pipeline too, so it lands after the messages
+                // that came before it, not before.
+                is CyTubeEvent.ChatCleared -> chatInbox.trySend(ChatInboxItem.Clear)
 
                 is CyTubeEvent.UserListReplaced -> update { it.copy(users = event.users.toPersistentList()) }
                 is CyTubeEvent.UserJoined -> update { s ->
@@ -665,7 +671,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun serverTime(currentTime: Double, lengthSeconds: Int): Double =
         if (lengthSeconds > 0 && currentTime > lengthSeconds) lengthSeconds.toDouble() else currentTime
 
-    private fun onMediaChanged(media: MediaFrame) {
+    /** When a server time was actually received: see CyTubeEvent.MediaTimeUpdate. */
+    private fun receivedAt(receivedAtMs: Long): Long {
+        val now = SystemClock.elapsedRealtime()
+        return if (receivedAtMs in 1..now) receivedAtMs else now
+    }
+
+    private fun onMediaChanged(media: MediaFrame, receivedAtMs: Long = 0L) {
         // CyTube re-announces the current item verbatim sometimes (e.g. to
         // resync a client) — not just when the item actually changes. A real
         // capture showed the identical id/seconds arrive three times, ~15s
@@ -682,7 +694,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val current = _state.value.channelCurrentMedia
         if (current != null && current.id == media.id && current.type == media.type) {
             lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
-            lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            lastServerTimeElapsedRealtimeMs = receivedAt(receivedAtMs)
             isServerPaused = media.paused
             update {
                 if (it.personalPickActive) it.copy(channelCurrentMedia = media)
@@ -705,9 +717,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             // stopPersonalPick) — otherwise that starts from the previous
             // item's clock until the next mediaUpdate.
             lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
-            lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            lastServerTimeElapsedRealtimeMs = receivedAt(receivedAtMs)
             isServerPaused = media.paused
-            update { it.copy(channelCurrentMedia = media) }
+            update { it.copy(channelCurrentMedia = media, votedSkip = false, voteskipTally = null) }
             return
         }
 
@@ -719,7 +731,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (qualityStableSinceMs == 0L) qualityStableSinceMs = SystemClock.elapsedRealtime()
         playerAttachedAtMs = SystemClock.elapsedRealtime()
         lastServerTimeSeconds = serverTime(media.currentTime, media.seconds)
-        lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        lastServerTimeElapsedRealtimeMs = receivedAt(receivedAtMs)
         isServerPaused = media.paused
         // Player selection is re-run on every changeMedia, so a playlist moving
         // from YouTube to a film and back switches players by itself.
@@ -731,7 +743,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 playing = !media.paused,
                 playbackOffer = null,
                 compatOffer = offer,
-                nativeQualityIndex = initialQualityIndex
+                nativeQualityIndex = initialQualityIndex,
+                votedSkip = false,
+                voteskipTally = null
             )
         }
         loadWhileInBackground()
@@ -867,15 +881,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             holdUntilReopened = false
             if (!s.personalPickActive) update { it.copy(playing = !isServerPaused) }
         }
-        if (s.personalPickActive) return
+        if (s.personalPickActive) {
+            sync.standDown(p, resume = false)   // the pick's own load starts it
+            return
+        }
         if (s.isLeader || !settings.syncEnabled) {
-            // SyncEngine may have left a rate nudge running; don't let the
-            // player carry on at 1.1x once sync stops being applied.
-            sync.stopNudge(p)
+            // SyncEngine may have left a rate nudge running, or be holding
+            // the player paused for the room to catch up; don't let it carry
+            // on at 1.1x, or sit paused, once sync stops being applied.
+            sync.standDown(p, resume = true)
             return
         }
         if (pausedByUser) {
-            sync.stopNudge(p)
+            sync.standDown(p, resume = false)
             return
         }
         val currentServerTime = roomTimeNow(s.media?.seconds ?: 0) ?: return
@@ -897,12 +915,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun onTimeUpdate(update: TimeUpdate) {
+    private fun onTimeUpdate(update: TimeUpdate, receivedAtMs: Long = 0L) {
         // The channel's item, not state.media: during a personal pick
         // they differ, and this time belongs to the channel's.
         val length = _state.value.channelCurrentMedia?.seconds ?: 0
         lastServerTimeSeconds = serverTime(update.currentTime, length)
-        lastServerTimeElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        // When it arrived, not when this got to it: under a chat flood the
+        // gap was big enough to make the room look seconds behind.
+        lastServerTimeElapsedRealtimeMs = receivedAt(receivedAtMs)
         isServerPaused = update.paused
         evaluateSync()
     }
@@ -966,8 +986,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * player, never silently un-mutes audio the user turned off.
      */
     fun attachPlayer(handle: PlayerHandle) {
-        if (handle !== player) playerAttachedAtMs = SystemClock.elapsedRealtime()
+        if (handle !== player || handle.mediaId != attachedMediaId) {
+            playerAttachedAtMs = SystemClock.elapsedRealtime()
+        }
         player = handle
+        attachedMediaId = handle.mediaId
         handle.setVolume(if (_state.value.muted) 0f else 1f)
         (handle as? NativePlayerHandle)?.setVideoEnabled(!AppVisibility.inBackground.value)
         client.signalPlayerReady()
@@ -1007,10 +1030,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** Wired to the PiP window's own play/pause action. */
     fun togglePlaybackFromPip() {
         val p = player ?: return
-        if (p.isPaused) {
+        // Held for the room to catch up (SyncEngine.isHolding) is paused
+        // underneath but "playing" as far as the window shows, so a tap
+        // then means pause.
+        if (p.isPaused && !sync.isHolding) {
             p.play()
             releasePauseHold()
         } else {
+            sync.standDown(p, resume = false)
             holdPaused()
             p.pause()
         }
@@ -1078,8 +1105,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         when (val kind = s.player) {
             MediaTypes.Player.NATIVE -> {
                 Log.i(TAG, "background: loading next item type=${media.type} id=${media.id}")
-                handle.load(media.copy(currentTime = backgroundStartTime(media)), s.nativeQualityIndex)
+                val url = NativePlayerHandle.sourceUrl(media, s.nativeQualityIndex)
+                handle.load(plannedStart(media.copy(currentTime = backgroundStartTime(media)), url), s.nativeQualityIndex)
                 playerAttachedAtMs = SystemClock.elapsedRealtime()
+                attachedMediaId = media.id
             }
             else -> {
                 if (!StreamResolvers.handles(kind)) {
@@ -1102,10 +1131,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     Log.i(TAG, "background: loading next item type=${media.type} id=${media.id} (${stream.variant})")
                     handle.loadUrl(
-                        media.copy(currentTime = backgroundStartTime(media)),
+                        plannedStart(media.copy(currentTime = backgroundStartTime(media)), stream.url),
                         stream.url, stream.mimeType, stream.headers, stream.variant
                     )
                     playerAttachedAtMs = SystemClock.elapsedRealtime()
+                    attachedMediaId = media.id
                 }
             }
         }
@@ -1118,6 +1148,24 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun backgroundStartTime(media: MediaFrame): Double {
         if (_state.value.personalPickActive) return media.currentTime
         return roomTimeNow(media.seconds) ?: media.currentTime
+    }
+
+    /**
+     * Where to open [media], streamed from [streamUrl]. For the channel's own
+     * item while synced (and not leading it): the room's time now, plus — when
+     * joining partway through — what opening from that server has been costing
+     * (SyncEngine.planStart), so a big file that takes 10 s to open doesn't
+     * arrive 10 s behind and have to jump again. Otherwise [media] as it is.
+     */
+    fun plannedStart(media: MediaFrame, streamUrl: String): MediaFrame {
+        val s = _state.value
+        val channelItem = s.channelCurrentMedia
+        if (s.personalPickActive || s.isLeader || !settings.syncEnabled ||
+            channelItem == null || channelItem.id != media.id || channelItem.type != media.type
+        ) return media
+        val room = roomTimeNow(media.seconds) ?: return media
+        val start = sync.planStart(media.id, streamUrl, room, media.seconds, isServerPaused)
+        return media.copy(currentTime = start)
     }
 
     /** Where the channel's item is now: the last server time plus however
@@ -1149,6 +1197,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun onAppVisibilityChanged(background: Boolean) {
         (player as? NativePlayerHandle)?.setVideoEnabled(!background)
         if (background) {
+            saveLeadMemory()   // the process may not come back
             loadWhileInBackground()
             return
         }
@@ -1587,6 +1636,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         client.vote(option)
     }
 
+    /** Votes to skip the channel's current item, once per item. */
+    fun voteSkip() {
+        val s = _state.value
+        if (!s.canVoteskip || s.votedSkip || s.channelCurrentMedia == null ||
+            s.connection != ConnectionState.CONNECTED
+        ) return
+        update { it.copy(votedSkip = true) }
+        client.voteSkip()
+    }
+
     fun toggleFavourite() {
         viewModelScope.launch {
             settingsStore.toggleFavourite(_state.value.channel)
@@ -1649,6 +1708,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     // ---- adding videos ----
 
     private var channelPermissions: Permissions? = null
+    /** The channel's allow_voteskip option (channelOpts); on by default, as
+     *  on the server. */
+    private var voteskipAllowed = true
     /** CyTube's "open playlist" (unlocked) state; see Permissions.allowsPlaylistAction. */
     private var playlistOpen = false
     /** Waiting on the server's answer to our last queue request; also the timeout. */
@@ -1661,9 +1723,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val canAdd = perms?.allowsPlaylistAction("playlistadd", rank, playlistOpen) == true
         val canNext = canAdd && perms?.allowsPlaylistAction("playlistnext", rank, playlistOpen) == true
         val canVote = perms?.allows("pollvote", rank) ?: true
+        val canSkip = voteskipAllowed && perms?.allows("voteskip", rank) == true
         update {
-            if (it.canQueue == canAdd && it.canQueueNext == canNext && it.canVotePoll == canVote) it
-            else it.copy(canQueue = canAdd, canQueueNext = canNext, canVotePoll = canVote)
+            if (it.canQueue == canAdd && it.canQueueNext == canNext &&
+                it.canVotePoll == canVote && it.canVoteskip == canSkip
+            ) it
+            else it.copy(
+                canQueue = canAdd, canQueueNext = canNext,
+                canVotePoll = canVote, canVoteskip = canSkip
+            )
         }
     }
 
@@ -1672,14 +1740,90 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (it.poll?.closed == true) it.copy(poll = null, myPollVote = null) else it
     }
 
+    private sealed interface ChatInboxItem {
+        class Message(val message: ChatMessage) : ChatInboxItem
+        data object Clear : ChatInboxItem
+    }
+
+    /** Chat on its way from the event loop to the screen; see runChatPump.
+     *  Bounded well above what the panel keeps, dropping the oldest. */
+    private val chatInbox = Channel<ChatInboxItem>(
+        capacity = MAX_CHAT_MESSAGES * 2,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /**
+     * Gets chat onto the screen in batches: parses each message off the main
+     * thread (so its row finds it ready), then applies everything that
+     * arrived meanwhile in one state change, at most every
+     * CHAT_BATCH_INTERVAL_MS. At 50–100 messages a second, one state change
+     * — and one recomposition, one chat scroll, one Niconico enqueue — per
+     * message was a steady load on the main thread, which is also the thread
+     * the video's TextureView and the sync checks depend on. A quiet channel
+     * sees no delay: the first message after a lull goes straight through.
+     */
+    private suspend fun runChatPump() {
+        val batch = ArrayList<ChatInboxItem>()
+        while (true) {
+            batch += chatInbox.receive()
+            while (batch.size < CHAT_BATCH_MAX) batch += chatInbox.tryReceive().getOrNull() ?: break
+            val s = _state.value
+            for (item in batch) {
+                if (item !is ChatInboxItem.Message) continue
+                runCatching {
+                    ChatHtml.prewarm(
+                        raw = item.message.html,
+                        greentext = item.message.addClass == "greentext",
+                        showImages = s.showEmotes,
+                        emotes = s.emotes,
+                        revealSpoilers = isTv
+                    )
+                }
+            }
+            val items = batch.toList()
+            batch.clear()
+            withContext(Dispatchers.Main) { runCatching { applyChat(items) } }
+            delay(CHAT_BATCH_INTERVAL_MS)
+        }
+    }
+
+    /** One state change for a whole batch; main thread only. */
+    private fun applyChat(items: List<ChatInboxItem>) {
+        update { s0 ->
+            var s = s0
+            var messages = s.messages
+            for (item in items) {
+                when (item) {
+                    ChatInboxItem.Clear -> messages = persistentListOf()
+                    is ChatInboxItem.Message -> {
+                        val m = item.message
+                        // CyTube resends the channel's recent chat backlog on
+                        // every joinChannel — which runs on every socket
+                        // reconnect — so without this a network hiccup
+                        // replayed old messages as new: duplicated in the
+                        // panel and flown across the video again. Deduped on
+                        // fields CyTube preserves verbatim on replay.
+                        if (!seenChatFingerprints.add(m.fingerprint())) continue
+                        if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
+                            seenChatFingerprints.remove(seenChatFingerprints.first())
+                        }
+                        // Shadow-muted messages are only meant for moderators; the
+                        // server already filters delivery, but drop them defensively.
+                        if (m.shadow && s.localRank < 2) continue
+                        messages = appendChat(messages, m)
+                        s = s.copy(unreadPm = nextUnreadPm(s, m))
+                    }
+                }
+            }
+            if (messages === s0.messages && s === s0) s0 else s.copy(messages = messages)
+        }
+    }
+
     /** Puts a message generated by the app itself (not the server) into
      *  chat, through the same dedupe as real messages. */
     private fun appendLocalNotice(message: ChatMessage) {
-        if (!seenChatFingerprints.add(message.fingerprint())) return
-        if (seenChatFingerprints.size > MAX_CHAT_MESSAGES) {
-            seenChatFingerprints.remove(seenChatFingerprints.first())
-        }
-        update { it.copy(messages = appendChat(it.messages, message)) }
+        // Behind whatever chat is already on its way, not ahead of it.
+        chatInbox.trySend(ChatInboxItem.Message(message))
     }
 
     /** Puts [item] after the item with uid [afterUid], or at the start / end
@@ -1799,7 +1943,42 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = block(_state.value)
     }
 
+    /** LeadMemory.shared is kept between runs: the first join after a
+     *  restart then starts from what opening from that server cost before. */
+    private fun restoreLeadMemory() {
+        if (leadMemoryRestored) return
+        leadMemoryRestored = true
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val saved = leadPrefs().getString(KEY_OPEN_LEADS, null) ?: return@runCatching
+                val json = org.json.JSONObject(saved)
+                // Android's JSONObject.keys() is an untyped Iterator.
+                val restored = LinkedHashMap<String, Double>()
+                val keys: Iterator<*> = json.keys()
+                while (keys.hasNext()) {
+                    val server = keys.next() as? String ?: continue
+                    restored[server] = json.optDouble(server)
+                }
+                LeadMemory.shared.restore(restored)
+            }
+        }
+    }
+
+    private fun saveLeadMemory() {
+        val snapshot = LeadMemory.shared.snapshot()
+        if (snapshot.isEmpty()) return
+        runCatching {
+            val json = org.json.JSONObject()
+            snapshot.forEach { (server, seconds) -> json.put(server, seconds) }
+            leadPrefs().edit().putString(KEY_OPEN_LEADS, json.toString()).apply()
+        }
+    }
+
+    private fun leadPrefs() =
+        getApplication<Application>().getSharedPreferences("sync_memory", android.content.Context.MODE_PRIVATE)
+
     override fun onCleared() {
+        saveLeadMemory()
         syncTicker?.cancel()
         syncJob?.cancel()
         leaderTicker?.cancel()
@@ -1809,6 +1988,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private companion object {
+        /** See runChatPump. */
+        const val CHAT_BATCH_INTERVAL_MS = 100L
+        const val CHAT_BATCH_MAX = 200
+        const val KEY_OPEN_LEADS = "open_leads"
+        /** Once per process; see restoreLeadMemory. */
+        @Volatile var leadMemoryRestored = false
         const val MAX_CHAT_MESSAGES = 300
         const val MAX_GUEST_RETRIES = 3
         const val TAG = "CyTubeChannel"

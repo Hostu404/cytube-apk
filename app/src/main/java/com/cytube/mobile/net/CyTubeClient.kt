@@ -143,8 +143,12 @@ class CyTubeClient(
             CyTubeEvent.Announcement(it.optString("title", ""), it.optString("text", ""))
         }
 
-        obj(s, "changeMedia") { CyTubeEvent.MediaChanged(MediaFrame.from(it)) }
-        obj(s, "mediaUpdate") { CyTubeEvent.MediaTimeUpdate(TimeUpdate.from(it)) }
+        obj(s, "changeMedia") {
+            CyTubeEvent.MediaChanged(MediaFrame.from(it), android.os.SystemClock.elapsedRealtime())
+        }
+        obj(s, "mediaUpdate") {
+            CyTubeEvent.MediaTimeUpdate(TimeUpdate.from(it), android.os.SystemClock.elapsedRealtime())
+        }
         arr(s, "playlist") { CyTubeEvent.PlaylistReplaced(PlaylistItem.listFrom(it)) }
         s.on("setCurrent") { args ->
             (args.firstOrNull() as? Number)?.let { emit(CyTubeEvent.CurrentItemChanged(it.toInt())) }
@@ -202,6 +206,12 @@ class CyTubeClient(
         }
         obj(s, "removeEmote") { CyTubeEvent.EmoteRemoved(it.optString("name", "")) }
         obj(s, "setPermissions") { CyTubeEvent.PermissionsChanged(Permissions(it)) }
+        // Sent on join and whenever a moderator changes the channel settings
+        // (src/channel/opts.js). The server's own default is on.
+        obj(s, "channelOpts") { CyTubeEvent.VoteskipAllowed(it.optBoolean("allow_voteskip", true)) }
+        obj(s, "voteskip") {
+            CyTubeEvent.VoteskipCount(it.optInt("count", 0), it.optInt("need", 0))
+        }
         s.on("setMotd") { args ->
             emit(CyTubeEvent.MotdChanged(args.firstOrNull() as? String ?: ""))
         }
@@ -279,6 +289,9 @@ class CyTubeClient(
     fun requestPlaylist() { socket?.emit("requestPlaylist") }
     fun vote(option: Int) { socket?.emit("vote", JSONObject().put("option", option)) }
     fun jumpTo(uid: Int) { socket?.emit("jumpTo", uid) }
+    /** One vote to skip the current item. The server counts one vote per IP
+     *  and quietly ignores it if voteskip is off or our rank can't vote. */
+    fun voteSkip() { socket?.emit("voteskip") }
     fun deleteItem(uid: Int) { socket?.emit("delete", uid) }
 
     fun queue(id: String, type: String, atEnd: Boolean = true, temp: Boolean = false) {
@@ -321,14 +334,7 @@ class CyTubeClient(
 
     // ---- helpers ----
 
-    /** The "after" field of queue/moveVideo: an item uid, or "prepend" /
-     *  "append". */
-    private fun playlistPosition(o: JSONObject): Int = when (val after = o.opt("after")) {
-        "prepend" -> PlaylistPosition.START
-        is Number -> after.toInt()
-        is String -> after.toIntOrNull() ?: PlaylistPosition.END
-        else -> PlaylistPosition.END
-    }
+    private fun playlistPosition(o: JSONObject): Int = PlaylistPosition.parse(o.opt("after"))
 
     private fun emit(e: CyTubeEvent) { _events.tryEmit(e) }
 

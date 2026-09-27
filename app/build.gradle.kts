@@ -24,8 +24,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.7.4 - Pocket Rocket"
+        versionCode = 17
+        versionName = "1.7.5 - Pocket Rocket"
     }
 
     signingConfigs {
@@ -135,4 +135,7 @@ dependencies {
     implementation(libs.newpipe.extractor)
 
     testImplementation(libs.junit)
+    // Android's own org.json is only a stub in local unit tests (every call
+    // returns null/0), so the tests that read server frames need the real one.
+    testImplementation(libs.org.json)
 }
