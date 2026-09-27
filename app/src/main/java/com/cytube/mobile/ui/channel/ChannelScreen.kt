@@ -370,7 +370,11 @@ fun ChannelScreen(
             }
             controlsVisible = true
 
-            activity?.window?.let { window ->
+            // Not while in PiP: the floating window has no system bars to
+            // hide or show, and a request made then can leave a bar
+            // animation started but never finished (see
+            // rememberSystemBarInsets). Expanding it runs this again.
+            if (!isInPictureInPicture) activity?.window?.let { window ->
                 val controller = WindowCompat.getInsetsController(window, window.decorView)
                 if (immersive) {
                     controller.systemBarsBehavior =
@@ -658,12 +662,17 @@ fun ChannelScreen(
         if (state.unreadPm != null) vm.markPmsRead()
     }
 
+    // The system bars' real size, not Compose's animated copy — see
+    // rememberSystemBarInsets.
+    val barInsets = rememberSystemBarInsets()
+
     CyTubeChannelTheme {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
+                windowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 title = {
                     // Tapping the channel name reconciles with the server —
                     // playlist, player and leader/sync state — the same
@@ -789,6 +798,7 @@ fun ChannelScreen(
             // keyboard is dismissed.
             if (!WindowInsets.isImeVisible) {
                 PanelBar(
+                    barInsets = barInsets,
                     userCount = state.userCount,
                     playlistCount = state.playlist.size,
                     pollOpen = state.poll != null,
@@ -805,12 +815,13 @@ fun ChannelScreen(
         // nav bar's own height underneath that, which is exactly what was
         // left of the gap between the input row and the keyboard. The bottom
         // edge doesn't need Scaffold's help here at all: PanelBar already
-        // pads itself for the nav bar when it's visible (NavigationBarDefaults.windowInsets,
-        // see PanelBar), and ChatPanel's input row already pads itself for
-        // the keyboard (imePadding, see ChatPanel) — so Scaffold is left with
-        // just the top status bar and any left/right cutouts, which are the
-        // only insets nothing downstream already owns.
-        contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+        // pads itself for the nav bar when it's visible (see PanelBar), and
+        // ChatPanel's input row already pads itself for the keyboard
+        // (imePadding, see ChatPanel) — so Scaffold is left with just the top
+        // status bar and the sides, which are the only insets nothing
+        // downstream already owns. (barInsets rather than
+        // WindowInsets.systemBars: see rememberSystemBarInsets.)
+        contentWindowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { padding ->
         // Always the same Column — swapping in and out of a plain Box when a
         // panel opened used to tear down and rebuild everything below (the
@@ -1305,6 +1316,8 @@ private fun VoteskipButton(voted: Boolean, tally: String?, onVote: () -> Unit) {
  */
 @Composable
 private fun PanelBar(
+    /** See rememberSystemBarInsets. */
+    barInsets: WindowInsets,
     userCount: Int,
     playlistCount: Int,
     pollOpen: Boolean,
@@ -1314,13 +1327,15 @@ private fun PanelBar(
     // The stock NavigationBar this replaced pads itself for the system nav
     // bar automatically; a plain Surface doesn't, so on 3-button navigation
     // this row was sitting flush against the bottom edge and getting
-    // covered by the triangle/circle/square buttons themselves. Applying
-    // the same NavigationBarDefaults.windowInsets Material3's own component
-    // uses internally reserves that space back.
+    // covered by the triangle/circle/square buttons themselves. Padding by
+    // the navigation bar (bottom and sides, like Material3's own
+    // NavigationBar) reserves that space back.
     Surface(
         tonalElevation = 2.dp,
         shadowElevation = 2.dp,
-        modifier = Modifier.windowInsetsPadding(NavigationBarDefaults.windowInsets)
+        modifier = Modifier.windowInsetsPadding(
+            barInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+        )
     ) {
         Row(Modifier.fillMaxWidth().height(48.dp)) {
             PanelBarButton(
@@ -1933,3 +1948,44 @@ private fun FullscreenPlayer(
         }
     }
 }
+
+/**
+ * The system bars' real current size, read straight from the window each
+ * time it lays out, for the windowed layout's top bar, content and bottom
+ * bar.
+ *
+ * Compose's own WindowInsets.systemBars follows the bars' show/hide
+ * animations and only takes the new size once an animation completes; when
+ * one is cut short — leaving fullscreen rotates the phone back and shows the
+ * bars at the same moment, and bar changes asked for around picture-in-
+ * picture can be dropped — it can be left believing the bars are hidden.
+ * That was the whole windowed layout slid up under the status bar and down
+ * under the navigation buttons after PiP → fullscreen → windowed, until the
+ * next keyboard or bar change. Reading the window's own current value
+ * can't get stuck like that. (The keyboard still uses Compose's insets:
+ * opening it always starts a fresh animation.)
+ */
+@Composable
+private fun rememberSystemBarInsets(): WindowInsets {
+    val view = LocalView.current
+    var bars by remember { mutableStateOf(currentSystemBars(view)) }
+    DisposableEffect(view) {
+        val observer = view.viewTreeObserver
+        val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+            val now = currentSystemBars(view)
+            if (now != bars) bars = now
+        }
+        observer.addOnGlobalLayoutListener(listener)
+        bars = currentSystemBars(view)
+        onDispose {
+            if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
+            else view.viewTreeObserver.removeOnGlobalLayoutListener(listener)
+        }
+    }
+    return remember(bars) { WindowInsets(bars.left, bars.top, bars.right, bars.bottom) }
+}
+
+private fun currentSystemBars(view: android.view.View): androidx.core.graphics.Insets =
+    androidx.core.view.ViewCompat.getRootWindowInsets(view)
+        ?.getInsets(WindowInsetsCompat.Type.systemBars())
+        ?: androidx.core.graphics.Insets.NONE
