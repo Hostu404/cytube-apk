@@ -48,7 +48,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     /**
      * Opening EncryptedSharedPreferences throws when its Keystore key has
      * gone or no longer matches the file (a Keystore reset, some OS updates,
-     * data restored onto another phone). That used to crash the app on every
+     * data restored onto another phone), which would otherwise crash every
      * launch. The saved login can't be recovered in that state anyway, so
      * start over with a fresh file and key; the user just logs in again.
      */
@@ -91,15 +91,10 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
      * Set on every successful [login], regardless of `remember`. Cleared on
      * [logout] and never written anywhere durable, so it does not survive a
      * process restart on its own — that lack of durability is exactly what
-     * is supposed to distinguish an unremembered login from a remembered
-     * one. Before this field existed, `remember = false` did not just skip
-     * disk persistence, it discarded the session for every purpose except
-     * the login screen's own local Compose state: [savedSession] read
-     * straight from EncryptedSharedPreferences, so the Account screen could
-     * say "Signed in as X" while every subsequent [credentialForSession]
-     * call (i.e. every channel join, and Compatibility View's cookie share)
-     * silently found nothing and fell back to a guest identity — two parts
-     * of the app disagreeing about whether the user was logged in.
+     * distinguishes an unremembered login from a remembered one. Without it,
+     * an unremembered login would count only on the Account screen, while
+     * [credentialForSession] (every channel join, and Compatibility View's
+     * cookie share) found nothing and joined as a guest.
      * `@Volatile` because a login on one coroutine can be read from another
      * (e.g. ChannelViewModel.connect) shortly after.
      */

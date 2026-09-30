@@ -48,7 +48,8 @@ object BandwidthEstimate {
                 if (previous != null && previous != type) measured = false
             }
             networkListener = listener
-            NetworkTypeObserver.getInstance(appContext).register(listener)
+            val main = Handler(Looper.getMainLooper())
+            NetworkTypeObserver.getInstance(appContext).register(listener) { main.post(it) }
             meter = m
         }
     }

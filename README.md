@@ -33,8 +33,9 @@ use out of it:
 
 * Playback stays in sync with the room, with an adjustable sync tolerance. Small drift is corrected by briefly speeding up or slowing down rather than jumping.
 * Native playback for YouTube, direct files, HLS, Google Drive, Streamable and PeerTube
-* Embedded playback for YouTube live streams, Dailymotion, Vimeo and custom embeds (such as 8chan) — the video plays inside the app while chat, playlist and sync stay native
+* Embedded playback for YouTube live streams, Dailymotion, Vimeo, Odysee and custom embeds (such as 8chan) — the video plays inside the app while chat, playlist and sync stay native
 * Compatibility View (the full CyTube page) as a fallback for sources neither can handle, such as Twitch
+* Plays DTS, Dolby Digital and Dolby TrueHD audio (common in film rips) even on devices that can't decode it themselves, using built-in FFmpeg decoders
 * For videos offered in several qualities, picks one your connection can handle, steps down if playback stalls and back up when it can
 * Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
 * Fullscreen, mute toggle, and an ambient glow behind the video
@@ -87,7 +88,9 @@ There's no Play Store or Amazon Appstore listing — this is a hobby project, di
 
 ## Privacy & Security
 
-Your password is sent once, directly to your CyTube server, the same way the CyTube website logs in — it is never written to disk. If you choose to stay logged in, only the signed session cookie the server returns is saved, encrypted on your device. Logging out clears it locally and tells the server to invalidate it too.
+Your password is sent once, directly to your CyTube server, the same way the CyTube website logs in — it is never written to disk. The app keeps only the signed session cookie the server returns: if you choose to stay logged in it's saved encrypted on your device, otherwise it's kept in memory until the app closes. If you open Compatibility View, the cookie is also given to Android's WebView so the CyTube page there is logged in too; WebView keeps it in its own cookie store.
+
+Logging out removes the cookie from the app and from WebView. CyTube has no way for an app to end a session on the server, so a copy of the cookie stays valid until it expires or you change your password.
 
 The full source code is in this repository for anyone to inspect.
 
@@ -97,6 +100,8 @@ The full source code is in this repository for anyone to inspect.
 
 * CyTube supports a huge range of media sources, and some play better than others.
 * Some playback synchronisation edge cases remain.
+* Odysee videos need a tap on their play button to start, and don't follow the leader skipping to a new point until you rejoin the channel.
+* If you switch channels very quickly, CyTube may briefly refuse the connection ("Too many connections from your network"); the app waits a few seconds and connects again by itself.
 * Picture-in-picture support is still being improved.
 
 The app is actively being developed, so behaviour may change between releases.
@@ -121,13 +126,15 @@ Screenshots or logs are useful when available.
 
 The project is split into separate parts for the CyTube connection, playback, chat and the app's UI.
 
+Built with Kotlin 2.4, Jetpack Compose (BOM 2026.09) and Media3 1.11, on Android Gradle plugin 9.3 and Gradle 9.6, compiling against API 37. Every library and its version is listed in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
+
 ### Build from source
 
 ```bash
 git clone https://github.com/Hostu404/CyTube-APK.git
 ```
 
-Open the project in Android Studio and let Gradle sync, or build from the command line with `./gradlew assembleRelease` (`.\gradlew assembleRelease` on Windows).
+Open the project in Android Studio (Quail 2 / 2026.1.2 or newer, for Android Gradle plugin 9.3) and let Gradle sync, or build from the command line with `./gradlew assembleRelease` (`.\gradlew assembleRelease` on Windows). Building needs JDK 17 or newer and the Android SDK platform for API 37.
 
 Release builds are signed only if you add a `keystore.properties` file (see `keystore.properties.example`); without one, the project still builds unsigned.
 
@@ -151,6 +158,9 @@ not something invented from scratch. It also depends on:
 - [Jsoup](https://jsoup.org/) — parsing/sanitising the HTML CyTube sends for
   chat, MOTDs, and polls
 - [Coil](https://coil-kt.github.io/coil/) — image and animated-GIF loading
+- [NextLib](https://github.com/anilbeesetti/nextlib) and [FFmpeg](https://ffmpeg.org/) —
+  software audio decoders for formats a device can't play itself (DTS,
+  Dolby Digital, TrueHD)
 
 ---
 

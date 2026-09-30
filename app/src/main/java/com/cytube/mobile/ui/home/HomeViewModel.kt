@@ -24,15 +24,11 @@ data class HomeUiState(
     val loggedInAs: String? = null,
     val indexUnavailable: Boolean = false
 ) {
-    // Was a plain `get()`, recomputing the full filter pass over `channels`
-    // on every single read. HomeScreen reads this 3 separate times per
+    // `by lazy`, not a plain getter: HomeScreen reads this 3 times per
     // recomposition (the direct-entry check below, the list itself, the
-    // empty-state check) and `query` changes on every keystroke, so that was
-    // the whole channel list scanned 3x per keystroke instead of once. `by
-    // lazy` computes it once per HomeUiState instance instead — still
-    // recomputes whenever query/channels actually change (each `copy()` is a
-    // new instance with its own fresh lazy), just not 3 times for the same
-    // instance.
+    // empty-state check) and `query` changes on every keystroke. Each
+    // `copy()` is a new instance with its own lazy, so it still follows
+    // query/channels; it just filters the list once per state, not 3 times.
     val filtered: List<PublicChannel> by lazy {
         if (query.isBlank()) channels else channels.filter {
             it.name.contains(query, true) ||
@@ -50,8 +46,8 @@ data class HomeUiState(
         }
 
     /** What the keyboard's Go key opens: the listed channel with exactly
-     *  this name (the direct-entry card is hidden then, which used to make
-     *  Go do nothing), or else the direct entry. */
+     *  this name (the direct-entry card is hidden then, so Go must still
+     *  work), or else the direct entry. */
     val submitName: String?
         get() {
             val q = query.trim()
@@ -91,7 +87,13 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             if (_state.value.channels.isEmpty()) {
                 _state.update { it.copy(loading = true) }
             }
-            val list = runCatching { Graph.channelIndex.publicChannels(force) }.getOrDefault(emptyList())
+            val list = try {
+                Graph.channelIndex.publicChannels(force)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
             _state.update {
                 it.copy(
                     loading = false,

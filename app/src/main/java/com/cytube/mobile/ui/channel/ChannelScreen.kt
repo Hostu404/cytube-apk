@@ -31,7 +31,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MailOutline
@@ -40,8 +40,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -100,12 +100,10 @@ private const val AMBIENT_SAMPLE_BLEND = 0.22f
  *  (see PlayerSurface.kt) so its native scrubber/controller overlay hides on
  *  the same schedule as this screen's own icons rather than lingering on
  *  Media3's separate 3s default. Not private, so PlayerSurface.kt (same
- *  package) can share it directly instead of duplicating the number — the
- *  two controls looking out of sync with each other is exactly the kind of
- *  bug that duplicating a magic number invites. Was 3s, which read as
- *  sluggish on a short video: the controls were still sitting there well
- *  after playback had already started and there was nothing left to
- *  interact with. */
+ *  package) can share it directly instead of duplicating the number, which
+ *  would let the two drift out of step. Short on purpose: longer read as
+ *  sluggish, the controls still sitting there well after playback had
+ *  started. */
 internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
 
 /**
@@ -319,8 +317,8 @@ fun ChannelScreen(
     // the physical orientation at the moment (see the guard on
     // lastOrientation below for why that alone isn't reliable either).
     // Only when it was expanded, though. Closed with its X, the Activity is
-    // stopped and doesn't recompose until the app is opened again — which
-    // used to land here too, and forced landscape fullscreen on someone
+    // stopped and doesn't recompose until the app is opened again, which
+    // also lands here — and must not force landscape fullscreen on someone
     // holding the phone upright.
     if (justExitedPip) {
         if (!pipWindowClosed[0]) fullscreen = true
@@ -356,7 +354,7 @@ fun ChannelScreen(
         // while the activity is in — or still transitioning out of —
         // Picture-in-Picture. That's exactly what could happen here: exiting
         // PiP changes `isInPictureInPicture`, which recomposes this screen,
-        // which (before this guard) would immediately try to force an
+        // which without this guard would immediately try to force an
         // orientation lock while the system was still mid-transition. The
         // whole block is wrapped in runCatching, not just this call — never
         // let any OEM-specific quirk in here take the app down; worst case
@@ -417,15 +415,11 @@ fun ChannelScreen(
     // out of PiP, and it silently threw away whatever fullscreen/compact
     // state the channel was actually in before PiP started.
     //
-    // The `return@LaunchedEffect` below used to come AFTER `lastOrientation`
-    // was already updated to PiP's fake LANDSCAPE value, so the moment PiP
-    // closed this effect compared the phone's real orientation against that
-    // fake value instead of whatever was recorded before PiP started —
-    // exiting PiP onto a physically portrait phone then read as a genuine
-    // rotation and reset fullscreen = false right as the effect above was
-    // trying to force it back to true. Bailing out first, before touching
-    // lastOrientation at all, freezes it at the real pre-PiP value for the
-    // whole time PiP is up.
+    // The `return@LaunchedEffect` below comes BEFORE `lastOrientation` is
+    // updated, so it stays frozen at the real pre-PiP value for the whole
+    // time PiP is up. Updated to PiP's fake LANDSCAPE value, exiting PiP
+    // onto a physically portrait phone would read as a genuine rotation and
+    // reset fullscreen = false right as the effect above forces it true.
     val configuration = LocalConfiguration.current
     var lastOrientation by remember { mutableStateOf(configuration.orientation) }
 
@@ -629,10 +623,10 @@ fun ChannelScreen(
 
     // Fullscreen, and picture-in-picture too: one layout for both, so going
     // into PiP from fullscreen, or expanding PiP (which lands in fullscreen,
-    // see justExitedPip above), never moves the player between layouts. It
-    // used to have a PiP-only layout, and moving the player out of it into
-    // this one while the window was still resizing crashed Compose ("Cannot
-    // insert LayoutNode ... because it already has a parent"). In PiP the
+    // see justExitedPip above), never moves the player between layouts.
+    // Moving it between layouts while the PiP window is still resizing
+    // crashes Compose ("Cannot insert LayoutNode ... because it already has
+    // a parent"). In PiP the
     // controls, chat overlay and PM notice are hidden — the system draws its
     // own play/pause (wired up in MainActivity).
     if (fullscreen || isInPictureInPicture) {
@@ -675,16 +669,11 @@ fun ChannelScreen(
                 windowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 title = {
                     // Tapping the channel name reconciles with the server —
-                    // playlist, player and leader/sync state — the same
-                    // thing pull-to-refresh used to do. Pull-to-refresh is
-                    // gone: it lived right on top of the video/chat content,
-                    // one swipe away from anyone scrolling chat, and there
-                    // was nothing stopping it from being fired over and over
-                    // as fast as a finger could swipe. This is the same
-                    // action moved somewhere deliberate to reach, backed by
-                    // ChannelViewModel.refresh()'s own cooldown (see there)
-                    // so repeated taps can't be turned into a request flood
-                    // against the channel server.
+                    // playlist, player and leader/sync state. It's here, not
+                    // a pull-to-refresh gesture one swipe away from anyone
+                    // scrolling chat, and ChannelViewModel.refresh() has its
+                    // own cooldown (see there) so repeated taps can't be
+                    // turned into a request flood against the channel server.
                     Column(
                         Modifier
                             .clickable(onClick = vm::refresh)
@@ -705,7 +694,7 @@ fun ChannelScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -722,7 +711,7 @@ fun ChannelScreen(
                     ) {
                         IconButton(onClick = vm::toggleMute) {
                             Icon(
-                                if (state.muted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                if (state.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                 contentDescription = if (state.muted) "Unmute" else "Mute"
                             )
                         }
@@ -823,21 +812,19 @@ fun ChannelScreen(
         // WindowInsets.systemBars: see rememberSystemBarInsets.)
         contentWindowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { padding ->
-        // Always the same Column — swapping in and out of a plain Box when a
-        // panel opened used to tear down and rebuild everything below (the
-        // player, its ExoPlayer instance, sync state) because Compose saw it
-        // as a structurally different subtree. That was the cause of Users
-        // and Playlist appearing to "reset" the video: opening either panel
-        // silently killed and restarted the player underneath.
+        // Always the same Column: swapping in a different container when a
+        // panel opens would make Compose see a structurally different
+        // subtree and tear down and rebuild everything below it (the player,
+        // its ExoPlayer instance, sync state) — opening Users or Playlist
+        // would restart the video.
         Column(Modifier.fillMaxSize().padding(padding)) {
 
             val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
 
-            // The fullscreen toggle used to just sit on screen forever — a
-            // bare white icon with nothing behind it reads as a stray white
-            // square parked over the video. Fading it out after a moment
-            // idle (CONTROLS_AUTO_HIDE_MS), and back in the instant the player is touched,
-            // matches how the true-fullscreen controls below already work.
+            // The fullscreen toggle fades out after a moment idle
+            // (CONTROLS_AUTO_HIDE_MS) and back in the instant the player is
+            // touched, like the true-fullscreen controls below — left up, a
+            // bare white icon reads as a stray white square over the video.
             var windowedControlsVisible by remember { mutableStateOf(true) }
             LaunchedEffect(windowedControlsVisible, webMode) {
                 if (windowedControlsVisible && !webMode) {
@@ -971,7 +958,7 @@ fun ChannelScreen(
                     }
                     // Top-right, not bottom-right: Media3's own PlayerView
                     // draws its settings/gear control in the bottom corner,
-                    // and the two used to sit right on top of each other.
+                    // and the two would sit right on top of each other.
                     WindowedFullscreenButton(
                         visible = windowedControlsVisible,
                         onClick = { fullscreen = true },
@@ -1078,14 +1065,10 @@ fun ChannelScreen(
 /**
  * The three dialogs that can interrupt joining or watching a channel —
  * a password prompt, and the two "native playback didn't work, try
- * WebView?" offers. These used to live only in the phone Scaffold path
- * below, which the isTv branch above never reaches (it returns before
- * getting there). That meant a TV user hitting a password-protected
- * channel had no way to ever enter it — no prompt, just a channel that
- * silently never joined — and the same for any native-playback failure:
- * no offer to fall back to WebView, just a black screen. Pulling these out
- * into one shared composable, called from both places, fixes that without
- * keeping two copies in sync by hand.
+ * WebView?" offers. Shared by the phone Scaffold path and the isTv branch
+ * (which returns before reaching the Scaffold), so a TV user also gets the
+ * password prompt and the fallback offers, without two copies to keep in
+ * sync by hand.
  */
 @Composable
 private fun PlaybackDialogs(
@@ -1663,9 +1646,9 @@ private fun TvPlaylistView(
     val keyboardController = LocalSoftwareKeyboardController.current
     var searchFocused by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
-    // Was searchFocusRequester here, unlike TvChatView's own equivalent
-    // LaunchedEffect(Unit) (see its comment), which deliberately focuses the
-    // non-text Nico toggle first rather than the chat input field. Focusing a
+    // Focuses the first row, not the search box — like TvChatView's own
+    // LaunchedEffect(Unit) (see its comment), which focuses the non-text
+    // Nico toggle first rather than the chat input field. Focusing a
     // text field pops Android TV's on-screen keyboard immediately — before
     // the user has navigated anywhere — and that overlay then eats D-pad
     // input itself: Down moves across keyboard keys instead of scrolling the
@@ -1888,8 +1871,8 @@ private fun FullscreenPlayer(
             // out the moment the exit button/title fade away on that same
             // idle timer. `chatOverlayOn`/`nekoState` are hoisted up to
             // ChannelScreen and shared with the windowed player's own call
-            // site — this no longer has (or needs) an on/off control of its
-            // own; that lives solely in the TopAppBar, above the video.
+            // site — this has no on/off control of its own; that lives
+            // solely in the TopAppBar, above the video.
             NekoChatOverlay(
                 messages = state.messages,
                 showEmotes = state.showEmotes,

@@ -40,17 +40,16 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             // A client built off Graph.http, not Graph.http itself — but
             // deliberately NOT sharing its Dispatcher/ConnectionPool.
             // `newBuilder()` copies those by reference by default, which
-            // would mean emote-image fetches compete for the exact same
-            // connection slots as the video player's own byte-fetching —
-            // NativePlayerHandle's OkHttpDataSource uses Graph.mediaHttp,
-            // which is built off Graph.http and shares its Dispatcher. A chat-heavy channel's backlog can fire
-            // a real burst of emote image requests right as a video is
-            // loading, and OkHttp's default limits (64 total, 5/host) are
-            // shared process-wide unless a client explicitly gets its own —
-            // so giving this one its own keeps a busy chat from ever being
-            // able to delay the player. Everything else (timeouts, no
-            // cookie jar — see the User-Agent comment below) still comes
-            // from Graph.http.
+            // would mean emote-image fetches compete for the same request
+            // slots as the video player's own byte-fetching
+            // (NativePlayerHandle's OkHttpDataSource uses Graph.mediaHttp,
+            // which shares Graph.http's Dispatcher). A chat-heavy channel's
+            // backlog can fire a burst of emote image requests right as a
+            // video is loading, and a Dispatcher's limits (64 total, 5 per
+            // host by default) apply across every client sharing it — so
+            // this one gets its own, and a busy chat can't delay the
+            // player. Everything else (timeouts, no cookie jar — see the
+            // User-Agent comment below) still comes from Graph.http.
             .okHttpClient {
                 Graph.http.newBuilder()
                     .dispatcher(Dispatcher().apply {

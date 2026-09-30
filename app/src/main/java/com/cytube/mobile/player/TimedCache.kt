@@ -4,10 +4,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Small TTL cache shared by the resolvers (YouTubeResolver, GoogleDriveResolver,
- * PeerTubeResolver, StreamableResolver) — each of them used to hand-roll this
- * exact same ConcurrentHashMap<K, Pair<Long, V>> + size-triggered-eviction
- * pattern independently, four copies that could (and had started to) quietly
- * drift out of sync with each other. One shared implementation now.
+ * PeerTubeResolver, StreamableResolver), so they all expire and evict the
+ * same way.
  *
  * Not a long-term store: these resolvers cache signed, time-limited stream
  * URLs just long enough to survive a player-surface rebuild (a few minutes),
@@ -21,7 +19,7 @@ class TimedCache<K : Any, V : Any>(
 
     /** A still-fresh cached value for [key], or null on a miss/expiry.
      *  Opportunistically sweeps expired entries once the map has grown past
-     *  [evictAboveSize], same as every resolver's own cache used to. */
+     *  [evictAboveSize]. */
     fun get(key: K, nowMs: Long = System.currentTimeMillis()): V? {
         if (entries.size > evictAboveSize) {
             entries.entries.removeIf { nowMs - it.value.first >= ttlMs }

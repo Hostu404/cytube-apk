@@ -1,16 +1,15 @@
-# R8 is now on for release builds (see app/build.gradle.kts). These rules are
-# deliberately conservative — there is no automated test suite here to catch
-# a method R8 stripped that only mattered at runtime, so every dependency
-# that leans on reflection is kept whole rather than trimmed.
+# R8 runs on release builds (see app/build.gradle.kts). These rules are
+# deliberately conservative — the unit tests run against unshrunk code, so
+# nothing would catch a method R8 stripped that only mattered at runtime;
+# every dependency that leans on reflection is kept whole rather than trimmed.
 
 # ---- CyTube protocol / Socket.IO ----
 -keep class io.socket.** { *; }
 -dontwarn io.socket.**
 
 # ---- OkHttp / okio ----
-# Both ship their own consumer rules inside their AARs, which AGP merges in
-# automatically — these are kept explicit anyway since this is the first
-# time R8 has run on this project at all.
+# Both ship their own consumer rules inside their jars, which AGP merges in
+# automatically — these are kept explicit anyway, as a safety net.
 -dontwarn okhttp3.**
 -dontwarn okio.**
 -keep class okhttp3.** { *; }

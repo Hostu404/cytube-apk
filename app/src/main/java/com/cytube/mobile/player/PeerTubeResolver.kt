@@ -96,11 +96,9 @@ object PeerTubeResolver {
 
     private fun bestHls(playlists: JSONArray?, domain: String): Resolved? {
         if (playlists == null) return null
-        // Was: return on the first non-blank playlistUrl. A PeerTube instance
-        // can list multiple streamingPlaylists (e.g. one per resolution
-        // ladder variant); taking the first meant we could hand ExoPlayer a
-        // lower-resolution playlist even when a better one was later in the
-        // array. Now compares maxResolution across all of them.
+        // A PeerTube instance can list several streamingPlaylists (e.g. one
+        // per resolution ladder); take the one with the highest resolution,
+        // not just the first.
         var best: Resolved? = null
         var bestResolution = -1
         for (i in 0 until playlists.length()) {

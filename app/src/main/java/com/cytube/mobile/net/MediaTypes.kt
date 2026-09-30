@@ -37,12 +37,8 @@ object MediaTypes {
         PEERTUBE,
         /**
          * A single-video WebView — just the video surface, with chat,
-         * playlist and sync all staying native around it. This is what
-         * AUTOMATIC was always documented to prefer over WEB (see
-         * resolvePlayer's comment) for cu/bc/bn items, but nothing ever
-         * actually routed to it before: playerFor had no branch for it, so
-         * every one of these fell all the way through to the whole-page WEB
-         * fallback instead.
+         * playlist and sync all staying native around it. AUTOMATIC prefers
+         * it to WEB (see ChannelViewModel.resolvePlayer).
          *
          * The URL it loads (see MediaFrame.embedPlayableSrc) is not always a
          * dedicated embed link — meta.embed.src when the channel supplied
@@ -70,10 +66,8 @@ object MediaTypes {
      * channel is running the old Google Drive userscript and it already
      * populated meta.direct for everyone. If it's there, use it; that's a
      * live channel-provided source and always wins over resolving our own.
-     * (Vimeo does NOT belong on this list despite once being documented here —
-     * mediaquery's vimeo.js only sets meta.direct via lookupAndExtract, but
-     * CyTube's own get-info.js vi handler calls plain lookup/lookupAnonymous
-     * instead, which never touches meta.direct at all. See knownEmbedUrl.)
+     * (Vimeo items don't have it: CyTube's get-info.js looks them up without
+     * extracting sources. See knownEmbedUrl.)
      *
      * Otherwise Google Drive gets its own app-side resolution (GoogleDriveResolver)
      * rather than falling back to WebView — see that class for why the
@@ -119,6 +113,26 @@ object MediaTypes {
 
     fun label(type: String): String = LABELS[type] ?: type
 
+    /** A bare DNS hostname — letters/digits/hyphens per label, labels joined
+     *  by dots, no scheme/userinfo/port/path/query. This is deliberately
+     *  strict: peertube.js's "domain" half of a pt id is meant to be exactly
+     *  this, and knownEmbedUrl below splices it directly into a URL string
+     *  that gets loaded in a WebView, so anything that isn't unambiguously a
+     *  hostname (an "@" that would smuggle in userinfo, a "/" that would
+     *  smuggle in a path, a scheme, etc.) must be rejected outright rather
+     *  than passed through. */
+    // internal, not private: PeerTubeResolver validates a "domain;shortUUID" pt
+    // id against this same pattern before building a request URL from it.
+    internal val HOSTNAME_REGEX =
+        Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+    /** A PeerTube video id: the short form (base58-ish, letters and digits)
+     *  or the full UUID (hex with hyphens) — CyTube's link parser keeps
+     *  whichever the link used, so hyphens are allowed. Otherwise
+     *  deliberately narrow (no '/', '@', '.', '?') for the same reason as
+     *  HOSTNAME_REGEX. */
+    private val PEERTUBE_SHORT_ID_REGEX = Regex("^[A-Za-z0-9-]{1,64}$")
+
     /**
      * A handful of providers CyTube resolves with no embeddable link
      * anywhere in meta — no meta.embed, no meta.direct, no scuri — even
@@ -126,18 +140,15 @@ object MediaTypes {
      * page. Checked directly against CyTube's own resolution source
      * (get-info.js and @cytube/mediaquery's provider modules), not assumed:
      *
-     *  - yt (YouTube): only ever reaches here after NEWPIPE has already
-     *    started and then failed (playerFor always prefers NEWPIPE outright
-     *    for yt, before this is ever consulted — see reportPlaybackFailure
-     *    for where this branch actually matters). youtube.com/embed/ is
-     *    guaranteed to work for anything that made it into a CyTube
-     *    playlist in the first place: mediaquery's youtube.js rejects
-     *    non-embeddable videos at add-time (video.status.embeddable), so a
-     *    yt item existing at all already proves this URL will play.
+     *  - yt (YouTube): used for live items (see playerFor's isLive), and as
+     *    the fallback when NEWPIPE fails (ChannelViewModel.
+     *    reportPlaybackFailure). youtube.com/embed/ works for anything that
+     *    made it into a CyTube playlist in the first place: mediaquery's
+     *    youtube.js rejects non-embeddable videos at add-time
+     *    (video.status.embeddable).
      *  - vi (Vimeo): mediaquery's vimeo.js only fills meta.direct via
      *    lookupAndExtract, but CyTube's get-info.js vi handler calls plain
-     *    lookup instead, which never touches meta.direct — so despite an
-     *    older comment on hasDirect above claiming otherwise, Vimeo items
+     *    lookup instead, which never touches meta.direct — so Vimeo items
      *    normally arrive with no playable source at all. Same embeddability
      *    guarantee as yt above: lookup rejects videos with
      *    embed_privacy !== 'anywhere' before the item can even be added.
@@ -167,29 +178,7 @@ object MediaTypes {
      * confirmed embed pattern) or sc (SoundCloud — CyTube's own server has
      * refused to add new sc items at all since 2022, so there is nothing to
      * fall back for).
-     */
-    /** A bare DNS hostname — letters/digits/hyphens per label, labels joined
-     *  by dots, no scheme/userinfo/port/path/query. This is deliberately
-     *  strict: peertube.js's "domain" half of a pt id is meant to be exactly
-     *  this, and knownEmbedUrl below splices it directly into a URL string
-     *  that gets loaded in a WebView, so anything that isn't unambiguously a
-     *  hostname (an "@" that would smuggle in userinfo, a "/" that would
-     *  smuggle in a path, a scheme, etc.) must be rejected outright rather
-     *  than passed through. */
-    // internal, not private: PeerTubeResolver validates a "domain;shortUUID" pt
-    // id against this exact same pattern before ever building a request URL
-    // from it, and used to keep its own byte-for-byte duplicate of this regex.
-    internal val HOSTNAME_REGEX =
-        Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
-
-    /** A PeerTube video id: the short form (base58-ish, letters and digits)
-     *  or the full UUID (hex with hyphens) — CyTube's link parser keeps
-     *  whichever the link used. Hyphens were missing, so a video added by its
-     *  UUID link could never fall back to the embed page. Still deliberately
-     *  narrow (no '/', '@', '.', '?') for the same reason as HOSTNAME_REGEX. */
-    private val PEERTUBE_SHORT_ID_REGEX = Regex("^[A-Za-z0-9-]{1,64}$")
-
-    /**
+     *
      * All server-supplied — a channel's own media id, straight off a
      * changeMedia/playlist frame — so every branch below is untrusted input
      * being spliced into a URL a WebView will load, not a trusted constant.
