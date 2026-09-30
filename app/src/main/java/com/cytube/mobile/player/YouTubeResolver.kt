@@ -49,12 +49,11 @@ object YouTubeResolver {
         // by default, and NewPipeExtractor's StreamInfo.getInfo() fires a
         // whole burst of requests (player page, config, cipher fetches...)
         // for a single YouTube resolution, exactly when the player is
-        // trying to start up. Without its own pool that burst would
+        // trying to start up. Without its own dispatcher that burst would
         // compete with the player's own byte-fetching (NativePlayerHandle's
-        // OkHttpDataSource, also on Graph.http) for the same limited
-        // connection slots — this is likely the more impactful of the two,
-        // since it happens on every YouTube load and playlist advance, not
-        // just in chat-heavy channels.
+        // OkHttpDataSource on Graph.mediaHttp, which shares Graph.http's
+        // dispatcher) for the same limited request slots, on every YouTube
+        // load and playlist advance.
         val newPipeHttp = http.newBuilder()
             .dispatcher(Dispatcher())
             .connectionPool(ConnectionPool())
@@ -103,31 +102,38 @@ object YouTubeResolver {
             // is not what this does today, so quality caps at the best muxed
             // stream YouTube offers (usually 360p). Prefer mp4 (H.264) over webm
             // for hardware-accelerated playback on Android TV / low-end devices.
+            // isVideoOnly()/getResolution() called as methods on purpose:
+            // VideoStream also has deprecated public fields of the same names,
+            // which Kotlin's property syntax would pick.
             val stream = info.videoStreams
-                .filter { !it.isVideoOnly && !it.url.isNullOrBlank() }
+                .filter { !it.isVideoOnly() && it.playableUrl() != null }
                 .maxWithOrNull(
                     compareBy<VideoStream> {
-                        it.resolution?.filter(Char::isDigit)?.toIntOrNull() ?: 0
+                        it.getResolution().filter(Char::isDigit).toIntOrNull() ?: 0
                     }.thenBy {
                         if (it.format?.mimeType?.contains("mp4", ignoreCase = true) == true) 1 else 0
                     }
                 ) ?: throw IllegalStateException("No muxed stream for $videoId")
 
-            // getUrl() is @Nullable, and the isNullOrBlank() filter above does
-            // not smart-cast across the lambda, so re-check it here.
-            val url = stream.url
+            // The filter above doesn't smart-cast across the lambda, so re-check.
+            val url = stream.playableUrl()
                 ?: throw IllegalStateException("Chosen stream has no URL for $videoId")
 
             val resolved = Resolved(
                 url = url,
                 mimeType = stream.format?.mimeType,
-                label = stream.resolution ?: "unknown"
+                label = stream.getResolution().ifEmpty { "unknown" }
             )
             Log.i(TAG, "resolved $videoId -> ${resolved.label} ${resolved.mimeType}")
             cache.put(videoId, resolved)
             resolved
         }.onFailure { Log.w(TAG, "resolve failed for $videoId: ${it.javaClass.simpleName} - ${it.message}", it) }
     }
+
+    /** The stream's address. NewPipe's content is either a URL or, for some
+     *  delivery methods, a manifest's text itself; only a URL is playable here. */
+    private fun VideoStream.playableUrl(): String? =
+        if (isUrl()) getContent().takeIf { it.isNotBlank() } else null
 
     /** NewPipe wants its own HTTP abstraction; reuse the app's OkHttp client. */
     private class OkHttpDownloader(private val client: OkHttpClient) : Downloader() {

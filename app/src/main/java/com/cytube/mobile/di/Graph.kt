@@ -45,23 +45,22 @@ object Graph {
     // AuthRepository's login POST needs to read Set-Cookie off /login's own
     // response. That's a 200 as the app calls it (a Referer of /login means
     // "no redirect" to the server), but CyTube redirects when given somewhere
-    // to go back to, and OkHttp following that would drop the header. Scoped to its own client — built off
-    // `http` so it still shares its connection pool and dispatcher — rather
-    // than disabling redirects on `http` itself, which every other consumer
-    // (media byte fetches, the channel-index scrape, Drive/YouTube resolving)
-    // shares and none of which want redirects suppressed.
+    // to go back to, and OkHttp following that would drop the header. Scoped
+    // to its own client — built off `http`, so it shares its connection pool
+    // and dispatcher — rather than disabling redirects on `http` itself,
+    // which the channel-index scrape and the resolvers share and none of
+    // which want redirects suppressed.
     private val authHttp: OkHttpClient by lazy {
         http.newBuilder().followRedirects(false).build()
     }
 
-    // Dedicated to media byte fetches (NativePlayerHandle's data source), not
-    // shared with `http`. `http`'s 30s read timeout is plenty for chat/API
-    // calls, but a slow patch of network mid-download on a large video file
-    // can go quiet for longer than that on a single read without the stream
-    // actually being dead — hitting that timeout used to kill playback
-    // outright (an ExoPlayer error, forcing the WebView-fallback prompt)
-    // rather than just being a stutter. Built off `http` so it still shares
-    // its connection pool/dispatcher.
+    // Dedicated to media byte fetches (NativePlayerHandle's data source).
+    // `http`'s 30s read timeout is plenty for API calls, but a slow patch of
+    // network mid-download on a large video file can go quiet for longer
+    // than that on a single read without the stream being dead, and a
+    // timeout there is a playback error (and the WebView-fallback prompt)
+    // rather than a stutter. Built off `http`, so it shares its dispatcher,
+    // but with its own connection pool.
     val mediaHttp: OkHttpClient by lazy {
         http.newBuilder()
             .readTimeout(60, TimeUnit.SECONDS)
@@ -74,9 +73,9 @@ object Graph {
 
     /** First call builds EncryptedSharedPreferences (a Keystore round-trip,
      *  slow on low-end TV sticks), so callers make that first call off the
-     *  main thread (see HomeViewModel/ChannelViewModel). Synchronized because
-     *  of exactly that: a background first call and a main-thread one can now
-     *  race, and two instances over the same prefs file must not happen. */
+     *  main thread (see HomeViewModel, ChannelViewModel, LoginScreen).
+     *  Synchronized so two first calls on different threads can't build two
+     *  instances over the same prefs file. */
     fun auth(context: Context): AuthRepository =
         authRepo ?: synchronized(this) {
             authRepo ?: AuthRepository(context.applicationContext, authHttp, BASE_URL).also { authRepo = it }
@@ -92,7 +91,7 @@ object Graph {
      *  goes away (e.g. saving a setting as the user leaves). */
     val appScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    private var mediaCacheInstance: Cache? = null
+    @Volatile private var mediaCacheInstance: Cache? = null
 
     /** On-disk cache for played-back media bytes (see NativePlayerHandle),
      *  bounded by [MEDIA_CACHE_MAX_BYTES] so a long-running app can't let
@@ -101,16 +100,20 @@ object Graph {
      *  Lives under the app's own cache dir (no storage permission needed,
      *  and Android itself is free to reclaim it under storage pressure on
      *  top of the cap here). Media3 only allows one SimpleCache instance per
-     *  cache directory for the life of the process, so this must stay a
-     *  true singleton rather than being built fresh per player instance. */
+     *  cache directory for the life of the process (a second one throws),
+     *  so this must stay a true singleton rather than being built fresh per
+     *  player instance — synchronized so two first calls on different
+     *  threads can't both build one. */
     fun mediaCache(context: Context): Cache =
-        mediaCacheInstance ?: run {
-            val appContext = context.applicationContext
-            SimpleCache(
-                File(appContext.cacheDir, "media"),
-                LeastRecentlyUsedCacheEvictor(MEDIA_CACHE_MAX_BYTES),
-                StandaloneDatabaseProvider(appContext)
-            ).also { mediaCacheInstance = it }
+        mediaCacheInstance ?: synchronized(this) {
+            mediaCacheInstance ?: run {
+                val appContext = context.applicationContext
+                SimpleCache(
+                    File(appContext.cacheDir, "media"),
+                    LeastRecentlyUsedCacheEvictor(MEDIA_CACHE_MAX_BYTES),
+                    StandaloneDatabaseProvider(appContext)
+                ).also { mediaCacheInstance = it }
+            }
         }
 
     private const val MEDIA_CACHE_MAX_BYTES = 1_024L * 1024L * 1024L // 1GB

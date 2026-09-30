@@ -4,9 +4,11 @@ import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -34,10 +36,28 @@ class CyTubeClient(
 
     private val resolver = SocketConfigResolver(http, baseUrl)
 
-    private val _events = MutableSharedFlow<CyTubeEvent>(
+    /**
+     * Two queues, because they can't be treated the same when the app falls
+     * behind (a busy main thread during a chat flood):
+     *
+     *  - Chat ("chatMsg", "pm", "clearchat") can arrive at 100 a second and
+     *    is only ever shown, so it's bounded and the oldest is dropped.
+     *  - Everything else changes state (the current item, the playlist, the
+     *    user list, the leader, polls...). Dropping one would leave the app
+     *    wrong until the next reconnect, so none are dropped. They're few:
+     *    a time update every few seconds, plus whatever people do.
+     *
+     * Ordering is kept within each queue, which is all that matters: chat
+     * goes through its own pipeline in ChannelViewModel anyway.
+     */
+    private val chatEvents = MutableSharedFlow<CyTubeEvent>(
         replay = 0, extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
-    val events: SharedFlow<CyTubeEvent> = _events.asSharedFlow()
+    private val stateEvents = Channel<CyTubeEvent>(Channel.UNLIMITED)
+
+    /** Every parsed frame. Collect it once: the state events are a queue,
+     *  so a second collector would take some of them away from the first. */
+    val events: Flow<CyTubeEvent> = merge(stateEvents.receiveAsFlow(), chatEvents)
 
     @Volatile private var socket: Socket? = null
 
@@ -88,10 +108,16 @@ class CyTubeClient(
         val opts = IO.Options().apply {
             transports = arrayOf("websocket", "polling")
             reconnection = true
+            // Waits between retries double from 1 s but stop at 10 s: that's
+            // how often CyTube gives an IP address a connection back once
+            // it's used up its allowance (see ConnectionRefused). A longer
+            // wait only left the app sitting idle after the server would
+            // have accepted it again. 20 attempts at up to 10 s is still a
+            // few minutes of trying before it gives up.
             reconnectionDelay = 1_000L
-            reconnectionDelayMax = 30_000L
+            reconnectionDelayMax = 10_000L
             randomizationFactor = 0.5
-            reconnectionAttempts = 10
+            reconnectionAttempts = 20
             timeout = 20_000
             (credential as? Credential.Cookie)?.let {
                 extraHeaders = mapOf("Cookie" to listOf("auth=${it.authCookie}"))
@@ -120,7 +146,18 @@ class CyTubeClient(
             emit(CyTubeEvent.Disconnected)
         }
         s.on(Socket.EVENT_CONNECT_ERROR) { args ->
-            emit(CyTubeEvent.ConnectionFailed(args.firstOrNull()?.toString() ?: "connect error"))
+            // Two different things arrive here. A network or transport
+            // failure comes as an exception, and Socket.IO retries by itself.
+            // The server turning us down (ioserver.js middleware: its
+            // per-IP connection rate limit, a ban) comes as its message, and
+            // Socket.IO destroys the socket without ever retrying.
+            when (val err = args.firstOrNull()) {
+                is JSONObject -> emit(CyTubeEvent.ConnectionRefused(
+                    err.optString("message").ifBlank { "Connection refused" }
+                ))
+                is String -> emit(CyTubeEvent.ConnectionRefused(err.ifBlank { "Connection refused" }))
+                else -> emit(CyTubeEvent.ConnectionFailed(err?.toString() ?: "connect error"))
+            }
         }
         s.io().on(Manager.EVENT_RECONNECT_ATTEMPT) { args ->
             emit(CyTubeEvent.Reconnecting((args.firstOrNull() as? Int) ?: 0))
@@ -372,7 +409,10 @@ class CyTubeClient(
 
     private fun playlistPosition(o: JSONObject): Int = PlaylistPosition.parse(o.opt("after"))
 
-    private fun emit(e: CyTubeEvent) { _events.tryEmit(e) }
+    private fun emit(e: CyTubeEvent) {
+        if (e is CyTubeEvent.Chat || e is CyTubeEvent.ChatCleared) chatEvents.tryEmit(e)
+        else stateEvents.trySend(e)
+    }
 
     private inline fun obj(s: Socket, name: String, crossinline map: (JSONObject) -> CyTubeEvent?) {
         s.on(name) { args ->

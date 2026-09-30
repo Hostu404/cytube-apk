@@ -56,10 +56,9 @@ data class MediaFrame(
      *  Google Drive is deliberately excluded from all three: it already gets
      *  its own native resolution (GoogleDriveResolver — see
      *  MediaTypes.playerFor) and a raw Drive link opened in a stripped-down
-     *  WebView lands on Google's own sign-in/UI chrome, not a clean video —
-     *  see the README's known Google Drive limitation. Its failures fall
-     *  straight through to null here, so they still go to the full
-     *  Compatibility View offer, same as before this existed. */
+     *  WebView lands on Google's own sign-in/UI chrome, not a clean video.
+     *  It's null here, so a Drive item that fails to resolve goes to the
+     *  Compatibility View offer. */
     val embedPlayableSrc: String? get() = if (type == "gd") null else
         embedSrc?.takeIf { it.isNotBlank() }
             ?: scuri
@@ -135,9 +134,9 @@ data class MediaFrame(
  */
 data class DirectSource(val link: String, val contentType: String, val quality: String) {
     companion object {
-        // Quality order copied from sortSources(); we default to the highest
-        // rather than the site's 480p default because phones are small but
-        // networks are usually fine, and Media3 has no ABR here to fall back on.
+        // Quality order copied from sortSources(), highest first. Which one
+        // actually plays is ChannelViewModel's choice (its quality
+        // adaptation), not the site's fixed 480p default.
         private val ORDER = listOf("2160", "1440", "1080", "720", "540", "480", "360", "240")
 
         fun parse(o: JSONObject?): List<DirectSource> {
@@ -145,9 +144,7 @@ data class DirectSource(val link: String, val contentType: String, val quality: 
             val out = mutableListOf<DirectSource>()
             val keys = o.keys()
             while (keys.hasNext()) {
-                // JSONObject.keys() is an untyped Iterator on Android, so this
-                // arrives as Any? rather than String.
-                val quality = keys.next() as? String ?: continue
+                val quality = keys.next()
                 val arr = o.optJSONArray(quality) ?: continue
                 for (i in 0 until arr.length()) {
                     val src = arr.optJSONObject(i) ?: continue
@@ -370,8 +367,7 @@ data class Poll(
         private fun plainText(raw: String): String =
             // '&' as well as '<': the server HTML-escapes every title and
             // option, so "Who's best? (vote)" arrives as
-            // "Who&#39;s best? &#40;vote&#41;". Only links used to trigger
-            // decoding, so almost every poll showed codes like &#39;.
+            // "Who&#39;s best? &#40;vote&#41;" even with no markup in it.
             if (raw.indexOf('<') < 0 && raw.indexOf('&') < 0) raw else Jsoup.parse(raw).text()
 
         /** Always returns exactly [size] entries so it can be zipped with

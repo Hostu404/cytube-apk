@@ -26,7 +26,7 @@ import kotlinx.coroutines.withContext
 /**
  * Media3 backend. Plays the CyTube types that are genuine media URLs — fi
  * (raw file), hl (HLS), and anything with meta.direct sources (cm custom
- * manifests, Vimeo, Drive with userscript metadata) — via [load], and the
+ * manifests, Drive with userscript metadata) — via [load], and the
  * streams the resolvers find for YouTube, Drive, Streamable and PeerTube via
  * [loadUrl].
  */
@@ -107,8 +107,8 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     }
 
     /**
-     * Play a URL resolved elsewhere (NewPipe, GoogleDriveResolver), keeping the
-     * frame's metadata.
+     * Play a URL resolved elsewhere (StreamResolvers: YouTube, Google Drive,
+     * Streamable, PeerTube), keeping the frame's metadata.
      *
      * These are signed CDN URLs (Google's "gvs" video servers, the same infra
      * behind googlevideo.com) tied to the network path that resolved them.
@@ -244,21 +244,14 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     }
 
     /**
-     * Neither load() nor loadUrl() used to pass a start position at all, so
-     * every fresh item — joining a channel already in progress, or a
-     * playlist switch — began playing from 0:00 no matter where the room
-     * actually was. SyncEngine then leaves a freshly-loaded item alone for
-     * SYNC_GRACE_MS (see ChannelViewModel) so it can build up a real buffer
-     * before position-correcting it, which meant up to six full seconds of
-     * watching the wrong part of the video before the first correction —
-     * usually a jarring hard seek once the grace window ended, since the
-     * diff from 0:00 is almost always past HARD_SEEK_THRESHOLD. Seeding the
-     * real position here means the grace window is spent near the right
-     * spot to begin with, not at the start of the file.
+     * Where a fresh item opens: [media]'s currentTime (ChannelViewModel.
+     * plannedStart decides it). SyncEngine leaves a freshly-loaded item alone
+     * for SYNC_GRACE_MS so it can build up a buffer, so opening at 0:00 and
+     * waiting to be corrected would mean seconds of the wrong part of the
+     * video followed by a hard seek.
      *
      * A negative currentTime is CyTube's own lead-in countdown (the group
-     * hasn't started yet) rather than a real position, so that still starts
-     * at 0 like before.
+     * hasn't started yet) rather than a real position, so that starts at 0.
      */
     private fun startPositionMs(media: MediaFrame): Long {
         val cur = media.currentTime

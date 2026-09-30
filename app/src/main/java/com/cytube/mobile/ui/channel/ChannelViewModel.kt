@@ -133,9 +133,8 @@ data class ChannelUiState(
      *  fallback to try instead — see ChannelViewModel.reportPlaybackFailure,
      *  which switches straight to EMBED with no prompt when one exists. */
     val playbackOffer: String? = null,
-    /** Non-null when a freshly-selected item cannot be played natively at all
-     *  (e.g. Google Drive without the userscript metadata) and we're asking
-     *  whether to load it in WebView. Distinct from [playbackOffer], which is
+    /** Non-null when a freshly-selected item has no player in the app at all
+     *  (e.g. Twitch) and we're asking whether to load it in WebView. Distinct from [playbackOffer], which is
      *  only for a backend that was actually running and then failed. */
     val compatOffer: String? = null,
     val refreshing: Boolean = false,
@@ -228,9 +227,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * player has been released. Surfaces never report "detached" as a
      * separate call: when the player type changes, Compose creates the new
      * surface (which attaches its player) before it disposes the old one,
-     * so a "set to null on dispose" from the old surface used to wipe out
-     * the new player — every embed shown after any other video had no
-     * handle, and got no sync corrections or mute.
+     * so a "set to null on dispose" from the old surface would wipe out the
+     * new player, leaving it with no sync corrections or mute.
      */
     private var player: PlayerHandle? = null
         get() = field?.takeUnless { it.isReleased }
@@ -254,9 +252,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var sessionPreferredQualityHeight: Int? = null
     /** When playback last started running stall-free at the current quality
      *  cap: set by a stall step-down or a step-up, and on the first item.
-     *  NOT reset on every new item — it used to be, which meant the
-     *  "stable for 2 minutes" step-up check only ever measured the previous
-     *  item, so on a playlist of short videos quality never came back up. */
+     *  NOT reset on every new item, or the "stable for 2 minutes" step-up
+     *  check would only ever measure the previous item, and on a playlist of
+     *  short videos quality would never come back up. */
     private var qualityStableSinceMs: Long = 0L
     private var settings: Settings = Settings(syncAccuracy = defaultSyncAccuracy(app))
     private var leaderTicker: Job? = null
@@ -361,11 +359,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         _state.value = _state.value.copy(connection = ConnectionState.CONNECTING)
         guestRetries = 0
         guestLoginRetryJob?.cancel()
+        refusedRetryJob?.cancel()
+        refusedRetryJob = null
         val credential = savedCredential() ?: CyTubeClient.Credential.Guest(guestName())
         try {
-            // The channel password too: the app's own reconnects (refresh,
-            // retry, coming back after a long time away) used to drop it and
-            // ask again.
+            // The channel password too, so the app's own reconnects (refresh,
+            // retry, coming back after a long time away) don't ask again.
             client.connect(channel, credential, channelPassword)
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
@@ -386,13 +385,64 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** Waiting out the server's one-guest-login-a-minute limit; see LoginResult. */
     private var guestLoginRetryJob: Job? = null
 
+    /** A fresh connection scheduled after the server refused one; see
+     *  onConnectionRefused. connect() cancels it, so a manual retry (tapping
+     *  the channel name) doesn't lead to a second connection. */
+    private var refusedRetryJob: Job? = null
+
+    /**
+     * The server turned the connection down, and Socket.IO won't retry by
+     * itself after that (it only retries network failures): without this
+     * the app would sit on "Reconnecting…" until the channel was left and
+     * rejoined.
+     *
+     * The usual reason is CyTube's per-IP connection rate limit: each IP
+     * address gets 5 connections, and one back every 10 s (ioserver.js
+     * ipThrottleMiddleware). Every channel join and reconnect counts, from
+     * every device on the same network, so hopping between a few channels
+     * uses it up. Connect again once one is back. A ban is final: say so
+     * and stop.
+     */
+    private fun onConnectionRefused(reason: String) {
+        Log.w(TAG, "server refused the connection: $reason")
+        refusedRetryJob?.cancel()
+        if (reason.contains("banned", ignoreCase = true)) {
+            update { it.copy(connection = ConnectionState.FAILED, statusMessage = reason) }
+            return
+        }
+        val seconds = REFUSED_RETRY_MS / 1000
+        update {
+            it.copy(
+                connection = ConnectionState.RECONNECTING,
+                statusMessage = if (reason.contains("rate limit", ignoreCase = true)) {
+                    "Too many connections from your network — retrying in ${seconds}s…"
+                } else {
+                    "$reason — retrying in ${seconds}s…"
+                }
+            )
+        }
+        refusedRetryJob = viewModelScope.launch {
+            delay(REFUSED_RETRY_MS)
+            // Cleared first: connect() cancels a pending retry, and this is it.
+            refusedRetryJob = null
+            val s = _state.value
+            // Moved to Compatibility View or kicked meanwhile: stay away.
+            if (s.effectiveMode == CompatMode.WEB || s.kicked != null ||
+                s.connection == ConnectionState.CONNECTED
+            ) return@launch
+            client.disconnect()
+            connect(s.channel)
+        }
+    }
+
     private suspend fun observeEvents() {
         client.events.collect { event ->
             // A bug in any single branch below must not kill this collector —
             // there's no restart, so an uncaught exception here would silently
             // stop all future chat/playlist/user updates for the rest of the
-            // channel session (or crash the process outright).
-            runCatching {
+            // channel session (or crash the process outright). Cancellation
+            // (the screen closing) is let through: some branches suspend.
+            try {
             when (event) {
                 is CyTubeEvent.Connected -> {
                     reconnectGaveUp = false
@@ -428,6 +478,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.ConnectionFailed ->
                     update { it.copy(connection = ConnectionState.RECONNECTING) }
+
+                is CyTubeEvent.ConnectionRefused -> onConnectionRefused(event.reason)
 
                 // Used to leave the app on "Reconnecting…" for good. Reopening
                 // the app retries (onAppVisibilityChanged); in the meantime,
@@ -526,7 +578,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         client.disconnect()
                         delay(2_000)
                         connect(_state.value.channel)
-                        return@runCatching
+                        return@collect
                     }
                     // Refused for good: forget it and rejoin as a guest.
                     Log.i(TAG, "saved login was refused; rejoining as a guest")
@@ -609,17 +661,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 is CyTubeEvent.ItemMoved -> update { s ->
                     val item = s.playlist.firstOrNull { it.uid == event.uid } ?: return@update s
-                    s.copy(playlist = insertAfter(s.playlist.remove(item), item, event.afterUid))
+                    s.copy(playlist = insertAfter(s.playlist.removing(item), item, event.afterUid))
                 }
                 is CyTubeEvent.ItemDeleted -> update { s ->
-                    s.copy(playlist = s.playlist.removeAll { it.uid == event.uid })
+                    s.copy(playlist = s.playlist.removingAll { it.uid == event.uid })
                 }
 
                 // Handed to the chat pipeline (runChatPump) rather than
-                // handled here: under a flood this loop used to spend its
-                // time on chat while a time update or the next video waited
-                // behind it — and this flow drops its oldest events once 256
-                // are waiting.
+                // handled here, so under a flood a time update or the next
+                // video isn't left waiting behind chat.
                 is CyTubeEvent.Chat -> chatInbox.trySend(ChatInboxItem.Message(event.message))
                 // Through the pipeline too, so it lands after the messages
                 // that came before it, not before.
@@ -627,22 +677,22 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 is CyTubeEvent.UserListReplaced -> update { it.copy(users = event.users.toPersistentList()) }
                 is CyTubeEvent.UserJoined -> update { s ->
-                    s.copy(users = s.users.removeAll { it.name == event.user.name }.add(event.user))
+                    s.copy(users = s.users.removingAll { it.name == event.user.name }.adding(event.user))
                 }
                 is CyTubeEvent.UserLeft -> update { s ->
-                    s.copy(users = s.users.removeAll { it.name == event.name })
+                    s.copy(users = s.users.removingAll { it.name == event.name })
                 }
-                // set(idx, ...) rather than map{} over everyone: a plain map
+                // replacingAt(idx, ...) rather than map{} over everyone: a plain map
                 // would rebuild the whole list (and force a fresh
                 // PersistentList, defeating the structural sharing this type
                 // exists for) even though at most one entry changes here.
                 is CyTubeEvent.UserAfkChanged -> update { s ->
                     val idx = s.users.indexOfFirst { it.name == event.name }
-                    if (idx < 0) s else s.copy(users = s.users.set(idx, s.users[idx].copy(afk = event.afk)))
+                    if (idx < 0) s else s.copy(users = s.users.replacingAt(idx, s.users[idx].copy(afk = event.afk)))
                 }
                 is CyTubeEvent.UserRankChanged -> update { s ->
                     val idx = s.users.indexOfFirst { it.name == event.name }
-                    if (idx < 0) s else s.copy(users = s.users.set(idx, s.users[idx].copy(rank = event.rank)))
+                    if (idx < 0) s else s.copy(users = s.users.replacingAt(idx, s.users[idx].copy(rank = event.rank)))
                 }
                 is CyTubeEvent.UserCount -> update { it.copy(userCount = event.count) }
 
@@ -726,16 +776,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            }.onFailure { Log.e("CyTube", "Error handling ${event::class.simpleName}", it) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("CyTube", "Error handling ${event::class.simpleName}", e)
+            }
         }
     }
 
     // ---- media ----
 
-    /** The server's time for the item, capped at its length. (Used to add
-     *  half a measured round-trip time too, but the measurement never ran —
-     *  it listened on the wrong Socket.IO object — so it was always a fixed
-     *  0.05s.) */
+    /** The server's time for the item, capped at its length. */
     private fun serverTime(currentTime: Double, lengthSeconds: Int): Double =
         if (lengthSeconds > 0 && currentTime > lengthSeconds) lengthSeconds.toDouble() else currentTime
 
@@ -854,10 +905,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 else -> preferredHeight
             }
             val requiredBps = requiredBitrateForHeight(candidateCap)
-            // Real measurements only — see BandwidthEstimate. Was the
-            // player handle's estimate, which reported Media3's per-country
-            // default before anything had downloaded, and was null whenever
-            // no player happened to be attached at an item boundary.
+            // Real measurements only — see BandwidthEstimate. Before anything
+            // has downloaded, Media3 reports a per-country default instead.
             val currentBitrate = BandwidthEstimate.measuredBps()
             // Only bump if bandwidth estimate is absent (unknown) or satisfies target with 30% headroom
             val bandwidthOk = currentBitrate == null || currentBitrate >= (requiredBps * 1.3).toLong()
@@ -971,7 +1020,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
         if (syncJob?.isActive == true) return
         syncJob = viewModelScope.launch {
-            runCatching {
+            try {
                 sync.apply(
                     player = p,
                     update = update,
@@ -979,6 +1028,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     accuracySeconds = settings.syncAccuracy,
                     withinGracePeriod = withinGrace
                 )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "sync check failed", e)
             }
         }
     }
@@ -1159,9 +1212,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * the background.
      *
      * Normally the player surface loads each new item, but Compose doesn't
-     * run while the app is out of sight, so a playlist advance in the
-     * background used to leave the finished video sitting in the player.
-     * This does the surface's job for that case, on the same player: a
+     * run while the app is out of sight, so without this a playlist advance
+     * in the background would leave the finished video sitting in the
+     * player. This does the surface's job for that case, on the same player: a
      * plain file directly; YouTube, Drive, Streamable and PeerTube after
      * resolving the stream (cached, so the surface finds it already
      * resolved when the app comes back, and the handle's loadedKey tells it
@@ -1201,7 +1254,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     val stream = StreamResolvers.resolve(kind, media.id).getOrNull()
                     // Still the item, player and situation this was started for?
                     val now = _state.value
-                    if (now.media?.id != media.id || now.media?.type != media.type ||
+                    if (now.media?.id != media.id || now.media.type != media.type ||
                         now.player != kind || player !== handle ||
                         !AppVisibility.inBackground.value
                     ) return@launch
@@ -1233,19 +1286,29 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Where to open [media], streamed from [streamUrl]. For the channel's own
-     * item while synced (and not leading it): the room's time now, plus — when
-     * joining partway through — what opening from that server has been costing
-     * (SyncEngine.planStart), so a big file that takes 10 s to open doesn't
-     * arrive 10 s behind and have to jump again. Otherwise [media] as it is.
+     * Where to open [media], streamed from [streamUrl], when it's loaded fresh.
+     *
+     *  - A personal pick: [media] as it is, i.e. from its own start.
+     *  - The channel's own item while synced (and not leading it): the room's
+     *    time now, plus — when joining partway through — what opening from
+     *    that server has been costing (SyncEngine.planStart), so a big file
+     *    that takes 10 s to open doesn't arrive 10 s behind and have to jump
+     *    again.
+     *  - The channel's own item otherwise (leading, or sync off): the room's
+     *    time now. [media]'s own time is from its changeMedia frame, which is
+     *    stale by however long a stream lookup took. During the server's
+     *    lead-in countdown (a negative time) it starts from the top.
      */
     fun plannedStart(media: MediaFrame, streamUrl: String): MediaFrame {
         val s = _state.value
         val channelItem = s.channelCurrentMedia
-        if (s.personalPickActive || s.isLeader || !settings.syncEnabled ||
-            channelItem == null || channelItem.id != media.id || channelItem.type != media.type
+        if (s.personalPickActive || channelItem == null ||
+            channelItem.id != media.id || channelItem.type != media.type
         ) return media
         val room = roomTimeNow(media.seconds) ?: return media
+        if (s.isLeader || !settings.syncEnabled) {
+            return if (media.currentTime < 0 || room < 0) media else media.copy(currentTime = room)
+        }
         val start = sync.planStart(media.id, streamUrl, room, media.seconds, isServerPaused)
         return media.copy(currentTime = start)
     }
@@ -1360,10 +1423,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * Turns a raw player decision into what we actually apply. When the item
      * genuinely needs WebView and the user has not explicitly forced Web mode,
      * we never switch on our own — the item is marked UNAVAILABLE and a reason
-     * is returned so the caller can ask first. This is for types with no native
-     * or resolver-backed path at all (Vimeo/Dailymotion/Twitch/etc without
-     * meta.direct) — YouTube and Google Drive have their own resolvers and so
-     * never reach this branch; see MediaTypes.playerFor.
+     * is returned so the caller can ask first. This is for types with no
+     * native, resolver-backed or single-video embed path at all (Twitch,
+     * Livestream.com, SoundCloud...); see MediaTypes.playerFor.
      */
     private fun choosePlayerAndOffer(media: MediaFrame): Pair<MediaTypes.Player, String?> {
         val chosen = resolvePlayer(media)
@@ -1375,11 +1437,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // Google Drive is not handled here: it now resolves natively (see
-    // GoogleDriveResolver), so it never reaches choosePlayerAndOffer with
-    // Player.WEB. If that resolution itself fails at runtime, that goes
-    // through reportPlaybackFailure/playbackOffer instead, same as any other
-    // native player that started and then failed.
+    // Google Drive never gets here: it resolves natively (GoogleDriveResolver),
+    // so choosePlayerAndOffer never sees Player.WEB for it. If that lookup
+    // fails at runtime, it goes through reportPlaybackFailure/playbackOffer
+    // like any other player that started and then failed.
     private fun compatOfferReason(media: MediaFrame): String =
         "${MediaTypes.label(media.type)} needs Compatibility View"
 
@@ -1389,17 +1450,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * different player is exactly the kind of thing that makes the app feel
      * like it is fighting you.
      *
-     * Google Drive is not special-cased here — it goes through the same
-     * playbackOffer dialog as every other backend that started and failed
-     * (see the comment on [compatOfferReason]). It used to be excluded from
-     * this entirely and just got a status-line note instead — that note rode
-     * on `statusMessage`, the same field the TopAppBar's connection subtitle
-     * uses for "N connected" (see ConnectionLine), and nothing ever cleared
-     * it afterward, so it sat there permanently, on connect, LOOKING like a
-     * channel-set title rather than a one-off failure notice. Letting it
-     * offer the fallback like everything else fixes both: it's the standard
-     * dialog instead of a hijacked status line, and it actually goes away
-     * once handled.
+     * Google Drive is not special-cased: it gets the same playbackOffer
+     * dialog as every other backend that started and failed.
      *
      * When the failed item also has a URL its own single-video WebView
      * surface could load (media.embedPlayableSrc — null for Google Drive,
@@ -1414,7 +1466,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * entirely), so that's the one still worth a prompt. Guarded against the
      * backend that just failed *being* EMBED itself, so a broken
      * single-video URL can't silently re-select itself in a loop — that
-     * case falls through to the WebView offer like it always did.
+     * case falls through to the WebView offer.
      */
     fun reportPlaybackFailure(reason: String) {
         val m = _state.value.media
@@ -1458,13 +1510,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * Reconcile with the server rather than tearing the connection down.
      * Only re-resolves the socket if we are actually adrift, and never
      * touches the player — requestPlaylist/signalPlayerReady alone re-syncs
-     * playlist and leader state over the existing connection. (It used to
-     * rebuild the player too, which restarted whatever was already playing
-     * fine.)
+     * playlist and leader state over the existing connection, without
+     * restarting whatever is already playing.
      *
      * Reached by tapping the channel name in the TopAppBar (see
-     * ChannelScreen) rather than a pull gesture now — same action, moved
-     * somewhere deliberate rather than one swipe away from scrolling chat.
+     * ChannelScreen) — somewhere deliberate, rather than a pull gesture one
+     * swipe away from scrolling chat.
      * `refreshing` alone only blocks overlap with a call already in flight,
      * not a second tap the moment it clears — someone tapping as fast as
      * they can would still fire a `requestPlaylist`/`signalPlayerReady`
@@ -1504,13 +1555,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * silently pin the channel to Web mode forever, so the very next
      * unrelated item (or the same item on a later visit, once whatever failed
      * is fixed) would load straight into WebView with no explanation and no
-     * prompt, indistinguishable from the old "just defaults to WebView" bug
-     * this was built to fix.
+     * prompt.
      *
      * Choosing the same mode as the global default (Settings) clears this
      * channel's own choice instead of saving it, so the channel follows the
-     * default again — there was no other way back, and one visit to the
-     * menu used to pin the channel for good.
+     * default again — the only way back from a per-channel choice.
      */
     fun setMode(mode: CompatMode, persist: Boolean = true) {
         viewModelScope.launch {
@@ -1770,7 +1819,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private fun appendChat(current: PersistentList<ChatMessage>, messages: List<ChatMessage>): PersistentList<ChatMessage> {
         if (messages.isEmpty()) return current
         val tagged = messages.map { it.copy(seq = ++chatSeq) }
-        val all = current.addAll(tagged)
+        val all = current.addingAll(tagged)
         val drop = all.size - MAX_CHAT_MESSAGES
         return if (drop <= 0) all else all.subList(drop, all.size).toPersistentList()
     }
@@ -1811,7 +1860,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val perms = channelPermissions
         val rank = _state.value.localRank
         val canAdd = perms?.allowsPlaylistAction("playlistadd", rank, playlistOpen) == true
-        val canNext = canAdd && perms?.allowsPlaylistAction("playlistnext", rank, playlistOpen) == true
+        val canNext = canAdd && perms.allowsPlaylistAction("playlistnext", rank, playlistOpen)
         val canVote = perms?.allows("pollvote", rank) ?: true
         val canSkip = voteskipAllowed && perms?.allows("voteskip", rank) == true
         update {
@@ -1929,9 +1978,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         item: PlaylistItem,
         afterUid: Int
     ): PersistentList<PlaylistItem> {
-        if (afterUid == PlaylistPosition.START) return list.add(0, item)
+        if (afterUid == PlaylistPosition.START) return list.addingAt(0, item)
         val idx = list.indexOfFirst { it.uid == afterUid }
-        return if (idx >= 0) list.add(idx + 1, item) else list.add(item)
+        return if (idx >= 0) list.addingAt(idx + 1, item) else list.adding(item)
     }
 
     private fun escapeHtml(text: String): String = text
@@ -2019,9 +2068,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Server error notices (errorMsg / validationError / queueFail — "queue
      * failed", chat rate limits and the like) share statusMessage with the
-     * header's "N connected" line (see ChannelScreen's ConnectionLine), and
-     * nothing used to clear them, so one stayed in the header until the next
-     * reconnect. Shown for [TRANSIENT_STATUS_MS], then cleared — but only if
+     * header's "N connected" line (see ChannelScreen's ConnectionLine), so
+     * each is shown for [TRANSIENT_STATUS_MS] and then cleared — but only if
      * it's still the message on screen, so a newer notice or a connection
      * status set in the meantime is left alone.
      */
@@ -2110,6 +2158,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  a tap that lands mid-refresh. */
         const val REFRESH_COOLDOWN_MS = 4_000L
 
+        /** How long after the server refuses a connection to try again:
+         *  just over the 10 s CyTube takes to give an IP address another
+         *  connection (see onConnectionRefused). */
+        const val REFUSED_RETRY_MS = 11_000L
+
         /** How long after a new item or player SyncEngine holds off on all
          *  position correction (seeks and speed nudges) — see
          *  SyncEngine.apply. Long enough to cover Google Drive / NewPipe resolution +
@@ -2125,10 +2178,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  2_000L, not PlayerSurface's own 3_000L STALL_TRIGGER_MS: PlayerSurface
          *  calls onStall for two different reasons — one sustained stall of at
          *  least 3s, OR 2+ smaller stalls in its recent window totaling at
-         *  least 2s — and now reports the true measured duration for either
-         *  (it used to inflate every report to at least 3_000L, which happened
-         *  to always clear whatever floor was set here, silently turning this
-         *  check into a no-op). 2_000L is the true minimum PlayerSurface can
+         *  least 2s — and reports the measured duration for either. 2_000L is
+         *  the true minimum PlayerSurface can
          *  ever report when it has decided a stall is worth acting on, so this
          *  still only screens out call sites this function doesn't control. */
         const val QUALITY_DOWNGRADE_STALL_THRESHOLD_MS = 2_000L

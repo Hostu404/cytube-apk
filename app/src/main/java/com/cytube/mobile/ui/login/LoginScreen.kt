@@ -3,7 +3,7 @@ package com.cytube.mobile.ui.login
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,19 +15,33 @@ import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(onBack: () -> Unit) {
     val context = LocalContext.current
-    val auth = remember { Graph.auth(context) }
     val settingsStore = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
 
-    var session by remember { mutableStateOf(auth.savedSession()) }
+    // The first Graph.auth() call opens the encrypted store (a Keystore
+    // round trip, slow on low-end TV sticks) and savedSession() decrypts
+    // it, so both run off the main thread; the screen shows a spinner
+    // until they're done rather than a login form that may not apply.
+    var auth by remember { mutableStateOf<AuthRepository?>(null) }
+    var session by remember { mutableStateOf<AuthRepository.Session?>(null) }
+    LaunchedEffect(Unit) {
+        val (repo, saved) = withContext(Dispatchers.IO) {
+            val repo = Graph.auth(context)
+            repo to repo.savedSession()
+        }
+        session = saved
+        auth = repo
+    }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var remember_ by remember { mutableStateOf(true) }
@@ -69,7 +83,7 @@ fun LoginScreen(onBack: () -> Unit) {
                 title = { Text("Account") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 }
             )
@@ -79,11 +93,17 @@ fun LoginScreen(onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            val repo = auth
             val current = session
-            if (current != null) {
+            if (repo == null) {
+                Box(Modifier.fillMaxWidth().padding(top = 32.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (current != null) {
                 Text("Signed in as ${current.name}", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Your session is stored as an encrypted cookie. Your password is not kept on this device.",
+                    "Your password is not kept on this device. Only the session cookie CyTube " +
+                        "gave the app is kept, encrypted if you chose to stay signed in.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -91,7 +111,7 @@ fun LoginScreen(onBack: () -> Unit) {
                     // logout() forgets the session at once and never blocks.
                     onClick = {
                         session = null
-                        auth.logout()
+                        repo.logout()
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Log out") }
@@ -131,7 +151,7 @@ fun LoginScreen(onBack: () -> Unit) {
                     onClick = {
                         busy = true; error = null
                         scope.launch {
-                            when (val r = auth.login(username.trim(), password, remember_)) {
+                            when (val r = repo.login(username.trim(), password, remember_)) {
                                 is AuthRepository.LoginOutcome.Success -> {
                                     session = r.session
                                     password = ""

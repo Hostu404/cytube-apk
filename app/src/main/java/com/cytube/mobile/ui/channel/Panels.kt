@@ -34,7 +34,7 @@ import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -55,7 +55,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.Placeholder
@@ -129,20 +129,17 @@ private const val SOLO_EMOTE_HEIGHT = 56f
  * emotes settle into the right width and stay there for the rest of the session.
  */
 private object EmoteAspect {
-    // A plain map, not Compose state. It used to be a mutableStateMapOf read
-    // inside every row's remember{}, which meant each newly loaded emote
-    // invalidated every visible chat row (state maps notify all readers on
-    // any write), while the remember{} keys never changed, so none of those
-    // rows actually picked the new ratio up either. Rows now watch their own
+    // A plain map, not Compose state: a mutableStateMapOf read by every row
+    // would invalidate every visible chat row on each newly loaded emote
+    // (state maps notify all readers on any write). Rows watch their own
     // emotes instead — see inlineEmotes. Only touched on the main thread
     // (composition and Coil's onSuccess).
     private val ratios = HashMap<String, Float>()
-    // Unbounded before this — every distinct emote URL seen all session (across
-    // every channel visited) stayed in memory forever. A long session across a
-    // few busy channels can rack up thousands of distinct emote URLs; this
-    // caps it with a blunt but simple full-clear once it's clearly grown past
-    // any single channel's real emote set. Losing cached ratios just means a
-    // brief re-measure flicker next time those emotes render, not a crash.
+    // A long session across a few busy channels can see thousands of
+    // distinct emote URLs, so the map is capped with a blunt full-clear once
+    // it has clearly grown past any single channel's real emote set. Losing
+    // cached ratios just means a brief re-measure flicker next time those
+    // emotes render.
     private const val MAX_ENTRIES = 500
 
     operator fun get(url: String): Float? = ratios[url]
@@ -356,9 +353,9 @@ fun ChatPanel(
     val scope = rememberCoroutineScope()
 
     // The app calls enableEdgeToEdge() (MainActivity), and nothing else in
-    // the tree ever consumed the IME inset before this — confirmed via a
-    // full search, no other imePadding()/WindowInsets.ime use anywhere — so
-    // without it the keyboard just draws over the message input field below.
+    // the tree consumes the IME inset (no other imePadding()/
+    // WindowInsets.ime use anywhere), so without this the keyboard just
+    // draws over the message input field below.
     // The actual .imePadding() call is scoped to just the input row further
     // down, not this whole Column: it only needs to move that one Row, and
     // the LazyColumn's own `Modifier.weight(1f)` already gives up room to
@@ -494,13 +491,10 @@ fun ChatPanel(
             // up. Scoped to just this row rather than the whole panel, right
             // where the padding needs to land: directly between this row and
             // the keyboard, with nothing else in between. Bottom padding is
-            // wider than top/horizontal (16dp vs 8/12dp) rather than the
-            // plain symmetric 8dp it used to be: sitting perfectly flush
-            // against the keyboard left no room for the text cursor's own
-            // drag handle, which draws a bit below the cursor line and was
-            // getting visually clipped right at the keyboard's top edge the
-            // moment it appeared. 16dp is enough room for that handle
-            // without reading as a gap again.
+            // wider than top/horizontal (16dp vs 8/12dp): the text cursor's
+            // drag handle draws a bit below the cursor line and gets clipped
+            // at the keyboard's top edge with less. 16dp is enough room for
+            // it without reading as a gap.
             Modifier.fillMaxWidth().imePadding()
                 .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -548,7 +542,7 @@ fun ChatPanel(
                 enabled = canSend && draft.text.isNotBlank(),
                 modifier = Modifier.size(48.dp)
             ) {
-                Icon(Icons.Default.Send, contentDescription = "Send")
+                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
             }
         }
     }
@@ -690,11 +684,9 @@ fun NekoChatOverlay(
             }
         }
 
-        // Turning this on with a quiet channel used to mean a blank screen
-        // until someone happened to say something new — which, on a short
-        // test, looks exactly like "it does nothing". This one-time,
-        // staggered replay of whatever's already in the buffer means there's
-        // always something on screen the moment it's enabled. hasCaughtUp is
+        // A one-time, staggered replay of whatever's already in the buffer,
+        // so turning this on in a quiet channel shows something at once
+        // rather than a blank screen that looks like "it does nothing". hasCaughtUp is
         // what keeps this to exactly once per on-cycle rather than once per
         // mount — see [NekoOverlayState].
         LaunchedEffect(state) {
@@ -1229,10 +1221,10 @@ private fun ChatRow(
                     .then(
                         if (usernameClickable) {
                             Modifier.clickable {
-                                // On a PM, tapping the name replies privately —
-                                // it used to drop "name: " into PUBLIC chat,
-                                // so the natural way to answer a PM posted the
-                                // answer for the whole channel to see.
+                                // On a PM, tapping the name replies privately,
+                                // not by dropping "name: " into PUBLIC chat
+                                // where the answer would be posted for the
+                                // whole channel to see.
                                 if (msg.isPm && onPmReply != null) onPmReply(pmOtherParty)
                                 else onUsernameClick(msg.username)
                             }
@@ -1473,7 +1465,8 @@ private fun AddVideoBox(
     onAddLink: (String, Boolean) -> Boolean
 ) {
     var link by remember { mutableStateOf("") }
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
     val busy = status?.inProgress == true
     val canSubmit = link.isNotBlank() && !busy
     fun submit(playNext: Boolean) {
@@ -1490,7 +1483,12 @@ private fun AddVideoBox(
             // sheet copied (title and all) is fine: the link is picked out
             // of it when adding (MediaLink.extractLink).
             trailingIcon = {
-                IconButton(onClick = { clipboard.getText()?.text?.let { link = it.trim() } }) {
+                IconButton(onClick = {
+                    scope.launch {
+                        val clip = clipboard.getClipEntry()?.clipData ?: return@launch
+                        if (clip.itemCount > 0) clip.getItemAt(0).text?.let { link = it.toString().trim() }
+                    }
+                }) {
                     Icon(Icons.Default.ContentPaste, contentDescription = "Paste link")
                 }
             },

@@ -40,12 +40,10 @@ private val AppTypography = Typography(
 
 /**
  * Always dark, deliberately — not driven by the system light/dark setting
- * or (on API 31+) Material You dynamic color the way this used to be. CyTube
- * itself only ships a dark skin (see CyTubeChannelScheme's own doc comment
- * below, which already committed the channel screen to this), and dynamic
- * color in particular was the reason this could come out looking nothing
- * like the app's own intended palette — it recolors everything from the
- * device wallpaper, light or dark, independent of what's defined here.
+ * or (on API 31+) Material You dynamic color. CyTube itself only ships a
+ * dark skin (see CyTubeChannelScheme's own doc comment below), and dynamic
+ * color recolors everything from the device wallpaper, which can come out
+ * looking nothing like the app's own palette.
  */
 @Composable
 fun CyTubeTheme(content: @Composable () -> Unit) {

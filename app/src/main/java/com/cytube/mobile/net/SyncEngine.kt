@@ -15,7 +15,7 @@ import kotlin.math.abs
  *  - when correcting a player that is AHEAD, seek to serverTime + 1 rather than
  *    exactly serverTime, so buffering does not immediately put it behind again
  *
- * Native (ExoPlayer) playback deviates from the original in three ways, all to
+ * Native (ExoPlayer) playback deviates from the original in four ways, all to
  * stop a rebuffer from turning into a seek → rebuffer → seek loop on large
  * files:
  *

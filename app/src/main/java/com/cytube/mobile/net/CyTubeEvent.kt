@@ -5,6 +5,11 @@ sealed interface CyTubeEvent {
     data object Disconnected : CyTubeEvent
     data class Reconnecting(val attempt: Int) : CyTubeEvent
     data class ConnectionFailed(val reason: String) : CyTubeEvent
+    /** The server itself turned the connection down ([reason] is its own
+     *  message: "Rate limit exceeded", "You are banned from the server"...).
+     *  Unlike [ConnectionFailed], Socket.IO does NOT retry after this: the
+     *  app has to connect again itself. */
+    data class ConnectionRefused(val reason: String) : CyTubeEvent
     /** Socket.IO has used up its reconnection attempts and stopped trying. */
     data object ReconnectGaveUp : CyTubeEvent
 

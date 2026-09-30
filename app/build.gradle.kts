@@ -2,7 +2,8 @@ import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
+    // No org.jetbrains.kotlin.android: AGP 9 compiles Kotlin itself
+    // (built-in Kotlin), and applying that plugin as well is an error.
     alias(libs.plugins.kotlin.compose)
 }
 
@@ -18,14 +19,17 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "com.cytube.mobile"
-    compileSdk = 35
+    // 37 because current Compose libraries require it; targetSdk stays at 35
+    // until the app has been checked against the newer platforms' behaviour
+    // changes.
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.8.0 - Lazarus"
+        versionCode = 19
+        versionName = "1.8.1 - Lazarus"
     }
 
     signingConfigs {
@@ -47,6 +51,11 @@ android {
             // NewPipeExtractor) live in proguard-rules.pro.
             isMinifyEnabled = true
             isShrinkResources = true
+            // Phones and Fire TV / Android TV devices are all ARM. The FFmpeg
+            // decoders (nextlib) add several MB per architecture, so the
+            // release APK carries only these two. Debug builds keep every
+            // architecture so they still run on an x86 emulator.
+            ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (hasReleaseKeystore) {
                 signingConfig = signingConfigs.getByName("release")
@@ -69,14 +78,22 @@ android {
         // minSdk is 26 and java.util.stream has been available since API 24,
         // so there is nothing here that needs desugaring in the first place.
     }
-    kotlinOptions { jvmTarget = "17" }
+    // Kotlin's jvmTarget follows compileOptions.targetCompatibility (17) with
+    // AGP 9's built-in Kotlin, so there's no separate kotlinOptions block.
     buildFeatures {
         compose = true
         // Needed to reference BuildConfig.VERSION_NAME from the home screen's
         // title bar; AGP 8+ no longer generates BuildConfig unless asked.
         buildConfig = true
     }
-    packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    packaging {
+        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // Store native libraries compressed in the APK. By default they're
+        // stored raw so Android can load them straight from the APK, which
+        // made the FFmpeg decoders (nextlib) cost ~14 MiB of APK size; this
+        // brings it to ~6.5 MiB. Android unpacks them on install instead.
+        jniLibs { useLegacyPackaging = true }
+    }
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
@@ -119,6 +136,11 @@ dependencies {
     // whichever app currently has the active session, which Media3 manages
     // for us as long as one exists (see PlayerSurface's ExoSurface).
     implementation(libs.androidx.media3.session)
+    // Software decoders (FFmpeg) for audio formats many devices can't decode
+    // themselves — DTS, Dolby TrueHD, and AC-3/E-AC-3 on some phones — which
+    // otherwise play with the picture but no sound. See ExoSurface in
+    // PlayerSurface.kt. GPLv3, like this app.
+    implementation(libs.nextlib.media3ext)
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.security.crypto)

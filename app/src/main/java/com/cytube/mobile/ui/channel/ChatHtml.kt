@@ -18,13 +18,15 @@ import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 
 /**
- * CyTube chat messages arrive as sanitized HTML, not plain text — chat filters
- * and emote substitution rewrite the body server-side (chat.js filterMessage).
- * So we walk the DOM and map the handful of tags CyTube's sanitizer permits.
+ * CyTube chat messages arrive as sanitized HTML, not plain text — chat
+ * filters rewrite the body server-side (chat.js filterMessage). So we walk
+ * the DOM and map the handful of tags CyTube's sanitizer permits.
  *
- * Emotes come through as <img>. Rather than fall back to the alt text, each one
- * becomes an inline content placeholder that ChatRow fills with the real image,
- * so emotes render in the flow of the sentence exactly as they do on the site.
+ * Emotes are substituted here first (EmoteSet.apply — the server doesn't do
+ * it), which turns them into <img> tags. Rather than fall back to the alt
+ * text, each <img> becomes an inline content placeholder that ChatRow fills
+ * with the real image, so emotes render in the flow of the sentence exactly
+ * as they do on the site.
  */
 object ChatHtml {
 
@@ -123,9 +125,9 @@ object ChatHtml {
 
     private data class ColoredKey(val base: RenderCacheKey, val linkColor: Color)
 
-    /** The same parses with a real link colour applied. Restyling used to
-     *  happen on every cache hit, so every recomposition of a chat row or
-     *  Niconico comment containing a link rebuilt its AnnotatedString. */
+    /** The same parses with a real link colour applied, so recomposing a
+     *  chat row or Niconico comment that contains a link doesn't rebuild
+     *  its AnnotatedString each time. */
     private val coloredCache = LruCache<ColoredKey, Rendered>(RENDER_CACHE_SIZE)
 
     /**

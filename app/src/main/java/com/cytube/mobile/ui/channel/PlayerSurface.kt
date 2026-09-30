@@ -56,6 +56,7 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.session.MediaSession
 import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 import androidx.webkit.WebViewFeature
 import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.net.MediaFrame
@@ -114,10 +115,10 @@ private const val LOAD_CONTROL_BUFFER_AFTER_REBUFFER_MS = 4_000
 
 /** Retain 10s of buffered media behind the playback position, so a short
  *  backwards seek (e.g. SyncEngine's "ahead" correction) needs no re-fetch.
- *  Was 30s, but the back buffer counts against the byte budget below, and
- *  at a high bitrate 30s of it (~150MB at 40 Mbps) would leave little room
- *  for the forward buffer that actually prevents stalls. SyncEngine now
- *  closes most "ahead" drift by slowing playback rather than seeking. */
+ *  No more than that: the back buffer counts against the byte budget
+ *  below, and at a high bitrate 30s of it (~150MB at 40 Mbps) would leave
+ *  little room for the forward buffer that actually prevents stalls.
+ *  SyncEngine closes most "ahead" drift by slowing playback anyway. */
 private const val LOAD_CONTROL_BACK_BUFFER_MS = 10_000
 
 /**
@@ -125,20 +126,15 @@ private const val LOAD_CONTROL_BACK_BUFFER_MS = 10_000
  * limit (ActivityManager.memoryClass), and used as a hard cap on both phone
  * and TV (prioritizeTimeOverSizeThresholds = false).
  *
- * ExoPlayer's buffer lives on the Java heap. Before this:
- *  - TV used a flat 64MB, so a 40 Mbps file only ever held ~13s, below the
- *    TV config's own 15s minimum, even on devices with plenty of heap.
- *  - Phone let time win over size, so it always buffered to the 50s minimum
- *    whatever the bitrate: ~250MB for a 40 Mbps file, more for 4K, enough
- *    to crash with OutOfMemoryError on a phone with a 256MB heap limit.
+ * ExoPlayer's buffer lives on the Java heap, so a time-based budget alone
+ * isn't safe: at 40 Mbps the 50s phone minimum is ~250MB, enough to crash
+ * with OutOfMemoryError on a phone with a 256MB heap limit, while a flat
+ * byte cap that suits a small heap wastes a large one.
  *
- * Now 40% of the heap limit, never less than 64MB (TV's old value, and
- * enough for a full 50s at ~10 Mbps on phone, so ordinary files buffer
- * exactly as before). Ceilings: 160MB on TV, 256MB on phone. A 256MB-class
- * device gets ~102MB (~20s of 40 Mbps video in total; on phone that includes
- * the 10s back buffer), a 512MB-class phone ~205MB (~40s). Phones with small
- * heaps now hold less of a very high-bitrate file than before; before, they
- * could hold enough of it to crash.
+ * So: 40% of the heap limit, never less than 64MB (enough for a full 50s at
+ * ~10 Mbps). Ceilings: 160MB on TV, 256MB on phone. A 256MB-class device
+ * gets ~102MB (~20s of 40 Mbps video in total; on phone that includes the
+ * 10s back buffer), a 512MB-class phone ~205MB (~40s).
  */
 private fun bufferBudgetBytes(context: Context, isTv: Boolean): Int {
     val memoryClassMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
@@ -206,8 +202,9 @@ fun PlayerSurface(
      *  list to begin with. */
     qualityIndex: Int = 0,
     /** Where to open a fresh item, given the item and the address it will
-     *  stream from — ChannelViewModel.plannedStart, which opens a synced
-     *  item joined partway through a little ahead of the room. */
+     *  stream from — ChannelViewModel.plannedStart: the channel's item where
+     *  the room is by the time it opens (a synced one joined partway through
+     *  a little ahead of it), a personal pick from its own start. */
     planStart: (MediaFrame, String) -> MediaFrame = { m, _ -> m }
 ) {
     // embedSrc/scuri fallback logic lives in MediaFrame.embedPlayableSrc —
@@ -222,27 +219,15 @@ fun PlayerSurface(
                     onStall, qualityIndex, planStart
                 )
             player == MediaTypes.Player.EMBED && embedSrc != null ->
-                // key() here is load-bearing, not decorative: EmbedSurface's
-                // AndroidView `factory` only ever runs once for a given
-                // WebView instance, and its own `update` block never
-                // reloads new content into an existing one (see its own
-                // onRelease comment). Without this key, the playlist
-                // advancing from one EMBED-routed item straight to another
-                // (e.g. a Vimeo item to a Dailymotion one, or two Vimeo items
-                // back to back — CyTube classifies both as
-                // MediaTypes.Player.EMBED) hit the same
-                // `when` branch twice in a row, so Compose treated it as
-                // "the same call site, just new parameters" and reused the
-                // OLD WebView untouched — the new item's changeMedia was
-                // silently ignored and the previous video just kept
-                // playing forever. Keying on the identity of what should be
-                // on screen forces Compose to actually dispose the old
-                // node and mount a fresh one — the exact same mechanism
-                // that already made switching AWAY from EMBED (to NATIVE/
-                // NEWPIPE/GDRIVE, a different `when` branch) work correctly
-                // by accident. embedSrc is included alongside type/id since
-                // MediaFrame.embedPlayableSrc's own cu/bc/bn fallback can
-                // change independently of those two.
+                // key() here is load-bearing: EmbedSurface's AndroidView
+                // `factory` runs once per WebView and its `update` never
+                // loads new content into an existing one. Without the key,
+                // one EMBED item followed by another (a Vimeo item then a
+                // Dailymotion one, say) would reuse the old WebView and
+                // keep playing the previous video. Keying on what should be
+                // on screen makes Compose dispose it and mount a fresh one.
+                // embedSrc is included because MediaFrame.embedPlayableSrc
+                // can change independently of type/id.
                 key(media.type, media.id, embedSrc) {
                     EmbedSurface(media, embedSrc, onHandle, onFailed, onEnded)
                 }
@@ -403,6 +388,14 @@ private fun EmbedSurface(
             WebView(ctx).apply {
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
+                // Without this AndroidView leaves the WebView at WRAP_CONTENT,
+                // and a directly loaded page sized with height:100% (Odysee's
+                // player) collapses to nothing, with its play button half off
+                // the top. Our own provider pages use position:fixed and were
+                // unaffected.
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
                 setBackgroundColor(android.graphics.Color.BLACK)
 
                 val handle = EmbedPlayerHandle(this, media)
@@ -524,12 +517,29 @@ private fun EmbedSurface(
                                 v.addEventListener('ended', function() {
                                   try { console.log('$EMBED_ENDED_SENTINEL'); } catch(e){}
                                 });
+                                // Sites start their <video> muted (browsers only
+                                // autoplay muted ones) and some mute it again
+                                // when playback (re)starts. Whenever it plays,
+                                // put back the volume the app last asked for.
+                                v.addEventListener('playing', function() {
+                                  var want = window.__cytubeWantVol;
+                                  if (typeof want === 'number' && want > 0 && v.muted) {
+                                    try { v.muted = false; v.volume = want; } catch(e){}
+                                  }
+                                });
                                 if (!window.__cytubeEmbed) {
                                   window.__cytubeEmbed = {
                                     play: function() { var el = document.querySelector('video'); if (el) el.play().catch(function(){}); },
                                     pause: function() { var el = document.querySelector('video'); if (el) el.pause(); },
                                     seekTo: function(s) { var el = document.querySelector('video'); if (el) el.currentTime = s; },
-                                    setVolume: function(vol) { var el = document.querySelector('video'); if (el) el.volume = Math.max(0, Math.min(1, vol)); }
+                                    // `muted` as well as `volume`: raising the
+                                    // volume of a muted <video> stays silent.
+                                    setVolume: function(vol) {
+                                      var want = Math.max(0, Math.min(1, vol));
+                                      window.__cytubeWantVol = want;
+                                      var el = document.querySelector('video');
+                                      if (el) { el.muted = want <= 0; el.volume = want; }
+                                    }
                                   };
                                 }
                                 report();
@@ -700,25 +710,15 @@ private fun Media3Surface(
     var resolved by remember(media.id, player) {
         mutableStateOf(if (needsResolve) StreamResolvers.cached(player, media.id) else null)
     }
-    var resolvedMedia by remember(media.id, player) { mutableStateOf(media) }
     var error by remember(media.id, player) { mutableStateOf<String?>(null) }
 
+    // The time the lookup takes is accounted for when the item is opened:
+    // planStart (ChannelViewModel.plannedStart) starts the channel's item
+    // where the room is by then, and a personal pick from its own start.
     LaunchedEffect(media.id, player) {
         if (!needsResolve || resolved != null) return@LaunchedEffect
-        val startResolveMs = SystemClock.elapsedRealtime()
         StreamResolvers.resolve(player, media.id)
-            .onSuccess {
-                // The lookup took time the room kept playing through.
-                val elapsedSec = (SystemClock.elapsedRealtime() - startResolveMs) / 1000.0
-                val targetTime = if (!media.paused && media.currentTime >= 0.0) {
-                    if (media.seconds > 0) (media.currentTime + elapsedSec).coerceAtMost(media.seconds.toDouble())
-                    else (media.currentTime + elapsedSec)
-                } else {
-                    media.currentTime
-                }
-                resolvedMedia = media.copy(currentTime = targetTime)
-                resolved = it
-            }
+            .onSuccess { resolved = it }
             .onFailure {
                 val why = "${StreamResolvers.providerName(player)} lookup failed: ${it.message ?: it.javaClass.simpleName}"
                 Log.w("CyTubePlayer", "stream lookup failed type=${media.type} id=${media.id}", it)
@@ -730,7 +730,7 @@ private fun Media3Surface(
     val waiting = needsResolve && resolved == null
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         ExoSurface(
-            media = if (needsResolve) resolvedMedia else media,
+            media = media,
             resolved = resolved,
             waitingForStream = waiting,
             showControls = showControls,
@@ -778,7 +778,13 @@ private fun ExoSurface(
     val currentPlanStart by rememberUpdatedState(planStart)
     val exo = remember(isTv) {
         val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(context)
-        val renderersFactory = object : DefaultRenderersFactory(context) {
+        // NextRenderersFactory is DefaultRenderersFactory plus FFmpeg
+        // decoders. EXTENSION_RENDERER_MODE_ON puts them after the device's
+        // own decoders, so they're only used for a format the device can't
+        // decode itself (DTS, TrueHD, AC-3 on some phones) — without them
+        // such a video plays with no sound. Both kinds of audio renderer use
+        // the sink built here.
+        val renderersFactory = object : NextRenderersFactory(context) {
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
@@ -796,6 +802,7 @@ private fun ExoSurface(
                     .build()
             }
         }.apply {
+            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             if (isTv) {
                 setEnableDecoderFallback(true)
             }
@@ -1040,16 +1047,9 @@ private fun ExoSurface(
                             val totalStalledMs = recentStalls.sumOf { it.second }
                             if (totalStalledMs >= STALL_TRIGGER_MS || (recentStalls.size >= 2 && totalStalledMs >= 2_000L)) {
                                 recentStalls.clear()
-                                // Was coerceAtLeast(STALL_TRIGGER_MS) — always
-                                // reported at least 3000ms even when the real
-                                // accumulated stall (the 2-small-stalls branch
-                                // above) was as little as 2000ms. That inflated
-                                // number went straight into the "stepping down
-                                // ... after a Xms stall" log, and also happened
-                                // to always clear ChannelViewModel's own
-                                // QUALITY_DOWNGRADE_STALL_THRESHOLD_MS check —
-                                // see that constant's updated comment. Report
-                                // what was actually measured.
+                                // The measured total, which can be under
+                                // STALL_TRIGGER_MS (the 2-small-stalls case);
+                                // see QUALITY_DOWNGRADE_STALL_THRESHOLD_MS.
                                 currentOnStall?.invoke(totalStalledMs)
                             }
                         }
@@ -1138,29 +1138,13 @@ private fun ExoSurface(
     }
 
     // onHandle (which flows straight into ChannelViewModel.attachPlayer and
-    // client.signalPlayerReady()) used to fire from the DisposableEffect
-    // above, which runs as soon as this composable enters composition —
-    // before this LaunchedEffect's coroutine had actually called load()/
-    // loadUrl() on the ExoPlayer at all. That told both the ViewModel and
-    // the server "the player is ready" while `exo` still had no media
-    // source, no prepare() call, nothing. The very first MediaTimeUpdate
-    // that arrived in that window (routine on a busy channel; only a
-    // matter of timing) reached SyncEngine.apply() with a player whose
-    // mediaLengthSeconds was still 0, which happened to be guarded, but
-    // signalPlayerReady() had no such guard — the server could already be
-    // counting this client as caught up before it had loaded a single
-    // frame. Switching to a YouTube item is exactly where this mattered
-    // most: NewPipe's resolve step (its own network round trip) delays
-    // load()/loadUrl() by a second or more compared to a direct file, so
-    // the premature "ready" signal and the premature attach both had much
-    // more time to be acted on before the player actually had anything to
-    // play — which is what turned the first few seconds of a movie-to-
-    // YouTube switch into a hard-seek/rebuffer loop as SyncEngine kept
-    // correcting a "player" that had only just started actually loading.
-    // Calling onHandle after the load/loadUrl call below closes that gap:
-    // the ViewModel never sees this handle, and the server is never told
-    // we're ready, until the media source has genuinely been handed to
-    // ExoPlayer.
+    // client.signalPlayerReady()) fires only after load()/loadUrl() below
+    // has handed the media source to ExoPlayer. Any earlier (e.g. from the
+    // DisposableEffect above, as soon as this enters composition) and the
+    // ViewModel would start correcting, and the server would count us as
+    // ready, while the player had nothing loaded — worst for YouTube, where
+    // the stream lookup delays the load by a second or more, so SyncEngine
+    // would hard-seek a player that had only just started loading.
     //
     // qualityIndex is a key too, so automatic quality adaptation switches
     // streams directly on the existing handle without tearing down the
