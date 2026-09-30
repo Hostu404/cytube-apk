@@ -9,6 +9,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.CompatMode
@@ -27,6 +34,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
     // their own dark palette — see MainActivity), Ambient glow (never
@@ -99,6 +107,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Slider(
+                    // Material3's Slider takes Up/Down as well as Left/Right
+                    // to change its value, so a TV remote's D-pad could never
+                    // leave it. Up/Down move focus instead; Left/Right still
+                    // adjust.
+                    modifier = Modifier.onPreviewKeyEvent { event ->
+                        val direction = when (event.key) {
+                            Key.DirectionUp -> FocusDirection.Up
+                            Key.DirectionDown -> FocusDirection.Down
+                            else -> return@onPreviewKeyEvent false
+                        }
+                        if (event.type == KeyEventType.KeyDown) focusManager.moveFocus(direction)
+                        true
+                    },
                     value = settings.syncAccuracy.toFloat(),
                     onValueChange = { scope.launch { store.setAccuracy(it.toDouble()) } },
                     valueRange = 1f..10f,
