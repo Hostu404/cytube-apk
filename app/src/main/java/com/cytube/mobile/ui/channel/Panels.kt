@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
@@ -45,6 +46,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -57,6 +59,8 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
@@ -97,6 +101,9 @@ import com.cytube.mobile.net.removeImageTags
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import com.cytube.mobile.ui.isTvDevice
 
 /** One shared, immutable formatter rather than a new SimpleDateFormat for
  *  every chat row every time it's composed. */
@@ -241,6 +248,23 @@ fun ChatPanel(
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
     val inputFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val isTv = remember { isTvDevice(context) }
+    var inputFocused by remember { mutableStateOf(false) }
+    // Phone: Back from the message box only leaves the box. The keyboard
+    // takes the first Back itself; without this, the next one (box still
+    // focused, keyboard gone) left the channel, or put the app away. TV has
+    // its own Back handling for the chat view (ChannelScreen).
+    BackHandler(enabled = inputFocused && !isTv) {
+        keyboard?.hide()
+        focusManager.clearFocus()
+    }
+    // Leaving the app with the box focused brought it back focused, with the
+    // keyboard up. Come back to the chat instead; the draft is kept.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        if (!isTv) focusManager.clearFocus()
+    }
     // Starting a PM (from a message or the user list) puts the cursor
     // straight in the box, keyboard up, ready to type.
     LaunchedEffect(pmTarget) {
@@ -535,7 +559,10 @@ fun ChatPanel(
                 keyboardActions = KeyboardActions(onSend = {
                     onSend(draft.text); draft = TextFieldValue("")
                 }),
-                modifier = Modifier.weight(1f).focusRequester(inputFocus).then(inputFieldModifier)
+                modifier = Modifier.weight(1f)
+                    .focusRequester(inputFocus)
+                    .onFocusChanged { inputFocused = it.isFocused }
+                    .then(inputFieldModifier)
             )
             FilledIconButton(
                 onClick = { onSend(draft.text); draft = TextFieldValue("") },
