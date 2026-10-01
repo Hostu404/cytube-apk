@@ -158,15 +158,17 @@ class SyncEngineHoldTest {
         apply(server = 6005.7, nowMs = t0 + 3_700)          // close enough: go
         assertFalse(player.isPaused)
         assertTrue(player.seeks.isEmpty())
-        // Opening took 2 s less than the lead: learned (6 + 0.75 × -4 = 3).
-        assertEquals(3.0, memory.openLead("x.org"), 1e-9)
+        // Opened 4 s early: the lead comes down, but only a quarter of the
+        // way (6 + 0.25 × -4 = 5), since landing early is the cheap side.
+        assertEquals(5.0, memory.openLead("x.org"), 1e-9)
     }
 
     @Test fun landingBehindLearnsALongerLeadAndDoesNotWait() {
         player.position = engine.planStart("movie", "https://x.org/a.mp4", 6000.0, 7200, false)  // 6006
         apply(server = 6010.0, nowMs = t0, grace = true)    // 4 s late
         assertFalse(player.isPaused)
-        assertEquals(9.0, memory.openLead("x.org"), 1e-9)
+        // Covers the whole 4 s it was late, plus a 1 s margin: 6 + 4 + 1.
+        assertEquals(11.0, memory.openLead("x.org"), 1e-9)
     }
 
     @Test fun anOvershootingCatchUpJumpWaitsInsteadOfJumpingBack() {
@@ -241,7 +243,7 @@ class SyncEngineHoldTest {
     @Test fun nearTheEndTheLeadIsCutShortAndLearnedAsSuch() {
         player.position = engine.planStart("movie", "https://x.org/a.mp4", 7196.0, 7200, false)  // 7199: 3 s lead
         apply(server = 7197.0, nowMs = t0)          // landed 2 s ahead
-        assertEquals(3.0 + 0.75 * -2.0, memory.openLead("x.org"), 1e-9)
+        assertEquals(3.0 + 0.25 * -2.0, memory.openLead("x.org"), 1e-9)   // eases down slowly
         // Past length - 1 there is no room for any lead: open at the room's time.
         assertEquals(7199.5, SyncEngine(LeadMemory()).planStart("m", "https://x.org/a", 7199.5, 7200, false), 1e-9)
     }

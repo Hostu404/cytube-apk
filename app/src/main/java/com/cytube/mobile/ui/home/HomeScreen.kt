@@ -1,12 +1,9 @@
 package com.cytube.mobile.ui.home
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -17,11 +14,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -29,15 +25,24 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.BuildConfig
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
 import com.cytube.mobile.ui.isTvDevice
+import com.cytube.mobile.ui.theme.CyTubePageTheme
+import com.cytube.mobile.ui.theme.Ma
+import com.cytube.mobile.ui.theme.MaSectionLabel
+import com.cytube.mobile.ui.theme.MaTextField
+import com.cytube.mobile.ui.theme.maFaint
+import com.cytube.mobile.ui.theme.maIsLight
+import com.cytube.mobile.ui.theme.maPageBackground
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,6 +50,8 @@ fun HomeScreen(
     onOpenChannel: (String) -> Unit,
     onOpenLogin: () -> Unit,
     onOpenSettings: () -> Unit,
+    /** The Cot theme: a cat sits in the search bar (see CotCat). */
+    showCat: Boolean = false,
     vm: HomeViewModel = viewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -52,6 +59,8 @@ fun HomeScreen(
     val isTv = remember { isTvDevice(context) }
     val focusManager = LocalFocusManager.current
     val initialFocusRequester = remember { FocusRequester() }
+    val catShown = showCat && !isTv
+    val cat = rememberCotCatState()
 
     // Runs each time Home enters composition -- which, under
     // Navigation-Compose, is every time the homepage is navigated to:
@@ -75,25 +84,40 @@ fun HomeScreen(
         vm.refresh()
     }
 
+    // The quieter page palette and layout (see Ma.kt): white on light,
+    // pure black on dark for OLED.
+    CyTubePageTheme {
+    val colors = MaterialTheme.colorScheme
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
+        // The cat watches fingers anywhere on the page (see CotCat).
+        modifier = Modifier.fillMaxSize()
+            .then(maPageBackground())
+            .then(if (catShown) Modifier.cotCatWatchesFingers(cat) else Modifier),
+        // The page's own background (and grain) is drawn above, so the
+        // Scaffold and top bar are see-through over it.
+        containerColor = Color.Transparent,
+        // Set explicitly: for a transparent container Scaffold can't work
+        // out a text colour of its own.
+        contentColor = colors.onBackground,
         topBar = {
             // A plain TopAppBar, not LargeTopAppBar — the large variant's
             // whole point is a tall, expanded title area meant to collapse
             // as the user scrolls, which just left a big empty gap above
             // "CyTube APK" here since nothing collapses it. This one sits
             // at the standard ~64dp height, so the title and everything
-            // below it (search, favourites, the list) all sit higher.
+            // below it (search, favorites, the list) all sit higher.
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
                 title = {
-                    Row(verticalAlignment = Alignment.Bottom) {
-                        Text("CyTube APK", fontWeight = FontWeight.Bold)
-                        Spacer(Modifier.width(6.dp))
+                    // 16dp of the bar's own inset + 12 = the page's 28dp
+                    // left margin.
+                    Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.Bottom) {
+                        Text("CyTube APK", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(8.dp))
                         Text(
-                            "v${BuildConfig.VERSION_NAME}",
+                            BuildConfig.VERSION_NAME,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = maFaint(),
                             modifier = Modifier.padding(bottom = 3.dp)
                         )
                     }
@@ -106,8 +130,13 @@ fun HomeScreen(
                         Text(state.loggedInAs ?: "Log in", maxLines = 1)
                     }
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        Icon(
+                            Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = colors.onSurfaceVariant
+                        )
                     }
+                    Spacer(Modifier.width(4.dp))
                 }
             )
         },
@@ -122,7 +151,8 @@ fun HomeScreen(
                     query = state.query,
                     onQueryChange = vm::setQuery,
                     onSubmit = { state.submitName?.let(onOpenChannel) },
-                    isTv = isTv
+                    isTv = isTv,
+                    cat = cat.takeIf { catShown }
                 )
             }
 
@@ -134,7 +164,7 @@ fun HomeScreen(
 
             if (state.query.isBlank()) {
                 if (state.favourites.isNotEmpty()) {
-                    item { SectionHeader("Favourites", Icons.Default.Star) }
+                    item { MaSectionLabel("Favorites") }
                     items(state.favourites, key = { "fav-$it" }) { name ->
                         SimpleChannelRow(
                             name = name,
@@ -147,8 +177,18 @@ fun HomeScreen(
 
                 val recents = state.recents.filterNot { it in state.favourites }
                 if (recents.isNotEmpty()) {
+                    // The only section a user might want to reset: favorites
+                    // are each removed individually, and the public list
+                    // refreshes itself.
                     item {
-                        RecentSectionHeader(onClear = vm::clearRecents)
+                        MaSectionLabel("Recent") {
+                            TextButton(
+                                onClick = vm::clearRecents,
+                                colors = ButtonDefaults.textButtonColors(contentColor = colors.onSurfaceVariant)
+                            ) {
+                                Text("Clear".uppercase(), style = Ma.LabelStyle)
+                            }
+                        }
                     }
                     items(recents, key = { "rec-$it" }) { name ->
                         SimpleChannelRow(
@@ -159,39 +199,27 @@ fun HomeScreen(
                         )
                     }
                 }
-
-                if (state.favourites.isNotEmpty() || recents.isNotEmpty()) {
-                    item {
-                        HorizontalDivider(
-                            Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
-                        )
-                    }
-                }
             }
 
             item {
-                Row(
-                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 20.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Default.Public,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "Public channels",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.weight(1f)
-                    )
+                MaSectionLabel("Public channels") {
+                    // Small and grey, spinner included: the cat (on cot) is
+                    // the only thing on this page that should draw the eye
+                    // by moving.
                     IconButton(onClick = { vm.refresh(force = true) }, enabled = !state.loading) {
                         if (state.loading) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            CircularProgressIndicator(
+                                Modifier.size(16.dp),
+                                color = maFaint(),
+                                strokeWidth = 1.5.dp
+                            )
                         } else {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                            Icon(
+                                Icons.Default.Refresh,
+                                contentDescription = "Refresh",
+                                tint = maFaint(),
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }
@@ -200,7 +228,11 @@ fun HomeScreen(
             if (state.loading && state.filtered.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator()
+                        CircularProgressIndicator(
+                            Modifier.size(20.dp),
+                            color = maFaint(),
+                            strokeWidth = 1.5.dp
+                        )
                     }
                 }
             } else if (state.indexUnavailable && state.filtered.isEmpty()) {
@@ -220,35 +252,68 @@ fun HomeScreen(
             }
         }
     }
+    }
 }
+
+/** Channel names in the lists. */
+@Composable
+private fun nameStyle() = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp)
 
 @Composable
 private fun SearchField(
     query: String,
     onQueryChange: (String) -> Unit,
     onSubmit: () -> Unit,
-    isTv: Boolean
+    isTv: Boolean,
+    /** Set with the Cot theme: the cat that sits in the bar. */
+    cat: CotCatState? = null
 ) {
     val focusManager = LocalFocusManager.current
-    OutlinedTextField(
+    val keyboard = LocalSoftwareKeyboardController.current
+    val colors = MaterialTheme.colorScheme
+    MaTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = { Text("Search channels…") },
-        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-        trailingIcon = {
+        placeholder = "Search channels…",
+        // On TV the on-screen keyboard covers the screen and takes the
+        // remote's D-pad itself, so after typing its action key is the way
+        // out: it closes the keyboard and moves down to the results (the
+        // "Join /name" card first, when the name is a valid channel). Before,
+        // it tried to open the channel straight away, and when it couldn't
+        // the keyboard just stayed up, leaving no way out but Back.
+        keyboardOptions = KeyboardOptions(imeAction = if (isTv) ImeAction.Search else ImeAction.Go),
+        keyboardActions = KeyboardActions(
+            onGo = { onSubmit() },
+            onSearch = {
+                keyboard?.hide()
+                focusManager.moveFocus(FocusDirection.Down)
+            }
+        ),
+        leading = {
+            Icon(
+                Icons.Default.Search,
+                contentDescription = null,
+                tint = colors.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+        },
+        trailing = {
             if (query.isNotEmpty()) {
                 IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Default.Close, contentDescription = "Clear")
+                    Icon(Icons.Default.Close, contentDescription = "Clear", tint = colors.onSurfaceVariant)
                 }
             }
+            if (cat != null) {
+                CotCat(
+                    state = cat,
+                    modifier = Modifier.padding(start = 8.dp).size(width = 30.dp, height = 36.dp),
+                    wakeKey = query
+                )
+            }
         },
-        singleLine = true,
-        shape = RoundedCornerShape(16.dp),
-        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
-        keyboardActions = KeyboardActions(onGo = { onSubmit() }),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 8.dp)
             .then(
                 if (isTv) {
                     // Focusing this field on TV pops the on-screen keyboard, and
@@ -260,11 +325,14 @@ private fun SearchField(
                     // (and the IME it triggers) ever gets a chance to touch it,
                     // so it's consumed here and turned into an explicit Compose
                     // focus move instead — no IME window transition involved.
+                    // The keyboard is closed first, so focus doesn't move on
+                    // with it still sitting over the list.
                     Modifier.onPreviewKeyEvent { event ->
                         if (event.key != Key.DirectionDown) {
                             false
                         } else {
                             if (event.type == KeyEventType.KeyDown) {
+                                keyboard?.hide()
                                 runCatching { focusManager.moveFocus(FocusDirection.Down) }
                             }
                             true
@@ -277,63 +345,25 @@ private fun SearchField(
     )
 }
 
-@Composable
-private fun SectionHeader(text: String, icon: ImageVector) {
-    Row(
-        Modifier.padding(start = 20.dp, top = 20.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(text, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-/** Recent gets a "Clear" action rather than reusing [SectionHeader] — it's
- *  the only section whose list a user might want to reset (favourites are
- *  each removed individually; the public list refreshes itself). */
-@Composable
-private fun RecentSectionHeader(onClear: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            Icons.Default.History,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            "Recent",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f)
-        )
-        TextButton(onClick = onClear) { Text("Clear") }
-    }
-}
-
+/** "Join /name" for a typed channel name, as a raised card. Its colour is
+ *  set here because the page's own surfaces are pure white or black. */
 @Composable
 private fun DirectEntryCard(name: String, onClick: () -> Unit) {
     ElevatedCard(
         onClick = onClick,
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = if (maIsLight()) Color(0xFFF7F2FA) else Color(0xFF1D1B20)
+        ),
+        modifier = Modifier.fillMaxWidth().padding(start = Ma.MarginStart - 8.dp, end = Ma.MarginEnd, top = 8.dp, bottom = 8.dp)
     ) {
         Row(
-            Modifier.padding(16.dp),
+            Modifier.padding(horizontal = 8.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp)
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Column {
-                Text("Join /$name", style = MaterialTheme.typography.titleMedium)
+                Text("Join /$name", style = nameStyle())
                 Text(
                     "Open this channel directly, whether or not it is listed",
                     style = MaterialTheme.typography.bodySmall,
@@ -353,13 +383,13 @@ private fun PublicChannelRow(
 ) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+            .padding(start = Ma.MarginStart, end = Ma.MarginEndBeforeButton, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
             Text(
                 channel.pageTitle,
-                style = MaterialTheme.typography.titleMedium,
+                style = nameStyle(),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -373,15 +403,14 @@ private fun PublicChannelRow(
                 )
             }
         }
-        ViewerBadge(channel.userCount)
-        IconButton(onClick = onToggleFavourite) {
-            Icon(
-                if (isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                contentDescription = "Favourite",
-                tint = if (isFavourite) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+        // Just the number: it reads as a viewer count without an icon.
+        Text(
+            "${channel.userCount}",
+            style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 16.dp)
+        )
+        FavoriteButton(isFavourite, onToggleFavourite)
     }
 }
 
@@ -394,46 +423,33 @@ private fun SimpleChannelRow(
 ) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+            .padding(start = Ma.MarginStart, end = Ma.MarginEndBeforeButton, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("/$name", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-        IconButton(onClick = onToggleFavourite) {
-            Icon(
-                if (isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                contentDescription = "Favourite",
-                tint = if (isFavourite) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
+        Text("/$name", style = nameStyle(), modifier = Modifier.weight(1f))
+        FavoriteButton(isFavourite, onToggleFavourite)
     }
 }
 
+/** Blue and filled for a favorite (blue marks what's yours), otherwise a
+ *  quiet grey outline. */
 @Composable
-private fun ViewerBadge(count: Int) {
-    Row(
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
+private fun FavoriteButton(isFavourite: Boolean, onToggle: () -> Unit) {
+    IconButton(onClick = onToggle) {
         Icon(
-            Icons.Default.Person,
-            contentDescription = null,
-            modifier = Modifier.size(14.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant
+            if (isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
+            contentDescription = "Favorite",
+            tint = if (isFavourite) MaterialTheme.colorScheme.primary else maFaint(),
+            modifier = Modifier.size(20.dp)
         )
-        Text("$count", style = MaterialTheme.typography.labelMedium)
     }
 }
 
 @Composable
 private fun IndexUnavailableNote() {
-    Column(Modifier.fillMaxWidth().padding(24.dp)) {
-        Text("Channel list unavailable", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(6.dp))
+    Column(Modifier.fillMaxWidth().padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 16.dp)) {
+        Text("Channel list unavailable", style = nameStyle())
+        Spacer(Modifier.height(8.dp))
         Text(
             "CyTube has no API for the public list, so it is read from the homepage. " +
                 "You can still open any channel by typing its name above.",
@@ -445,9 +461,9 @@ private fun IndexUnavailableNote() {
 
 @Composable
 private fun EmptyResults(query: String) {
-    Column(Modifier.fillMaxWidth().padding(24.dp)) {
+    Column(Modifier.fillMaxWidth().padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 16.dp)) {
         Text("No listed channel matches \"$query\"", style = MaterialTheme.typography.bodyMedium)
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(8.dp))
         Text(
             "Unlisted channels do not appear here — enter the exact name to join one.",
             style = MaterialTheme.typography.bodySmall,

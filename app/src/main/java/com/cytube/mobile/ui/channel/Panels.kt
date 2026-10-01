@@ -1261,10 +1261,11 @@ private fun ChatRow(
                     )
                     .padding(vertical = 4.dp, horizontal = 2.dp)
             )
+            // A step quieter than the name, so names and messages lead.
             Text(
                 formatTime(msg.timestamp),
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
             )
             if (msg.isPm) {
                 Text("PM", style = MaterialTheme.typography.labelSmall,

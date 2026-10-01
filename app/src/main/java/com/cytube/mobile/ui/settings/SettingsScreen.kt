@@ -1,15 +1,17 @@
 package com.cytube.mobile.ui.settings
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -25,6 +27,12 @@ import com.cytube.mobile.data.ThemeMode
 import com.cytube.mobile.ui.channel.openInBrowser
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.isTvDevice
+import com.cytube.mobile.ui.theme.CyTubePageTheme
+import com.cytube.mobile.ui.theme.Ma
+import com.cytube.mobile.ui.theme.MaSectionLabel
+import com.cytube.mobile.ui.theme.MaTopBar
+import com.cytube.mobile.ui.theme.maFaint
+import com.cytube.mobile.ui.theme.maPageBackground
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -45,32 +53,27 @@ fun SettingsScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { store.settings.collect { settings = it } }
 
+    // The same quiet page as home (see Ma.kt): paper and ink on light, with
+    // its grain; pure black on dark.
+    CyTubePageTheme {
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("Settings") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
+        modifier = Modifier.fillMaxSize().then(maPageBackground()),
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        topBar = { MaTopBar("Settings", onBack) }
     ) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
         ) {
             if (!isTv) {
-                SectionTitle("Appearance")
+                MaSectionLabel("Appearance")
 
                 // Drives CyTubeSettingsTheme for home, this screen and the
                 // account screen (see MainActivity) — System default just
                 // follows the phone's own light/dark setting.
                 ThemeMode.entries.forEach { mode ->
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                        Modifier.fillMaxWidth().padding(start = RadioStart, end = Ma.MarginEnd),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
@@ -82,13 +85,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 ThemeMode.SYSTEM -> "System default"
                                 ThemeMode.LIGHT -> "Light"
                                 ThemeMode.DARK -> "Dark"
+                                ThemeMode.COT -> "cot"
                             }
                         )
                     }
                 }
             }
 
-            SectionTitle("Playback")
+            MaSectionLabel("Playback")
 
             SwitchRow(
                 title = "Stay in sync",
@@ -96,9 +100,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.syncEnabled
             ) { scope.launch { store.setSync(it) } }
 
-            Column(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Column(Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 8.dp, bottom = 8.dp)) {
                 Text("Sync tolerance: ${settings.syncAccuracy.roundToInt()}s",
-                    style = MaterialTheme.typography.bodyMedium)
+                    style = MaterialTheme.typography.bodyLarge)
                 Text(
                     "How far the player may drift before it's corrected — by briefly " +
                         "speeding up or slowing down, or a seek if it's far out. Lower is " +
@@ -142,17 +146,17 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) { scope.launch { store.setAmbientGlow(it) } }
             }
 
-            SectionTitle("Compatibility")
+            MaSectionLabel("Compatibility")
 
             Text(
                 "Default mode for channels you have not set individually.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                modifier = Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, bottom = 8.dp)
             )
             CompatMode.entries.forEach { mode ->
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                    Modifier.fillMaxWidth().padding(start = RadioStart, end = Ma.MarginEnd),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     RadioButton(
@@ -163,7 +167,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            SectionTitle("Chat")
+            MaSectionLabel("Chat")
 
             SwitchRow(
                 title = "Show emotes",
@@ -171,35 +175,40 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.showEmotes
             ) { scope.launch { store.setEmotes(it) } }
 
-            SectionTitle("Support")
+            MaSectionLabel("Support")
 
-            OutlinedButton(
-                onClick = { openInBrowser(context, "https://ko-fi.com/hostu") },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-            ) {
-                Text("☕ Buy Hostu a dunkaccino! ❤️")
-            }
-
-            OutlinedButton(
-                onClick = { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-            ) {
-                Text("View source on GitHub")
-            }
+            // Plain rows that open the browser, not boxed buttons.
+            LinkRow("Buy Hostu a dunkaccino! ❤️") { openInBrowser(context, "https://ko-fi.com/hostu") }
+            LinkRow("View source on GitHub") { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") }
 
             Spacer(Modifier.height(32.dp))
         }
     }
+    }
 }
 
+/** Start padding for a radio row: the page's 32dp margin, less the 14dp
+ *  a RadioButton's touch area leaves around its circle. */
+private val RadioStart = 18.dp
+
+/** A row that opens a link: the text, and a small grey arrow on the right. */
 @Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleMedium,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 20.dp, top = 24.dp, bottom = 4.dp)
-    )
+private fun LinkRow(text: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        Icon(
+            Icons.AutoMirrored.Filled.ArrowForward,
+            contentDescription = null,
+            tint = maFaint(),
+            modifier = Modifier.size(18.dp)
+        )
+    }
 }
 
 @Composable
@@ -210,7 +219,7 @@ private fun SwitchRow(
     onChange: (Boolean) -> Unit
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth().padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -221,7 +230,7 @@ private fun SwitchRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(16.dp))
         Switch(checked = checked, onCheckedChange = onChange)
     }
 }

@@ -2,12 +2,11 @@ package com.cytube.mobile.ui.login
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.KeyboardType
@@ -15,6 +14,12 @@ import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.ui.theme.CyTubePageTheme
+import com.cytube.mobile.ui.theme.Ma
+import com.cytube.mobile.ui.theme.MaTextField
+import com.cytube.mobile.ui.theme.MaTopBar
+import com.cytube.mobile.ui.theme.maFaint
+import com.cytube.mobile.ui.theme.maPageBackground
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -75,29 +80,27 @@ fun LoginScreen(onBack: () -> Unit) {
         }
     }
 
+    // The same quiet page as home (see Ma.kt): paper and ink on light, with
+    // its grain; pure black on dark.
+    CyTubePageTheme {
     Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            TopAppBar(
-                title = { Text("Account") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
+        modifier = Modifier.fillMaxSize().then(maPageBackground()),
+        containerColor = Color.Transparent,
+        contentColor = MaterialTheme.colorScheme.onBackground,
+        topBar = { MaTopBar("Account", onBack) }
     ) { padding ->
         Column(
-            Modifier.fillMaxSize().padding(padding).padding(24.dp),
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             val repo = auth
             val current = session
             if (repo == null) {
                 Box(Modifier.fillMaxWidth().padding(top = 32.dp), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
+                    CircularProgressIndicator(Modifier.size(20.dp), color = maFaint(), strokeWidth = 1.5.dp)
                 }
             } else if (current != null) {
                 Text("Signed in as ${current.name}", style = MaterialTheme.typography.titleLarge)
@@ -118,25 +121,25 @@ fun LoginScreen(onBack: () -> Unit) {
             } else {
                 Text("Log in to CyTube", style = MaterialTheme.typography.titleLarge)
 
-                OutlinedTextField(
+                MaTextField(
                     value = username,
                     onValueChange = { username = it },
-                    label = { Text("Username") },
-                    singleLine = true,
+                    label = "Username",
                     enabled = !busy,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
-                OutlinedTextField(
+                MaTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Password") },
-                    singleLine = true,
+                    label = "Password",
                     enabled = !busy,
                     visualTransformation = PasswordVisualTransformation(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                 )
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // The checkbox's touch area leaves 14dp around its box: pull
+                // it left so the box sits on the page margin.
+                Row(Modifier.offset(x = (-14).dp), verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(checked = remember_, onCheckedChange = { remember_ = it }, enabled = !busy)
                     Text("Stay signed in")
                 }
@@ -175,25 +178,23 @@ fun LoginScreen(onBack: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Spacer(Modifier.height(8.dp))
-                HorizontalDivider()
-                Spacer(Modifier.height(8.dp))
-
-                Text("Guest name", style = MaterialTheme.typography.titleMedium)
+                // Space, not a divider line, before the guest section.
+                Spacer(Modifier.height(32.dp))
+                MaTextField(
+                    value = guestName,
+                    onValueChange = { guestName = it.take(20) },
+                    label = "Guest name",
+                    placeholder = guestPlaceholder,
+                    modifier = Modifier.fillMaxWidth()
+                )
                 Text(
                     "Shown in chat when you're not signed in. Leave blank for a new " +
                         "random name every time you join a channel.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                OutlinedTextField(
-                    value = guestName,
-                    onValueChange = { guestName = it.take(20) },
-                    singleLine = true,
-                    placeholder = { Text(guestPlaceholder) },
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
         }
+    }
     }
 }
