@@ -62,6 +62,9 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
@@ -762,7 +765,7 @@ fun ChannelScreen(
                     IconButton(onClick = vm::toggleFavourite) {
                         Icon(
                             if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "Favourite"
+                            contentDescription = "Favorite"
                         )
                     }
                     IconButton(onClick = { showModeSheet = true }) {
@@ -1157,7 +1160,8 @@ private fun WindowedFullscreenButton(visible: Boolean, onClick: () -> Unit, modi
 private fun ConnectionLine(state: ChannelUiState) {
     val (text, color) = when (state.connection) {
         ConnectionState.CONNECTED ->
-            (state.statusMessage ?: "${state.userCount} connected") to MaterialTheme.colorScheme.onSurfaceVariant
+            (state.statusMessage ?: "${state.userCount} connected") to
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
         ConnectionState.CONNECTING -> "Connecting…" to MaterialTheme.colorScheme.onSurfaceVariant
         ConnectionState.RECONNECTING -> "Reconnecting…" to MaterialTheme.colorScheme.tertiary
         ConnectionState.DISCONNECTED -> "Disconnected" to MaterialTheme.colorScheme.error
@@ -1713,7 +1717,11 @@ private fun TvPlaylistView(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .focusRequester(searchFocusRequester)
-                .onFocusChanged { searchFocused = it.isFocused }
+                // hasFocus, not isFocused: the text field keeps its focus on
+                // a node inside itself, so isFocused here stayed false and Up
+                // never saw the field as focused (it kept re-focusing it
+                // instead of going back to the video).
+                .onFocusChanged { searchFocused = it.hasFocus }
                 // If the user does deliberately navigate up into search (or
                 // this is the empty-playlist fallback above), the on-screen
                 // keyboard shows and — same problem as the auto-focus case —
@@ -1728,12 +1736,29 @@ private fun TvPlaylistView(
                 // on to the first row in one press, rather than leaving the
                 // keyboard sitting open on screen after focus has already
                 // moved past it.
-                .onKeyEvent { event ->
-                    if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
-                        keyboardController?.hide()
+                //
+                // A preview handler, seen before the text field itself: the
+                // field takes Down (to move its cursor) before a plain key
+                // handler gets it, and then nothing moved focus at all.
+                // Down closes the keyboard and goes to the first row.
+                .onPreviewKeyEvent { event ->
+                    if (event.key != Key.DirectionDown) {
+                        false
+                    } else {
+                        if (event.type == KeyEventType.KeyDown) {
+                            keyboardController?.hide()
+                            if (filtered.isNotEmpty()) runCatching { firstRowFocusRequester.requestFocus() }
+                        }
+                        true
                     }
-                    false
-                }
+                },
+            // The keyboard's own action key does the same: close it and go
+            // to the results, rather than leave the keyboard up.
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = {
+                keyboardController?.hide()
+                if (filtered.isNotEmpty()) runCatching { firstRowFocusRequester.requestFocus() }
+            })
         )
         Spacer(Modifier.height(8.dp))
 

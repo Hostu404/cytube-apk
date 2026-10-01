@@ -61,6 +61,8 @@ import androidx.webkit.WebViewFeature
 import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
+import com.cytube.mobile.player.DownloadWatch
+import com.cytube.mobile.player.MediaBytes
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.ResolvedStream
@@ -912,6 +914,22 @@ private fun ExoSurface(
     }
 
     val scope = rememberCoroutineScope()
+    // Download speed against what the video needs, for the log: sampled
+    // every second, reported with every buffering spell.
+    val downloadWatch = remember(exo) { DownloadWatch() }
+    fun knownBitrate(): Long {
+        val video = runCatching { exo.videoFormat?.bitrate }.getOrNull() ?: -1
+        if (video <= 0) return 0L
+        val audio = runCatching { exo.audioFormat?.bitrate }.getOrNull() ?: -1
+        return video.toLong() + audio.coerceAtLeast(0)
+    }
+    LaunchedEffect(exo) {
+        while (true) {
+            delay(1_000L)
+            val buffered = runCatching { exo.bufferedPosition }.getOrDefault(0L)
+            downloadWatch.sample(SystemClock.elapsedRealtime(), MediaBytes.total(), buffered)
+        }
+    }
     DisposableEffect(exo) {
         // Per-item stall tracking. The same ExoPlayer plays one item after
         // another (and quality changes reload in place), so these are reset
@@ -927,6 +945,9 @@ private fun ExoSurface(
         // bandwidth shortfall, and must not feed onStall → quality step-down
         // → reload → more drift → more seeks.
         var lastSeekAtMs = 0L
+        // Every buffering spell and what started it, for the log.
+        var bufferingSinceMs = 0L
+        var bufferingCause = ""
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 reachedReadyOnce = false
@@ -1033,6 +1054,14 @@ private fun ExoSurface(
                 }
                 when (playbackState) {
                     Player.STATE_READY -> {
+                        if (bufferingSinceMs != 0L) {
+                            Log.i(
+                                "CyTubeSync",
+                                "buffered ${SystemClock.elapsedRealtime() - bufferingSinceMs}ms ($bufferingCause); " +
+                                    downloadWatch.report(knownBitrate())
+                            )
+                            bufferingSinceMs = 0L
+                        }
                         stallJob?.cancel()
                         stallJob = null
                         if (!reachedReadyOnce) {
@@ -1063,6 +1092,18 @@ private fun ExoSurface(
                         // Likewise video being switched back on when the app
                         // returns from the background (see videoToggledAtMs).
                         val videoToggleInduced = nowMs - handle.videoToggledAtMs < VIDEO_TOGGLE_BUFFERING_WINDOW_MS
+                        if (bufferingSinceMs == 0L) {
+                            bufferingSinceMs = nowMs
+                            bufferingCause = when {
+                                !reachedReadyOnce -> "opening"
+                                seekInduced -> "after a seek"
+                                videoToggleInduced -> "video back on"
+                                else -> "stall"
+                            }
+                            if (bufferingCause == "stall") {
+                                Log.i("CyTubeSync", "stall started; ${downloadWatch.report(knownBitrate())}")
+                            }
+                        }
                         if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced && !videoToggleInduced) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start

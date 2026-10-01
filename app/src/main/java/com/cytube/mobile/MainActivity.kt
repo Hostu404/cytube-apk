@@ -98,7 +98,7 @@ class MainActivity : ComponentActivity() {
                 val isDark = when (settings.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
-                    ThemeMode.DARK -> true
+                    ThemeMode.DARK, ThemeMode.COT -> true
                 }
 
                 // Deep link support: a cytu.be/r/<channel> link (cold start or
@@ -130,7 +130,8 @@ class MainActivity : ComponentActivity() {
                             HomeScreen(
                                 onOpenChannel = { nav.navigate("channel/$it") },
                                 onOpenLogin = { nav.navigate("login") },
-                                onOpenSettings = { nav.navigate("settings") }
+                                onOpenSettings = { nav.navigate("settings") },
+                                showCat = settings.themeMode == ThemeMode.COT
                             )
                         }
                         if (isTv) {

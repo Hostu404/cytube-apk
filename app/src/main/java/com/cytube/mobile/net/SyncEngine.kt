@@ -1,6 +1,7 @@
 package com.cytube.mobile.net
 
 import com.cytube.mobile.player.PlayerHandle
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -80,6 +81,11 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
 
     /** True while the player is paused waiting for the room (see 4). */
     val isHolding: Boolean get() = holdAt != null
+
+    /** Where each correction is reported, for diagnosing slow or repeated
+     *  seeks from a device's log (ChannelViewModel sends it to Logcat as
+     *  "CyTubeSync"). Silent by default, so tests need no Android. */
+    var log: (String) -> Unit = {}
 
     /**
      * ChannelViewModel stops calling [apply] (leading, sync turned off, a
@@ -194,6 +200,7 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             // warns causes skip/jitter.
             stopNudge(player)
             if (!player.isPaused) {
+                log("lead-in: paused at 0 until the room starts")
                 player.seekTo(0.0)
                 player.pause()
             }
@@ -207,6 +214,7 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             openLandingFor = null
             seekLanding = false
             if (!player.isPaused) {
+                log("room paused: pausing at ${currentTime.s1()}s")
                 player.seekTo(currentTime)
                 player.pause()
             }
@@ -220,10 +228,12 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             val moved = !here.isNaN() && abs(here - at) > HOLD_SLACK_SECONDS
             val roomWentBack = currentTime < holdRoomTime - HOLD_SLACK_SECONDS
             if (moved || roomWentBack || at - currentTime > MAX_HOLD_SECONDS) {
+                log("hold dropped (moved=$moved, roomWentBack=$roomWentBack, room at ${currentTime.s1()}s)")
                 holdAt = null
             } else {
                 // Released a touch early: the next check is up to a second away.
                 if (currentTime >= at - HOLD_RELEASE_EARLY_SECONDS) {
+                    log("hold over: room reached ${currentTime.s1()}s, playing")
                     holdAt = null
                     playingSinceMs = 0L
                     player.play()
@@ -269,10 +279,22 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             if (!landed.isNaN() && !landed.isInfinite() && landed > 0.0) {
                 val behind = currentTime - landed
                 if (opened) {
-                    memory.learnOpenLead(
-                        openLandingServer,
-                        (openLandingLead + LEAD_LEARN_GAIN * behind).coerceIn(0.0, LeadMemory.MAX_OPEN_LEAD_SECONDS)
-                    )
+                    // Leans generous: opening late costs a catch-up seek (a
+                    // new request, often another wait), opening early only
+                    // a short hold. So a late open raises the lead to cover
+                    // it fully, with a margin, while an early one lowers it
+                    // only a little at a time. On a server whose opening
+                    // time swings about, that settles near its slow end.
+                    val lead = if (behind > 0) {
+                        openLandingLead + behind + OPEN_LEAD_MARGIN_SECONDS
+                    } else {
+                        openLandingLead + OPEN_LEAD_EASE_GAIN * behind
+                    }.coerceIn(0.0, LeadMemory.MAX_OPEN_LEAD_SECONDS)
+                    memory.learnOpenLead(openLandingServer, lead)
+                    log("opened ${openLandingLead.s1()}s ahead, first frame ${offset(behind)} " +
+                        "the room; open lead for $openLandingServer now ${lead.s1()}s")
+                } else {
+                    log("forward seek's first frame ${offset(behind)} the room")
                 }
                 if (-behind >= HOLD_MIN_SECONDS && -behind <= MAX_HOLD_SECONDS) {
                     if (!opened && pendingLeadCheck) {
@@ -280,8 +302,10 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                         pendingLeadCheck = false
                         seekLeadSeconds = (seekLeadSeconds + LEAD_LEARN_GAIN * behind)
                             .coerceIn(0.0, MAX_SEEK_LEAD_SECONDS)
+                        log("forward seeks overshooting; seek lead now ${seekLeadSeconds.s1()}s")
                     }
                     stopNudge(player)
+                    log("landed ${(-behind).s1()}s ahead: holding at ${landed.s1()}s for the room")
                     holdAt = landed
                     holdRoomTime = currentTime
                     playingSinceMs = 0L
@@ -311,10 +335,12 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             when {
                 diff >= NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
                     lastNonNativeCorrectionMs = nowMs
+                    log("embed ${diff.s1()}s behind: seeking to ${currentTime.s1()}s")
                     player.seekTo(currentTime)
                 }
                 diff <= -NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
                     lastNonNativeCorrectionMs = nowMs
+                    log("embed ${(-diff).s1()}s ahead: seeking to ${(currentTime + 1.0).s1()}s")
                     player.seekTo(currentTime + 1.0)
                 }
             }
@@ -336,6 +362,7 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
             pendingLeadCheck = false
             seekLeadSeconds = (seekLeadSeconds + LEAD_LEARN_GAIN * diff)
                 .coerceIn(0.0, MAX_SEEK_LEAD_SECONDS)
+            log("forward seek settled ${offset(diff)} the room; seek lead now ${seekLeadSeconds.s1()}s")
         }
 
         val absDiff = abs(diff)
@@ -352,10 +379,13 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 // currently costing, so we're on time when it resumes.
                 pendingLeadCheck = true
                 seekLanding = true
+                log("${diff.s1()}s behind: seeking to ${(currentTime + seekLeadSeconds).s1()}s " +
+                    "(lead ${seekLeadSeconds.s1()}s)")
                 player.seekTo(currentTime + seekLeadSeconds)
             } else {
                 // Ahead: a backward seek normally lands in the back buffer and
                 // is near-free; keep upstream's +1.
+                log("${(-diff).s1()}s ahead: seeking back to ${(currentTime + 1.0).s1()}s")
                 player.seekTo(currentTime + 1.0)
             }
             return
@@ -385,6 +415,10 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
         } else {
             player.setPlaybackRate((1.0 - magnitude).toFloat())
         }
+        if (!nudging) {
+            log("${absDiff.s1()}s ${if (diff > 0) "behind" else "ahead"}: " +
+                "playing at ${(if (diff > 0) 1.0 + magnitude else 1.0 - magnitude).s2()}x")
+        }
         nudging = true
     }
 
@@ -393,8 +427,15 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
     fun stopNudge(player: PlayerHandle) {
         if (!nudging) return
         nudging = false
+        log("back to 1x")
         player.setPlaybackRate(1f)
     }
+
+    private fun Double.s1() = String.format(Locale.ROOT, "%.1f", this)
+    /** [behind] seconds as "3.0s behind" or "1.2s ahead of". */
+    private fun offset(behind: Double) =
+        if (behind >= 0) "${behind.s1()}s behind" else "${(-behind).s1()}s ahead of"
+    private fun Double.s2() = String.format(Locale.ROOT, "%.2f", this)
 
     private companion object {
         const val NON_NATIVE_DRIFT_THRESHOLD_SECONDS = 10.0
@@ -411,6 +452,12 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
         const val DEFAULT_SEEK_LEAD_SECONDS = 1.0
         const val MAX_SEEK_LEAD_SECONDS = 8.0
         const val LEAD_LEARN_GAIN = 0.75
+
+        /** Opening lead learning (see where it's learned): added on top
+         *  after a late open, and the share of an early open's slack taken
+         *  off. */
+        const val OPEN_LEAD_MARGIN_SECONDS = 1.0
+        const val OPEN_LEAD_EASE_GAIN = 0.25
 
         /** Rate offset = BASE + PER_SECOND * |drift|, capped at MAX.
          *  2s drift → 7%, 4s → 10%, 6s → 12% (the cap). Pitch-corrected by
@@ -448,7 +495,17 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
      *  joined partway through; see SyncEngine.planStart. */
     @Synchronized fun openLead(server: String): Double = openLeads[server] ?: defaultOpenLeadSeconds
 
+    /** Goes up each time a lead is learned (not restored), so the caller
+     *  can tell when there's something new to save. */
+    @Volatile var learnedCount = 0
+        private set
+
     @Synchronized fun learnOpenLead(server: String, seconds: Double) {
+        put(server, seconds)
+        learnedCount++
+    }
+
+    private fun put(server: String, seconds: Double) {
         openLeads.remove(server)
         openLeads[server] = seconds
         while (openLeads.size > MAX_SERVERS) openLeads.remove(openLeads.keys.first())
@@ -459,7 +516,7 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
 
     @Synchronized fun restore(saved: Map<String, Double>) {
         for ((server, seconds) in saved) {
-            if (server.isNotBlank() && seconds.isFinite()) learnOpenLead(server, seconds.coerceIn(0.0, MAX_OPEN_LEAD_SECONDS))
+            if (server.isNotBlank() && seconds.isFinite()) put(server, seconds.coerceIn(0.0, MAX_OPEN_LEAD_SECONDS))
         }
     }
 

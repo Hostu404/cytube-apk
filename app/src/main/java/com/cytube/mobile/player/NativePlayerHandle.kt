@@ -88,7 +88,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(appContext)
         val upstream = OkHttpDataSource.Factory(Graph.mediaHttp)
             .setUserAgent(userAgent)
-            .setTransferListener(bandwidthMeter)
+            .setTransferListener(MediaBytes.counting(bandwidthMeter))
             .apply { if (requestHeaders.isNotEmpty()) setDefaultRequestProperties(requestHeaders) }
         return CacheDataSource.Factory()
             .setCache(Graph.mediaCache(appContext))
@@ -291,7 +291,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             val length = mediaLengthSeconds
             val targetSeconds = if (length > 0 && seconds > length) length.toDouble() else seconds
             val targetMs = (targetSeconds * 1000).toLong().coerceAtLeast(0L)
-            exo.setSeekParameters(seekParametersFor(targetMs))
+            val params = seekParametersFor(targetMs)
+            Log.i(
+                "CyTubeSync",
+                "seek to ${targetMs}ms from ${exo.currentPosition}ms, buffered to " +
+                    "${exo.bufferedPosition}ms (${if (params == SeekParameters.NEXT_SYNC) "next keyframe" else "exact"})"
+            )
+            exo.setSeekParameters(params)
             exo.seekTo(targetMs)
         }
     }

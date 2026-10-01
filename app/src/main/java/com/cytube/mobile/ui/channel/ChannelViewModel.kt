@@ -215,7 +215,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
     private val client = Graph.newClient()
-    private val sync = SyncEngine()
+    private val sync = SyncEngine().apply { log = { Log.i(SYNC_TAG, it) } }
     /** TV chat shows spoilers revealed (no tap to reveal them with). */
     private val isTv = isTvDevice(app)
 
@@ -1028,6 +1028,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     accuracySeconds = settings.syncAccuracy,
                     withinGracePeriod = withinGrace
                 )
+                saveLeadMemoryIfLearned()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1043,7 +1044,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         lastServerTimeSeconds = serverTime(update.currentTime, length)
         // When it arrived, not when this got to it: under a chat flood the
         // gap was big enough to make the room look seconds behind.
+        val previousUpdateMs = lastServerTimeElapsedRealtimeMs
         lastServerTimeElapsedRealtimeMs = receivedAt(receivedAtMs)
+        val sinceLastMs = lastServerTimeElapsedRealtimeMs - previousUpdateMs
+        if (previousUpdateMs > 0L && sinceLastMs > SERVER_UPDATE_LATE_MS) {
+            Log.i(SYNC_TAG, "no time update from the server for ${sinceLastMs}ms")
+        }
         isServerPaused = update.paused
         evaluateSync()
     }
@@ -2107,6 +2113,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** LeadMemory.learnedCount as of the last save. */
+    private var leadsSavedAt = LeadMemory.shared.learnedCount
+
+    /** Saves as soon as something new is learned, not only on leaving: an
+     *  app killed while on screen (a crash, a force stop, a reinstall from
+     *  Android Studio) never gets to leave, and lost what it had learned. */
+    private fun saveLeadMemoryIfLearned() {
+        val learned = LeadMemory.shared.learnedCount
+        if (learned == leadsSavedAt) return
+        leadsSavedAt = learned
+        saveLeadMemory()
+    }
+
     private fun saveLeadMemory() {
         val snapshot = LeadMemory.shared.snapshot()
         if (snapshot.isEmpty()) return
@@ -2140,6 +2159,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         const val MAX_CHAT_MESSAGES = 300
         const val MAX_GUEST_RETRIES = 3
         const val TAG = "CyTubeChannel"
+        /** SyncEngine's corrections and the player's seeks and buffering. */
+        const val SYNC_TAG = "CyTubeSync"
+        /** The server sends the room's time every 5s; much longer than that
+         *  between them means it (or the connection) is running behind. */
+        const val SERVER_UPDATE_LATE_MS = 8_000L
 
         /** How long a server error notice stays in the header — see
          *  showTransientStatus. */

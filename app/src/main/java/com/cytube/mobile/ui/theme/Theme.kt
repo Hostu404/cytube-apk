@@ -7,26 +7,26 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 private val AccentDark = Color(0xFF8AA8FF)
 
-// True black background/surface rather than the earlier dark-grey pair —
-// on an OLED/AMOLED panel (most current phones) a black pixel draws
-// meaningfully less power than a dark-grey one, and this screen sits on
-// screen for as long as the app is open. surfaceContainer/surfaceContainerHigh
-// stay barely lifted off black (not pure black themselves) purely so cards
-// and sheets remain visually distinguishable from the background behind
-// them — CyTubeChannelScheme below is untouched, it deliberately matches
-// CyTube's own (non-black) web skin rather than chasing this.
+// Pure black for every background and surface, not a dark grey: on an
+// OLED/AMOLED panel (most current phones) a black pixel is switched off and
+// draws far less power. CyTubeChannelScheme below is untouched, it
+// deliberately matches CyTube's own (non-black) web skin.
 private val DarkScheme = darkColorScheme(
     primary = AccentDark,
     onPrimary = Color(0xFF00204D),
     surface = Color(0xFF000000),
-    surfaceContainer = Color(0xFF0A0A0C),
-    surfaceContainerHigh = Color(0xFF141417),
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF000000),
+    surfaceContainer = Color(0xFF000000),
+    surfaceContainerHigh = Color(0xFF000000),
+    surfaceContainerHighest = Color(0xFF000000),
     background = Color(0xFF000000),
     onBackground = Color(0xFFE4E5E8)
 )
@@ -120,3 +120,58 @@ fun CyTubeChannelTheme(content: @Composable () -> Unit) {
         content = content
     )
 }
+
+/**
+ * The quieter palette of the home, settings and account pages, over
+ * whichever of the above they sit in (see Ma.kt). Kept close to the app's
+ * original colours so it still feels familiar, with a Japanese touch. Every
+ * background and surface is the app's original very faintly lilac white on
+ * light (Material's default) and pure black on dark (so an OLED screen's
+ * pixels stay off). Text is near-white on dark (pure white
+ * on pure black glares on an OLED screen) and near-black on light. Secondary
+ * text is ginnezumi (silver grey) on dark and sumi (ink) on light. The one
+ * accent, for what's yours (the login name and favorites), is the app's
+ * original blue moved halfway towards indigo (ai-iro).
+ */
+@Composable
+fun CyTubePageTheme(content: @Composable () -> Unit) {
+    val base = MaterialTheme.colorScheme
+    val scheme = if (base.background.luminance() < 0.5f) {
+        base.copy(
+            background = Color.Black,
+            surface = Color.Black,
+            surfaceContainerLowest = Color.Black,
+            surfaceContainerLow = Color.Black,
+            surfaceContainer = Color.Black,
+            surfaceContainerHigh = Color.Black,
+            surfaceContainerHighest = Color.Black,
+            onBackground = PageInkOnDark,
+            onSurface = PageInkOnDark,
+            onSurfaceVariant = Ginnezumi,
+            primary = IndigoBlueOnDark
+        )
+    } else {
+        base.copy(
+            background = PageWhite,
+            surface = PageWhite,
+            surfaceContainerLowest = PageWhite,
+            surfaceContainerLow = PageWhite,
+            surfaceContainer = PageWhite,
+            surfaceContainerHigh = PageWhite,
+            surfaceContainerHighest = PageWhite,
+            onBackground = PageInk,
+            onSurface = PageInk,
+            onSurfaceVariant = SumiIro,
+            primary = IndigoBlue
+        )
+    }
+    MaterialTheme(colorScheme = scheme, typography = MaterialTheme.typography, content = content)
+}
+
+private val PageWhite = Color(0xFFFEF7FF)       // the original light background
+private val PageInk = Color(0xFF1F1F1F)
+private val SumiIro = Color(0xFF595857)       // 墨 ink
+private val IndigoBlue = Color(0xFF285EA4)    // #3B5FC4 halfway to ai-iro 藍 #165E83
+private val PageInkOnDark = Color(0xFFF5F5F5)
+private val Ginnezumi = Color(0xFFAFAFB0)     // 銀鼠 silver grey
+private val IndigoBlueOnDark = Color(0xFF85A4E2) // #8AA8FF halfway to usuhana-iro 薄花 #7F9FC4

@@ -18,10 +18,11 @@ enum class CompatMode { AUTOMATIC, NATIVE, WEB;
     companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: AUTOMATIC }
 }
 
-/** System default / Light / Dark — drives CyTubeSettingsTheme, which is what
- *  the home and settings screens use (see MainActivity). SYSTEM is the
- *  default so a fresh install still just follows the phone's own setting. */
-enum class ThemeMode { SYSTEM, LIGHT, DARK;
+/** System default / Light / Dark / Cot — drives CyTubeSettingsTheme, which
+ *  is what the home and settings screens use (see MainActivity). SYSTEM is
+ *  the default so a fresh install still just follows the phone's own
+ *  setting. COT is Dark with a cat in the home search bar (CotCat). */
+enum class ThemeMode { SYSTEM, LIGHT, DARK, COT;
     companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: SYSTEM }
 }
 

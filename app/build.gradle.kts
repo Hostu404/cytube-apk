@@ -28,8 +28,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.8.1 - Lazarus"
+        versionCode = 20
+        versionName = "qt.3.14"
     }
 
     signingConfigs {
