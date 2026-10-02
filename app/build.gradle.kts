@@ -28,8 +28,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "qt.3.14"
+        versionCode = 21
+        versionName = "qt.p2t"
     }
 
     signingConfigs {
