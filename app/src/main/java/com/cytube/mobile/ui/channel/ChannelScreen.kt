@@ -69,7 +69,12 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -83,6 +88,7 @@ import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
+import com.cytube.mobile.ui.theme.ChannelTopBar
 import kotlinx.coroutines.delay
 
 private enum class Panel { PLAYLIST, USERS, POLL }
@@ -670,6 +676,14 @@ fun ChannelScreen(
         topBar = {
             TopAppBar(
                 windowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+                // The room's original top-bar grey, over the Slate page. The
+                // action icons are grey so the channel name leads; the ones
+                // that can be "on" (the favorite star) turn blue when they are.
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = ChannelTopBar,
+                    scrolledContainerColor = ChannelTopBar,
+                    actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                ),
                 title = {
                     // Tapping the channel name reconciles with the server —
                     // playlist, player and leader/sync state. It's here, not
@@ -765,7 +779,8 @@ fun ChannelScreen(
                     IconButton(onClick = vm::toggleFavourite) {
                         Icon(
                             if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "Favorite"
+                            contentDescription = "Favorite",
+                            tint = if (state.isFavourite) MaterialTheme.colorScheme.primary else LocalContentColor.current
                         )
                     }
                     IconButton(onClick = { showModeSheet = true }) {
@@ -977,7 +992,10 @@ fun ChannelScreen(
                     html = state.motd,
                     emotes = state.emotes,
                     expanded = state.motdExpanded,
-                    onToggle = vm::toggleMotd
+                    onToggle = vm::toggleMotd,
+                    // Tucked up under the title it belongs with, rather than
+                    // floating halfway between the title and the chat.
+                    underTitle = state.media != null
                 )
             }
 
@@ -1182,7 +1200,8 @@ private fun MotdSection(
     html: String,
     emotes: com.cytube.mobile.net.EmoteSet,
     expanded: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    underTitle: Boolean = false
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val context = LocalContext.current
@@ -1192,7 +1211,12 @@ private fun MotdSection(
             showImages = false, emotes = emotes, dropImages = true
         )
     }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(if (underTitle) Modifier.pullUp(NOTICE_PULL_UP) else Modifier)
+            .padding(start = 16.dp, end = 16.dp, top = if (underTitle) 0.dp else 6.dp, bottom = 6.dp)
+    ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth().clickable(onClick = onToggle)
@@ -1234,10 +1258,25 @@ private fun MotdSection(
     }
 }
 
+/** How far the channel notice tucks up into the title row's bottom
+ *  padding (see MotdSection), so it reads as part of the title. */
+private val NOTICE_PULL_UP = 4.dp
+
+/** Draws this [by] higher and gives that space back below it, unlike
+ *  offset(), which moves the drawing but leaves a gap where it was. */
+private fun Modifier.pullUp(by: androidx.compose.ui.unit.Dp): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints)
+    val up = by.roundToPx().coerceAtMost(placeable.height)
+    layout(placeable.width, placeable.height - up) { placeable.place(0, -up) }
+}
+
 @Composable
 private fun NowPlayingBar(title: String, leader: String?) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+        // Closer to what's above (the video, or its glow) than to the chat
+        // below, so the title reads as the video's caption; the channel
+        // notice tucks in right under it (see MotdSection).
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -1317,38 +1356,67 @@ private fun PanelBar(
     // covered by the triangle/circle/square buttons themselves. Padding by
     // the navigation bar (bottom and sides, like Material3's own
     // NavigationBar) reserves that space back.
+    // The same grey as the page, with a hairline above, rather than a
+    // raised slab of its own.
     Surface(
-        tonalElevation = 2.dp,
-        shadowElevation = 2.dp,
+        color = MaterialTheme.colorScheme.background,
         modifier = Modifier.windowInsetsPadding(
             barInsets.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
         )
     ) {
-        Row(Modifier.fillMaxWidth().height(48.dp)) {
-            PanelBarButton(
-                if (playlistCount > 0) "Playlist ($playlistCount)" else "Playlist",
-                Modifier.weight(1f)
-            ) { onOpen(Panel.PLAYLIST) }
-            PanelBarButton("Users ($userCount)", Modifier.weight(1f)) { onOpen(Panel.USERS) }
-            // Only shown while there's a poll — running, or just closed with
-            // its final results (until the next one or it's dismissed).
-            if (pollOpen) {
-                PanelBarButton(if (pollClosed) "Poll results" else "Poll", Modifier.weight(1f)) {
-                    onOpen(Panel.POLL)
+        Column {
+            HorizontalDivider()
+            Row(Modifier.fillMaxWidth().height(48.dp)) {
+                PanelBarButton("Playlist", if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)) {
+                    onOpen(Panel.PLAYLIST)
+                }
+                PanelBarButton("Users", userCount, Modifier.weight(1f)) { onOpen(Panel.USERS) }
+                // Only shown while there's a poll — running, or just closed
+                // with its final results (until the next one or it's
+                // dismissed). Blue while it's running: the one tab with
+                // something happening in it.
+                if (pollOpen) {
+                    PanelBarButton(
+                        if (pollClosed) "Poll results" else "Poll",
+                        count = null,
+                        modifier = Modifier.weight(1f),
+                        active = !pollClosed
+                    ) { onOpen(Panel.POLL) }
                 }
             }
         }
     }
 }
 
+/** A tab label in the home page's label style: small, spaced-out capitals
+ *  in grey, with its count a step fainter; blue when [active]. */
 @Composable
-private fun PanelBarButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+private fun PanelBarButton(
+    label: String,
+    count: Int?,
+    modifier: Modifier = Modifier,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val labelColor = if (active) colors.primary else colors.onSurfaceVariant
+    val countColor = if (active) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.6f)
     TextButton(
         onClick = onClick,
         modifier = modifier.fillMaxHeight(),
         contentPadding = PaddingValues(horizontal = 4.dp)
     ) {
-        Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            buildAnnotatedString {
+                withStyle(SpanStyle(color = labelColor)) { append(label.uppercase()) }
+                if (count != null) {
+                    withStyle(SpanStyle(color = countColor)) { append("  $count") }
+                }
+            },
+            style = TextStyle(fontSize = 11.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Medium),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

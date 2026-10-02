@@ -79,26 +79,45 @@ fun CyTubeSettingsTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Co
 /**
  * Channel-only theme.
  *
- * CyTube's default skin is a dark bootstrap variant. These are its palette
- * anchors nudged for Android: text lightened for contrast against the panel
- * greys, and the accent brightened so links and usernames stay legible at
- * phone brightness. It is a palette, not the site's CSS — nothing is copied
- * or embedded, and it applies only while a channel is open.
+ * After the greys of CyTube's default website theme (Slate): one blue-grey
+ * for the page, the chat and the panel bar alike, a step darker than the
+ * site's so it doesn't outshine a dark scene in the video beside it. Text
+ * is a soft white rather than a bright one (bright white on dark seems to
+ * glow at the edges, which tires eyes over a long watch), at the same
+ * contrast as before thanks to the darker page (11:1; greys 7:1). The
+ * accent is brightened so links and usernames stay legible at phone
+ * brightness. It is a palette, not the site's CSS — nothing is copied or
+ * embedded, and it applies only while a channel is open.
  */
+private val SlatePage = Color(0xFF1F2226)
+private val SlateRaised = Color(0xFF262A2E)
+private val SlateHigh = Color(0xFF2D3136)
+private val SlateText = Color(0xFFD4D7DA)
+
+private val SlateHeader = Color(0xFF34393E)
+
+/** The channel page's top bar: the room's original top-bar grey, neutral
+ *  over the blue-grey Slate page. */
+val ChannelTopBar = Color(0xFF222222)
+
 private val CyTubeChannelScheme = darkColorScheme(
     primary = Color(0xFF7FB2E5),
     onPrimary = Color(0xFF08243D),
     secondary = Color(0xFF9AA6B2),
     tertiary = Color(0xFFD2A76B),
-    background = Color(0xFF1B1B1B),
-    onBackground = Color(0xFFE8E8E8),
-    surface = Color(0xFF222222),
-    onSurface = Color(0xFFE8E8E8),
-    surfaceContainer = Color(0xFF2A2A2A),
-    surfaceContainerHigh = Color(0xFF333333),
-    surfaceContainerHighest = Color(0xFF3A3A3A),
-    onSurfaceVariant = Color(0xFFB6B6B6),
-    outline = Color(0xFF4A4A4A),
+    background = SlatePage,
+    onBackground = SlateText,
+    surface = SlatePage,
+    onSurface = SlateText,
+    surfaceVariant = SlateHeader,
+    surfaceContainerLowest = SlatePage,
+    surfaceContainerLow = SlatePage,
+    surfaceContainer = SlateRaised,
+    surfaceContainerHigh = SlateHigh,
+    surfaceContainerHighest = SlateHeader,
+    onSurfaceVariant = Color(0xFFA9AEB4),
+    outline = Color(0xFF4E545B),
+    outlineVariant = SlateHeader,
     error = Color(0xFFE57373),
     errorContainer = Color(0xFF4A2222),
     onErrorContainer = Color(0xFFF6D5D5),
