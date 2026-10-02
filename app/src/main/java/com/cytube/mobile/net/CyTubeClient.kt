@@ -271,6 +271,9 @@ class CyTubeClient(
             CyTubeEvent.EmoteRenamed(it.optString("old", ""), Emote.from(it))
         }
         obj(s, "removeEmote") { CyTubeEvent.EmoteRemoved(it.optString("name", "")) }
+        // The channel's own stylesheet and script. Only the CSS is used (see
+        // ChannelStyle); the script is never run.
+        obj(s, "channelCSSJS") { CyTubeEvent.ChannelCss(it.optString("css", "")) }
         obj(s, "setPermissions") { CyTubeEvent.PermissionsChanged(Permissions(it)) }
         // The server withdrew our skip vote (we went AFK: user.js setAFK).
         s.on("clearVoteskipVote") { emit(CyTubeEvent.VoteskipVoteCleared) }

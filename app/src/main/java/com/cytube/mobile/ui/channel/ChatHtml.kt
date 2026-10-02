@@ -6,6 +6,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import com.cytube.mobile.net.EmoteEffects
+import com.cytube.mobile.net.EmoteModifier
 import com.cytube.mobile.net.EmoteSet
 import com.cytube.mobile.net.resolveMediaUrl
 import androidx.compose.ui.text.font.FontFamily
@@ -73,8 +75,22 @@ object ChatHtml {
         val images: MutableList<String>,
         val budget: EmoteBudget,
         val revealSpoilers: Boolean,
-        val revealedSpoilers: Set<Int>
+        val revealedSpoilers: Set<Int>,
+        val effects: EmoteEffects = EmoteEffects.NONE
     ) {
+        /** Emotes drawn with a channel modifier, by inline content id. */
+        val fx = HashMap<String, EmoteFx>()
+
+        /** A modifier emote ("/reverse") waiting for the emote it acts on:
+         *  like the CSS `+` it's written with, the next emote after it,
+         *  whatever text is in between. */
+        var pendingModifier: EmoteModifier? = null
+        var pendingModifierCode = ""
+
+        /** A stacking modifier's first emote ("/overlay pepe hat": pepe),
+         *  held until the one to draw on top of it turns up. */
+        var stackBase: String? = null
+        var stackBaseCode = ""
         /** Assigns each spoiler span encountered its index, in document
          *  order. */
         var spoilerIndex = 0
@@ -104,7 +120,23 @@ object ChatHtml {
          * the case where making them bigger doesn't cost anything (there's
          * no surrounding text for a taller row to crowd).
          */
-        val soloEmoteCount: Int = 0
+        val soloEmoteCount: Int = 0,
+        /** Emotes drawn with a channel modifier, keyed by their inline
+         *  content id in [imageUrls] — see [EmoteFx]. */
+        val fx: Map<String, EmoteFx> = emptyMap()
+    )
+
+    /**
+     * An emote drawn with one of the channel's modifiers (see ChannelStyle):
+     * [urls] is the emote the modifier acts on, plus, for a stacking one
+     * ("/overlay"), the emote drawn on top of it.
+     */
+    @androidx.compose.runtime.Immutable
+    data class EmoteFx(
+        val modifier: EmoteModifier,
+        val urls: List<String>,
+        /** What the channel's CSS px values are measured against. */
+        val baseEmotePx: Float
     )
 
     private data class RenderCacheKey(
@@ -246,12 +278,13 @@ object ChatHtml {
         val body = Jsoup.parseBodyFragment(html).body()
         val ctx = RenderCtx(
             key.showImages, key.dropImages, images, EmoteBudget(),
-            key.revealSpoilers, key.revealedSpoilers
+            key.revealSpoilers, key.revealedSpoilers, emotes.effects
         )
 
         var annotated = buildAnnotatedString {
             if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
             walk(body, this, ctx)
+            flushStack(this, ctx)
             if (greentext) pop()
         }
         // Emotes left out at the end of a message leave the space before the
@@ -260,7 +293,7 @@ object ChatHtml {
             val end = annotated.text.trimEnd().length
             if (end < annotated.length) annotated = annotated.subSequence(0, end)
         }
-        val result = Rendered(annotated, images, soloEmoteCount(annotated, images))
+        val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.fx.toMap())
         synchronized(renderCache) {
             renderCache.put(key, result)
         }
@@ -302,6 +335,12 @@ object ChatHtml {
             when (child) {
                 is TextNode -> {
                     var text = child.text()
+                    if (ctx.stackBase != null) {
+                        // Only spaces between "/overlay pepe" and "hat";
+                        // anything else and pepe is drawn on its own.
+                        if (text.isBlank()) continue
+                        flushStack(builder, ctx)
+                    }
                     if (ctx.swallowLeadingSpace) {
                         text = text.trimStart()
                         if (text.isNotEmpty()) ctx.swallowLeadingSpace = false
@@ -326,8 +365,53 @@ object ChatHtml {
                         // here (see Emote.from), so this is a no-op for those.
                         val src = resolveMediaUrl(child.attr("src"))
                         val alt = child.attr("alt").ifBlank { child.attr("title") }
+                        val isEmote = child.hasClass("channel-emote")
+                        val modifier = if (isEmote) ctx.effects.modifiers[child.attr("title")] else null
+                        val drawsEffects = ctx.showImages && !ctx.dropImages && !ctx.inHiddenSpoiler
                         when {
                             ctx.dropImages -> Unit
+                            // A modifier emote: hidden (if the channel hides
+                            // it) and remembered for the emote after it.
+                            // Hidden ones don't count towards the emote cap.
+                            modifier != null && drawsEffects -> {
+                                flushStack(builder, ctx)
+                                ctx.pendingModifier = modifier
+                                ctx.pendingModifierCode = alt
+                                if (modifier.hidden) {
+                                    ctx.swallowLeadingSpace = true
+                                } else if (src.isNotBlank() && ctx.budget.take()) {
+                                    appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
+                                }
+                            }
+                            isEmote && drawsEffects && ctx.pendingModifier != null && src.isNotBlank() -> {
+                                val mod = ctx.pendingModifier!!
+                                val code = alt.ifBlank { "[emote]" }
+                                val base = ctx.stackBase
+                                when {
+                                    !ctx.budget.take() -> {
+                                        flushStack(builder, ctx)
+                                        ctx.pendingModifier = null
+                                        ctx.droppedEmote = true
+                                        ctx.swallowLeadingSpace = true
+                                    }
+                                    mod.stacks && base == null -> {
+                                        ctx.stackBase = src
+                                        ctx.stackBaseCode = code
+                                    }
+                                    mod.stacks && base != null -> {
+                                        appendFx(
+                                            builder, ctx, mod, listOf(base, src),
+                                            "${ctx.pendingModifierCode} ${ctx.stackBaseCode} $code"
+                                        )
+                                        ctx.stackBase = null
+                                        ctx.pendingModifier = null
+                                    }
+                                    else -> {
+                                        appendFx(builder, ctx, mod, listOf(src), "${ctx.pendingModifierCode} $code")
+                                        ctx.pendingModifier = null
+                                    }
+                                }
+                            }
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
                             // Cap applies to every image with a src,
                             // whether or not it's drawn as a picture. (With
@@ -340,23 +424,13 @@ object ChatHtml {
                                 ctx.swallowLeadingSpace = true
                             }
                             ctx.showImages && ctx.inHiddenSpoiler -> builder.append(alt.ifBlank { "[emote]" })
-                            ctx.showImages -> {
-                                ctx.images.add(src)
-                                val code = alt.ifBlank { "[emote]" }
-                                // The id IS the url, so ChatRow can build the
-                                // content map straight from imageUrls. EMOTE_TAG
-                                // separately carries the shortcode so tapping the
-                                // emote can insert the same text the emote picker
-                                // would, not the image URL.
-                                builder.pushStringAnnotation(EMOTE_TAG, code)
-                                builder.appendInlineContent(src, code)
-                                builder.pop()
-                            }
+                            ctx.showImages -> appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
                             else -> builder.append(alt.ifBlank { "[emote]" })
                         }
                     }
 
                     "a" -> if (ctx.inHiddenSpoiler) walk(child, builder, ctx) else {
+                        flushStack(builder, ctx)
                         builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
                         builder.pushStyle(
                             SpanStyle(textDecoration = TextDecoration.Underline)
@@ -385,6 +459,48 @@ object ChatHtml {
             }
         }
     }
+
+    /** A plain emote. The id IS the url, so ChatRow can build the content
+     *  map straight from imageUrls. EMOTE_TAG separately carries the
+     *  shortcode so tapping the emote can insert the same text the emote
+     *  picker would, not the image URL. */
+    private fun appendEmote(builder: AnnotatedString.Builder, ctx: RenderCtx, src: String, code: String) {
+        ctx.images.add(src)
+        builder.pushStringAnnotation(EMOTE_TAG, code)
+        builder.appendInlineContent(src, code)
+        builder.pop()
+    }
+
+    /** An emote (or two, stacked) drawn with a modifier. Tapping it inserts
+     *  the whole thing, modifier included, as typed. */
+    private fun appendFx(
+        builder: AnnotatedString.Builder,
+        ctx: RenderCtx,
+        modifier: EmoteModifier,
+        urls: List<String>,
+        code: String
+    ) {
+        val id = (listOf(FX_PREFIX + modifier.name) + urls).joinToString(FX_SEPARATOR)
+        ctx.fx[id] = EmoteFx(modifier, urls, ctx.effects.baseEmotePx)
+        ctx.images.add(id)
+        builder.pushStringAnnotation(EMOTE_TAG, code)
+        builder.appendInlineContent(id, code)
+        builder.pop()
+    }
+
+    /** A stacking modifier's first emote that never got a second one to go
+     *  on top of it: drawn on its own, with the modifier's style. */
+    private fun flushStack(builder: AnnotatedString.Builder, ctx: RenderCtx) {
+        val base = ctx.stackBase ?: return
+        val mod = ctx.pendingModifier
+        ctx.stackBase = null
+        ctx.pendingModifier = null
+        if (mod == null) appendEmote(builder, ctx, base, ctx.stackBaseCode)
+        else appendFx(builder, ctx, mod.copy(stacks = false), listOf(base), "${ctx.pendingModifierCode} ${ctx.stackBaseCode}")
+    }
+
+    private const val FX_PREFIX = "fx:"
+    private const val FX_SEPARATOR = "\u001F"
 
     /**
      * A `[spoiler]`/`<span class="spoiler">` span. Always gets a SPOILER_TAG
