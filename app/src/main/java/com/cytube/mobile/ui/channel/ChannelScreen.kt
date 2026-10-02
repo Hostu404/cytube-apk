@@ -678,7 +678,7 @@ fun ChannelScreen(
                 windowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 // The room's original top-bar grey, over the Slate page. The
                 // action icons are grey so the channel name leads; the ones
-                // that can be "on" (the favorite star) turn blue when they are.
+                // that can be "on" (the favorite star) show it by their shape.
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = ChannelTopBar,
                     scrolledContainerColor = ChannelTopBar,
@@ -779,8 +779,7 @@ fun ChannelScreen(
                     IconButton(onClick = vm::toggleFavourite) {
                         Icon(
                             if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "Favorite",
-                            tint = if (state.isFavourite) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                            contentDescription = "Favorite"
                         )
                     }
                     IconButton(onClick = { showModeSheet = true }) {
@@ -1374,14 +1373,12 @@ private fun PanelBar(
                 PanelBarButton("Users", userCount, Modifier.weight(1f)) { onOpen(Panel.USERS) }
                 // Only shown while there's a poll — running, or just closed
                 // with its final results (until the next one or it's
-                // dismissed). Blue while it's running: the one tab with
-                // something happening in it.
+                // dismissed); the same grey as the other two.
                 if (pollOpen) {
                     PanelBarButton(
                         if (pollClosed) "Poll results" else "Poll",
                         count = null,
-                        modifier = Modifier.weight(1f),
-                        active = !pollClosed
+                        modifier = Modifier.weight(1f)
                     ) { onOpen(Panel.POLL) }
                 }
             }
