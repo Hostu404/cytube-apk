@@ -82,7 +82,10 @@ private fun StyledEmote(
     // When it first appeared, kept while it's scrolled off and back (a
     // one-off animation such as "/shrink" doesn't replay), and a clock that
     // ticks only while something is moving. The clock is read only while
-    // drawing, so each frame redraws this emote alone.
+    // drawing, so each tick redraws this emote alone, and it ticks at most
+    // 30 times a second (MIN_TICK_MS): smooth enough for these effects, and
+    // half the redrawing of following the screen's own 60+ a second, which
+    // matters with a chat full of them beside a playing video.
     val startedAt = rememberSaveable { System.currentTimeMillis() }
     val now = remember { mutableLongStateOf(System.currentTimeMillis()) }
     val anim = style.animation
@@ -91,8 +94,10 @@ private fun StyledEmote(
             val endsAt = anim.endsAtMs
             while (true) {
                 withFrameMillis { }
-                now.longValue = System.currentTimeMillis()
-                if (endsAt != null && now.longValue - startedAt > endsAt) break
+                val t = System.currentTimeMillis()
+                if (t - now.longValue < MIN_TICK_MS) continue
+                now.longValue = t
+                if (endsAt != null && t - startedAt > endsAt) break
             }
         }
     }
@@ -154,6 +159,9 @@ private fun StyledEmote(
         )
     }
 }
+
+/** The shortest time between redraws of an animated emote: 30 a second. */
+private const val MIN_TICK_MS = 33L
 
 /** Draws [painter] fitted and centred in this box, as ContentScale.Fit. */
 private fun DrawScope.drawFit(painter: Painter, colorFilter: ColorFilter?) {

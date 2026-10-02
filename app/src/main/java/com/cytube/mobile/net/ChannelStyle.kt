@@ -401,14 +401,34 @@ private fun buildFrame(
         }
         if (m != null) matrix = if (matrix == null) m else multiply(m, matrix)
     }
+    // Kept within reach of the emote's own place in the line: a channel's
+    // CSS mustn't be able to cover the chat or the message box with an
+    // image (scale(100), translate(5000px)), or hand the renderer values it
+    // can't use (1e40, NaN).
+    val reach = MAX_REACH * maxOf(width, height, 1f)
+    fun finite(v: Float, default: Float) = if (v.isFinite()) v else default
+    val safeMatrix = matrix?.takeIf { m -> m.all { it.isFinite() && abs(it) < 1e6f } }
+    val safeShadow = shadow?.takeIf { sh -> sh.all { it.isFinite() } }?.let { sh ->
+        floatArrayOf(sh[0].coerceIn(-height, height), sh[1].coerceIn(-height, height), sh[2].coerceIn(0f, height / 2f))
+    }
     return EmoteFrame(
-        translationX = tx, translationY = ty,
-        scaleX = scaleX, scaleY = scaleY, rotationZ = rotation,
-        rotationX = rotX, rotationY = rotY,
-        alpha = alpha.coerceIn(0f, 1f),
-        colorMatrix = matrix, blurPx = blur, shadow = shadow
+        translationX = finite(tx, 0f).coerceIn(-reach, reach),
+        translationY = finite(ty, 0f).coerceIn(-reach, reach),
+        scaleX = finite(scaleX, 1f).coerceIn(-MAX_SCALE, MAX_SCALE),
+        scaleY = finite(scaleY, 1f).coerceIn(-MAX_SCALE, MAX_SCALE),
+        rotationZ = finite(rotation, 0f) % 360f,
+        rotationX = finite(rotX, 0f) % 360f,
+        rotationY = finite(rotY, 0f) % 360f,
+        alpha = finite(alpha, 1f).coerceIn(0f, 1f),
+        colorMatrix = safeMatrix,
+        blurPx = finite(blur, 0f).coerceIn(0f, height / 2f),
+        shadow = safeShadow
     )
 }
+
+/** How far (in emote sizes) and how big an emote may be drawn. */
+private const val MAX_REACH = 4f
+private const val MAX_SCALE = 4f
 
 // The filter matrices from the CSS Filter Effects spec, in Android's 4x5
 // layout (rows R, G, B, A; columns R, G, B, A, offset 0..255).
@@ -479,7 +499,7 @@ private fun multiply(m: FloatArray, n: FloatArray): FloatArray {
 // ---- reading the CSS ----
 
 private class CssReader(css: String) {
-    private val text = COMMENT.replace(css, " ")
+    private val text = stripComments(css)
     private val keyframes = HashMap<String, List<CssKeyframe>>()
     private val rules = ArrayList<Pair<List<String>, Map<String, String>>>()
 
@@ -506,6 +526,7 @@ private class CssReader(css: String) {
         val modifiers = HashMap<String, EmoteModifier>()
         for (name in self.keys + next.keys) {
             if (name in modifiers) continue
+            if (modifiers.size >= MAX_MODIFIERS) break
             val hidden = self[name]?.get("display") == "none"
             val nextDecls = next[name].orEmpty()
             if (!hidden && nextDecls.isEmpty()) continue
@@ -539,13 +560,16 @@ private class CssReader(css: String) {
         var i = 0
         while (i < text.length) {
             if (text[i].isWhitespace()) { i++; continue }
-            val brace = text.indexOf('{', i)
             if (text[i] == '@') {
-                val semi = text.indexOf(';', i)
-                if (brace < 0 || (semi in 0 until brace)) {
-                    i = if (semi < 0) text.length else semi + 1
+                // An at-rule ends at whichever of ; or { comes first; found
+                // by walking forward, so a run of them stays linear.
+                var j = i
+                while (j < text.length && text[j] != ';' && text[j] != '{') j++
+                if (j >= text.length || text[j] == ';') {
+                    i = j + 1
                     continue
                 }
+                val brace = j
                 val end = matchingBrace(brace)
                 val prelude = text.substring(i, brace).trim()
                 if (prelude.startsWith("@keyframes") || prelude.startsWith("@-webkit-keyframes")) {
@@ -555,9 +579,12 @@ private class CssReader(css: String) {
                 i = end + 1
                 continue
             }
+            val brace = text.indexOf('{', i)
             if (brace < 0) break
             val close = text.indexOf('}', brace).let { if (it < 0) text.length else it }
-            val selectors = text.substring(i, brace).split(',').map(::normalizeSelector).filter { it.isNotEmpty() }
+            val selectors = text.substring(i, brace).split(',')
+                .filter { it.length <= MAX_SELECTOR_CHARS }
+                .map(::normalizeSelector).filter { it.isNotEmpty() }
             rules.add(selectors to declarations(text.substring(brace + 1, close)))
             i = close + 1
         }
@@ -576,12 +603,19 @@ private class CssReader(css: String) {
 
     private fun readKeyframes(body: String): List<CssKeyframe> {
         val frames = ArrayList<CssKeyframe>()
-        for (m in KEYFRAME.findAll(body)) {
-            val decls = declarations(m.groupValues[2])
+        var pos = 0
+        while (pos < body.length && frames.size < MAX_KEYFRAMES) {
+            val open = body.indexOf('{', pos)
+            if (open < 0) break
+            val close = body.indexOf('}', open).let { if (it < 0) body.length else it }
+            val selector = body.substring(pos, open)
+            pos = close + 1
+            if (selector.length > MAX_SELECTOR_CHARS) continue
+            val decls = declarations(body.substring(open + 1, close))
             val transform = decls["transform"]?.let(::functions)
             val filter = decls["filter"]?.let(::functions)
             val opacity = decls["opacity"]?.let(::amount)
-            for (sel in m.groupValues[1].split(',')) {
+            for (sel in selector.split(',')) {
                 val offset = when (val s = sel.trim().lowercase()) {
                     "from" -> 0f
                     "to" -> 1f
@@ -644,15 +678,49 @@ private class CssReader(css: String) {
         val frames = name?.let { keyframes[it] } ?: return null
         val length = duration ?: return null
         if (frames.isEmpty() || length <= 0L) return null
-        return CssAnimation(frames, length, delay, easing, iterations, forwards, alternate)
+        // Within reason: no faster than 20 changes a second, no longer than
+        // an hour, a delay of at most a minute.
+        return CssAnimation(
+            frames,
+            length.coerceIn(MIN_ANIMATION_MS, MAX_ANIMATION_MS),
+            delay.coerceIn(0L, MAX_DELAY_MS),
+            easing,
+            if (iterations.isNaN() || iterations <= 0f) 1f else iterations,
+            forwards,
+            alternate
+        )
     }
 }
 
 // ---- CSS value helpers ----
 
-private val COMMENT = Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)
-private val KEYFRAME = Regex("([^{}]+)\\{([^{}]*)\\}")
-private val FUNCTION = Regex("([a-zA-Z][a-zA-Z0-9-]*)\\(([^()]*)\\)")
+// Limits on what's read from a channel's CSS. Everything below walks the
+// text once rather than through patterns that can backtrack, so CSS made to
+// be slow to read (a long run of unclosed comments, say) still reads fast.
+private const val MAX_SELECTOR_CHARS = 300
+private const val MAX_VALUE_CHARS = 1_000
+private const val MAX_TOKEN_CHARS = 32
+private const val MAX_FUNCTIONS = 16
+private const val MAX_KEYFRAMES = 64
+private const val MAX_MODIFIERS = 300
+private const val MIN_ANIMATION_MS = 50L
+private const val MAX_ANIMATION_MS = 3_600_000L
+private const val MAX_DELAY_MS = 60_000L
+
+/** The CSS with its comments taken out (an unclosed one runs to the end). */
+private fun stripComments(css: String): String {
+    val out = StringBuilder(css.length)
+    var i = 0
+    while (i < css.length) {
+        val start = css.indexOf("/*", i)
+        if (start < 0) { out.append(css, i, css.length); break }
+        out.append(css, i, start).append(' ')
+        val end = css.indexOf("*/", start + 2)
+        if (end < 0) break
+        i = end + 2
+    }
+    return out.toString()
+}
 private val NUMBER = Regex("^(-?\\d*\\.?\\d+(?:e-?\\d+)?)([a-z%]*)$")
 private val ANIMATION_TOKEN = Regex("[a-zA-Z-]+\\([^)]*\\)|\\S+")
 private val IGNORED_ANIMATION_WORDS = setOf(
@@ -677,23 +745,38 @@ private fun declarations(body: String): Map<String, String> {
         val colon = decl.indexOf(':')
         if (colon <= 0) continue
         val prop = decl.substring(0, colon).trim().lowercase()
+        if (decl.length - colon > MAX_VALUE_CHARS) continue
         val value = decl.substring(colon + 1).replace("!important", "").trim()
         if (prop.isNotEmpty() && value.isNotEmpty()) out[prop] = value
     }
     return out
 }
 
+/** scale(1.5, 0.8) rotate(90deg) and the like, read left to right. */
 private fun functions(value: String): List<CssFn> {
     if (value.trim() == "none") return emptyList()
-    return FUNCTION.findAll(value).map { m ->
-        CssFn(
-            m.groupValues[1].lowercase(),
-            m.groupValues[2].split(Regex("[,\\s]+")).mapNotNull(::cssValue)
+    val out = ArrayList<CssFn>()
+    var i = 0
+    while (i < value.length && out.size < MAX_FUNCTIONS) {
+        if (!value[i].isLetter()) { i++; continue }
+        val start = i
+        while (i < value.length && (value[i].isLetterOrDigit() || value[i] == '-')) i++
+        if (i >= value.length || value[i] != '(') continue
+        val close = value.indexOf(')', i)
+        if (close < 0) break
+        out.add(
+            CssFn(
+                value.substring(start, i).lowercase(),
+                value.substring(i + 1, close).split(',', ' ', '\t', '\n').mapNotNull(::cssValue)
+            )
         )
-    }.toList()
+        i = close + 1
+    }
+    return out
 }
 
 private fun cssValue(token: String): CssValue? {
+    if (token.length > MAX_TOKEN_CHARS) return null
     val m = NUMBER.matchEntire(token.trim().lowercase()) ?: return null
     return CssValue(m.groupValues[1].toFloatOrNull() ?: return null, m.groupValues[2])
 }

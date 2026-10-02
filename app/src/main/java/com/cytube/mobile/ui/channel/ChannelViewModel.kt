@@ -291,6 +291,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** Socket.IO ran out of reconnection attempts (CyTubeEvent.ReconnectGaveUp)
      *  and nothing has reconnected since — see onAppVisibilityChanged. */
     private var reconnectGaveUp = false
+    /** Reading the channel's latest CSS — see the ChannelCss branch. */
+    private var channelCssJob: Job? = null
     /** The last announcement shown — see the Announcement branch. */
     private var lastAnnouncementKey: String? = null
     private var lastServerTimeSeconds: Double = 0.0
@@ -735,13 +737,18 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     update { s -> s.copy(emotes = s.emotes.withRenamed(event.oldName, event.emote)) }
                 is CyTubeEvent.EmoteRemoved ->
                     update { s -> s.copy(emotes = s.emotes.withRemoved(event.name)) }
-                // Read off the main thread: a channel's CSS can be long.
-                is CyTubeEvent.ChannelCss -> viewModelScope.launch {
-                    val style = withContext(Dispatchers.Default) {
-                        com.cytube.mobile.net.ChannelStyle.parse(event.css)
-                    }
-                    update { s ->
-                        s.copy(emotes = s.emotes.withEffects(style.effects), nameColors = style.nameColors)
+                // Read off the main thread: a channel's CSS can be long. A
+                // newer copy (a moderator saving again) replaces any read
+                // still in progress, so an older one can't finish last.
+                is CyTubeEvent.ChannelCss -> {
+                    channelCssJob?.cancel()
+                    channelCssJob = viewModelScope.launch {
+                        val style = withContext(Dispatchers.Default) {
+                            com.cytube.mobile.net.ChannelStyle.parse(event.css)
+                        }
+                        update { s ->
+                            s.copy(emotes = s.emotes.withEffects(style.effects), nameColors = style.nameColors)
+                        }
                     }
                 }
 
