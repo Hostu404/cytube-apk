@@ -997,6 +997,10 @@ private fun ExoSurface(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                // A custom manifest's separate sound file failing isn't a
+                // failure of the video: the handle reloads it without the
+                // sound instead (see recoverFromSeparateAudioError).
+                if (handle.recoverFromSeparateAudioError(error)) return
                 transitionFreezeFrame?.recycle()
                 transitionFreezeFrame = null
                 // ERROR_CODE_IO_BAD_HTTP_STATUS alone doesn't say WHICH status,

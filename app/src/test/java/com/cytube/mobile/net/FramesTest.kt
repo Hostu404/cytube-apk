@@ -43,6 +43,18 @@ class FramesTest {
         assertFalse(m.isLivestream)
     }
 
+    @Test fun mediaFrameReadsSeparateAudioTracks() {
+        val m = MediaFrame.from(json("""
+            {"id":"https://x/manifest.json","type":"cm","seconds":2630,
+             "meta":{"direct":{"720":[{"link":"https://x/v.720.m3u8","contentType":"application/x-mpegURL"}]},
+                     "audioTracks":[
+                        {"language":"en","label":"English","url":"https://x/a0.m4a","contentType":"audio/mp4"},
+                        {"language":"xx","label":"Bad","url":"javascript:alert(1)","contentType":"audio/mp4"}]}}
+        """))
+        assertEquals(listOf(AudioTrackSource("https://x/a0.m4a", "audio/mp4", "English", "en")), m.audioTracks)
+        assertTrue(MediaFrame.from(json("""{"id":"x","type":"fi","seconds":5}""")).audioTracks.isEmpty())
+    }
+
     @Test fun zeroLengthIsLive() =
         assertTrue(MediaFrame.from(json("""{"id":"x","type":"hl","seconds":0}""")).isLivestream)
 
