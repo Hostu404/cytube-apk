@@ -147,6 +147,33 @@ class ChannelStyleTest {
         assertEquals(0xFFECE3CA.toInt(), colors.forRank(0.0))
     }
 
+    @Test(timeout = 5_000)
+    fun cssMadeToBeSlowStillReadsFast() {
+        // Each of these took time growing with the square of its length
+        // through backtracking patterns; read linearly they're instant.
+        ChannelStyle.parse("/*" + "/* x ".repeat(40_000))
+        ChannelStyle.parse("@a;".repeat(60_000))
+        ChannelStyle.parse("@keyframes k {" + "a".repeat(150_000))
+        ChannelStyle.parse("[title=\"/x\"] + .channel-emote {transform: " + "scale".repeat(30_000) + "}")
+        ChannelStyle.parse("[title=\"/x\"] + .channel-emote {transform: scale(" + "1".repeat(150_000) + "x)}")
+        ChannelStyle.parse("[title=\"/x\"] + .channel-emote {animation: " + "a, ".repeat(40_000) + "}")
+    }
+
+    @Test fun emotesStayNearTheirPlaceInTheLine() {
+        val big = ChannelStyle.parse(
+            """
+            [title="/huge"] + .channel-emote {transform: scale(100) translate(5000px, -5000px);}
+            [title="/nan"] + .channel-emote {transform: scale(1e40); filter: blur(1e40px) brightness(1e40);}
+            """.trimIndent()
+        ).effects.modifiers
+        val huge = big.getValue("/huge").target.frameAt(0, 90f, 90f, 1f)
+        assertTrue(huge.scaleX <= 4f && huge.translationX <= 4 * 90f && huge.translationY >= -4 * 90f)
+        val nan = big.getValue("/nan").target.frameAt(0, 90f, 90f, 1f)
+        assertTrue(nan.scaleX.isFinite() && nan.scaleX <= 4f)
+        assertTrue(nan.blurPx <= 45f)
+        assertTrue(nan.colorMatrix == null || nan.colorMatrix!!.all { it.isFinite() })
+    }
+
     @Test fun nothingUsefulMeansNothing() {
         val empty = ChannelStyle.parse("body { color: red } }}} {{ garbage")
         assertTrue(empty.effects.modifiers.isEmpty())
