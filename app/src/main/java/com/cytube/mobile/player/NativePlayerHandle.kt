@@ -7,14 +7,19 @@ import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.FilteringMediaSource
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
@@ -37,6 +42,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     // outlives any single ExoSurface composition and is only ever used to
     // reach the process-wide singleton cache (Graph.mediaCache).
     private val appContext = context.applicationContext
+
+    init {
+        // See AudioDiagnostics: why a video plays without sound.
+        exo.addAnalyticsListener(AudioDiagnostics())
+    }
 
     @Volatile override var isReleased = false
         private set
@@ -214,14 +224,17 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
             }
             Log.i("CyTubePlayer", "native load type=${media.type} " +
-                "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex")
+                "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex " +
+                "separateAudio=${media.audioTracks.size}")
             exo.setPlaybackSpeed(1f)
             // Routed through the same cached, longer-timeout data source as
             // loadUrl() below (see cachedDataSourceFactory) rather than
             // exo.setMediaItem()'s default HTTP stack — this is the main native
             // playback path (a straight "fi" file off CyTube's own playlist),
             // exactly where a large file's buffering has to hold up.
-            val mediaSource = createMediaSourceFactory().createMediaSource(item)
+            val factory = createMediaSourceFactory()
+            lastLoad = media to qualityIndex
+            val mediaSource = withSeparateAudio(factory, factory.createMediaSource(item), media)
             // Seed the real starting position instead of always beginning at 0 —
             // see the comment on startPositionMs() below for why this matters.
             // Livestreams are excluded: their currentTime is CyTube's own
@@ -241,6 +254,79 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         }.onFailure { e ->
             Log.w("CyTubePlayer", "load failed in NativePlayerHandle: ${e.message}", e)
         }
+    }
+
+    /** What [load] last played, for reloading it after a failure. */
+    private var lastLoad: Pair<MediaFrame, Int>? = null
+
+    /** Whether the current item is playing a separate sound file. */
+    private var separateAudioInUse = false
+
+    /** The item whose separate sound file failed: played without it. */
+    private var separateAudioFailedFor: String? = null
+
+    /**
+     * Called with a playback error before it's reported. If it came from a
+     * separate sound file (see [withSeparateAudio]) — a dead link, a server
+     * that's down — the item is loaded again without it, from where it got
+     * to, and true is returned: the video plays on without its sound, as it
+     * did before the app played these files at all, rather than failing
+     * outright. An error from the video itself is left to be reported.
+     */
+    fun recoverFromSeparateAudioError(error: PlaybackException): Boolean {
+        if (isReleased || !separateAudioInUse) return false
+        val (media, quality) = lastLoad ?: return false
+        // When the error says which address failed, it has to be one of the
+        // sound files; when it doesn't (a file that couldn't be read), the
+        // retry tells: if the video was at fault it fails again and is
+        // reported then.
+        val failedUris = generateSequence(error as Throwable) { it.cause }
+            .filterIsInstance<HttpDataSource.HttpDataSourceException>()
+            .map { it.dataSpec.uri.toString() }
+            .toList()
+        if (failedUris.isNotEmpty() && failedUris.none { uri -> media.audioTracks.any { it.url == uri } }) return false
+        separateAudioFailedFor = media.id
+        val positionMs = runCatching { exo.currentPosition }.getOrDefault(0L)
+        val playing = runCatching { exo.playWhenReady }.getOrDefault(!media.paused)
+        Log.w("CyTubePlayer", "separate audio failed (${error.errorCodeName}); playing the video without it")
+        load(media.copy(currentTime = positionMs / 1000.0, paused = !playing), quality)
+        return true
+    }
+
+    /**
+     * A custom manifest can keep the sound in separate files (audioTracks)
+     * for video streams that have none: the website plays one alongside the
+     * video. Here the sound files are played in step with the video, and
+     * any sound of the video stream's own is left out, since a stream that
+     * comes with separate audio has at most a silent placeholder track —
+     * left in, the player could pick it and play nothing.
+     */
+    private fun withSeparateAudio(
+        factory: DefaultMediaSourceFactory,
+        video: MediaSource,
+        media: MediaFrame
+    ): MediaSource {
+        // Not for a live stream: a live video can't be played in step with
+        // a fixed-length sound file. Nor after the sound file failed to
+        // load for this item (see recoverFromSeparateAudioError).
+        separateAudioInUse = media.audioTracks.isNotEmpty() && !media.isLivestream &&
+            media.id != separateAudioFailedFor
+        if (!separateAudioInUse) return video
+        // The first one listed, as the website plays (it starts on the
+        // first and only changes if the viewer picks another from its menu,
+        // which the app doesn't have). Only that one is fetched.
+        val track = media.audioTracks.first()
+        val audio = factory.createMediaSource(
+            MediaItem.Builder()
+                .setUri(track.url)
+                .apply { if (track.contentType.isNotBlank()) setMimeType(track.contentType) }
+                .build()
+        )
+        val pictureOnly = FilteringMediaSource(video, setOf(C.TRACK_TYPE_VIDEO, C.TRACK_TYPE_TEXT))
+        // One player for both, on one clock: the sound can't drift from the
+        // picture (the website's player nudges its separate audio back into
+        // line every so often instead).
+        return MergingMediaSource(pictureOnly, audio)
     }
 
     /**

@@ -30,7 +30,10 @@ data class MediaFrame(
     val paused: Boolean,
     val direct: List<DirectSource>,
     val embedSrc: String?,
-    val scuri: String?
+    val scuri: String?,
+    /** A custom manifest's separate sound files (meta.audioTracks), for
+     *  video streams that carry no sound of their own; empty otherwise. */
+    val audioTracks: List<AudioTrackSource> = emptyList()
 ) {
     val isLivestream: Boolean get() = seconds <= 0
     val hasDirect: Boolean get() = direct.isNotEmpty()
@@ -78,7 +81,8 @@ data class MediaFrame(
                 paused = o.optBoolean("paused", false),
                 direct = DirectSource.parse(meta.optJSONObject("direct")),
                 embedSrc = embed?.optString("src")?.ifBlank { null },
-                scuri = meta.optString("scuri").ifBlank { null }
+                scuri = meta.optString("scuri").ifBlank { null },
+                audioTracks = AudioTrackSource.parse(meta.optJSONArray("audioTracks"))
             )
         }
 
@@ -158,6 +162,36 @@ data class DirectSource(val link: String, val contentType: String, val quality: 
                 compareBy<DirectSource> { it.contentType == "video/flv" }
                     .thenBy { ORDER.indexOf(it.quality).let { i -> if (i < 0) ORDER.size else i } }
             )
+        }
+    }
+}
+
+/**
+ * A sound file from a custom manifest. CyTube's server (custom-media.js)
+ * passes the manifest's audioTracks through as meta.audioTracks:
+ * [{url, contentType, label, language}]. They're for video sources that
+ * have no sound (or a silent placeholder track) of their own; the website
+ * plays the file alongside the video, and so does the app (see
+ * NativePlayerHandle.load).
+ */
+@Immutable
+data class AudioTrackSource(val url: String, val contentType: String, val label: String, val language: String) {
+    companion object {
+        fun parse(a: JSONArray?): List<AudioTrackSource> {
+            if (a == null) return emptyList()
+            return (0 until a.length()).mapNotNull { i ->
+                val t = a.optJSONObject(i) ?: return@mapNotNull null
+                val url = t.optString("url")
+                // The server checks these are https; checked again, since a
+                // URL from a frame is never trusted as is.
+                if (!url.startsWith("https://") && !url.startsWith("http://")) return@mapNotNull null
+                AudioTrackSource(
+                    url = url,
+                    contentType = t.optString("contentType"),
+                    label = t.optString("label"),
+                    language = t.optString("language")
+                )
+            }
         }
     }
 }
