@@ -46,14 +46,18 @@ use out of it:
 * Messages that mention your name are highlighted
 * Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
 * Tap an emote in chat to reuse it
+* Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
+* Site-wide announcements appear in chat once, not again in every channel
 * Niconico-style chat overlay across the video; tap the square to turn it on
 
 ### Channels
 
-* Browse and join channels, with favourites and recently joined
+* Browse and join channels, with favorites and recently joined
 * Add videos to the playlist from a link (phone), with **Play next** if the channel allows it. Links from your phone's share sheet work as they are: YouTube mobile, Shorts and youtu.be links, links pasted with a title around them, and short links like t.co
 * Vote in polls; results stay visible after a poll closes
 * User list, channel notice, password-protected channels and guest access
+* The user list shows names in the channel's own rank colours
+* The channel page uses CyTube's familiar Slate greys, toned down for comfortable viewing
 * Tap the channel name to refresh chat and playback
 * Opens `cytu.be/r/<channel>` links straight into the app
 
@@ -92,6 +96,8 @@ Your password is sent once, directly to your CyTube server, the same way the CyT
 
 Logging out removes the cookie from the app and from WebView. CyTube has no way for an app to end a session on the server, so a copy of the cookie stays valid until it expires or you change your password.
 
+Channels can style their page with their own CSS and scripts. The app reads a channel's CSS only for emote effects and name colours, as plain data: it never runs a channel's scripts and never loads anything the CSS links to.
+
 The full source code is in this repository for anyone to inspect.
 
 ---
@@ -102,6 +108,7 @@ The full source code is in this repository for anyone to inspect.
 * Some playback synchronisation edge cases remain.
 * Odysee videos need a tap on their play button to start, and don't follow the leader skipping to a new point until you rejoin the channel.
 * If you switch channels very quickly, CyTube may briefly refuse the connection ("Too many connections from your network"); the app waits a few seconds and connects again by itself.
+* Picture-in-picture support is still being improved.
 
 The app is actively being developed, so behaviour may change between releases.
 
