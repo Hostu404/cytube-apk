@@ -56,6 +56,9 @@ sealed interface CyTubeEvent {
     data class EmoteUpdated(val emote: Emote) : CyTubeEvent
     data class EmoteRenamed(val oldName: String, val emote: Emote) : CyTubeEvent
     data class EmoteRemoved(val name: String) : CyTubeEvent
+    /** The channel's own CSS (sent on joining and when it's edited); read
+     *  for emote modifiers and name colours — see ChannelStyle. */
+    data class ChannelCss(val css: String) : CyTubeEvent
     data class PermissionsChanged(val permissions: Permissions) : CyTubeEvent
     /** channelOpts — only the one option the app acts on so far. */
     data class VoteskipAllowed(val allowed: Boolean) : CyTubeEvent

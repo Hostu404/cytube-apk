@@ -129,6 +129,8 @@ data class ChannelUiState(
     val userCount: Int = 0,
     val messages: PersistentList<ChatMessage> = persistentListOf(),
     val emotes: EmoteSet = EmoteSet.EMPTY,
+    /** User list name colours from the channel's CSS (see ChannelStyle). */
+    val nameColors: com.cytube.mobile.net.NameColors = com.cytube.mobile.net.NameColors.NONE,
     val showEmotes: Boolean = true,
     /** Mirrors the Settings toggle (off by default, same as Settings);
      *  MainActivity reads this (via PlaybackHost) to decide whether leaving
@@ -726,13 +728,22 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 is CyTubeEvent.Emotes ->
-                    update { s -> s.copy(emotes = EmoteSet.from(event.emotes)) }
+                    update { s -> s.copy(emotes = EmoteSet.from(event.emotes, s.emotes.effects)) }
                 is CyTubeEvent.EmoteUpdated ->
                     update { s -> s.copy(emotes = s.emotes.withUpdated(event.emote)) }
                 is CyTubeEvent.EmoteRenamed ->
                     update { s -> s.copy(emotes = s.emotes.withRenamed(event.oldName, event.emote)) }
                 is CyTubeEvent.EmoteRemoved ->
                     update { s -> s.copy(emotes = s.emotes.withRemoved(event.name)) }
+                // Read off the main thread: a channel's CSS can be long.
+                is CyTubeEvent.ChannelCss -> viewModelScope.launch {
+                    val style = withContext(Dispatchers.Default) {
+                        com.cytube.mobile.net.ChannelStyle.parse(event.css)
+                    }
+                    update { s ->
+                        s.copy(emotes = s.emotes.withEffects(style.effects), nameColors = style.nameColors)
+                    }
+                }
 
                 is CyTubeEvent.MotdChanged -> update { it.copy(motd = event.html) }
 

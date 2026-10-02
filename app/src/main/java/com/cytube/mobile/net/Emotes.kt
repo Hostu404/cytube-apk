@@ -33,7 +33,11 @@ import androidx.compose.runtime.Immutable
 class EmoteSet private constructor(
     val all: List<Emote>,
     private val hashed: Map<String, Emote>,
-    private val spaced: List<Pair<Regex, Emote>>
+    private val spaced: List<Pair<Regex, Emote>>,
+    /** The channel's emote modifiers ("/reverse pepe"), from its CSS — see
+     *  ChannelStyle. Kept with the emotes they act on, so everything that
+     *  draws emotes gets them, and a change to either re-renders chat. */
+    val effects: EmoteEffects = EmoteEffects.NONE
 ) {
     /** Different for every set ever built (sets are never changed in place),
      *  so a cache can tell them apart without holding on to old ones. */
@@ -107,13 +111,17 @@ class EmoteSet private constructor(
     }
 
     fun withUpdated(emote: Emote): EmoteSet =
-        from(all.filterNot { it.name == emote.name } + emote)
+        from(all.filterNot { it.name == emote.name } + emote, effects)
 
     fun withRenamed(oldName: String, emote: Emote): EmoteSet =
-        from(all.filterNot { it.name == oldName || it.name == emote.name } + emote)
+        from(all.filterNot { it.name == oldName || it.name == emote.name } + emote, effects)
 
     fun withRemoved(name: String): EmoteSet =
-        from(all.filterNot { it.name == name })
+        from(all.filterNot { it.name == name }, effects)
+
+    /** The same emotes with the channel's modifiers [effects]. */
+    fun withEffects(effects: EmoteEffects): EmoteSet =
+        if (effects === this.effects) this else EmoteSet(all, hashed, spaced, effects)
 
     companion object {
         private val NEXT_ID = java.util.concurrent.atomic.AtomicLong(1)
@@ -122,8 +130,8 @@ class EmoteSet private constructor(
         private val TOKEN = Regex("[^\\s]+")
         private val WHITESPACE = Regex("\\s+")
 
-        fun from(emotes: List<Emote>): EmoteSet {
-            if (emotes.isEmpty()) return EMPTY
+        fun from(emotes: List<Emote>, effects: EmoteEffects = EmoteEffects.NONE): EmoteSet {
+            if (emotes.isEmpty()) return if (effects === EmoteEffects.NONE) EMPTY else EmoteSet(emptyList(), emptyMap(), emptyList(), effects)
 
             val hashed = HashMap<String, Emote>(emotes.size)
             val spaced = ArrayList<Pair<Regex, Emote>>()
@@ -143,7 +151,7 @@ class EmoteSet private constructor(
                     hashed[sanitize(e.name)] = e
                 }
             }
-            return EmoteSet(emotes, hashed, spaced)
+            return EmoteSet(emotes, hashed, spaced, effects)
         }
 
         /** Matches loadEmotes()'s sanitizeText, so map keys line up with the

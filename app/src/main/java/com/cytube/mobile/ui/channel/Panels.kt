@@ -51,6 +51,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.pointerInput
@@ -165,7 +167,9 @@ private object EmoteAspect {
 @Composable
 private fun inlineEmotes(
     urls: List<String>,
-    emoteHeight: Float = EMOTE_HEIGHT
+    emoteHeight: Float = EMOTE_HEIGHT,
+    /** Emotes drawn with a channel modifier, by id (see ChatHtml.EmoteFx). */
+    fx: Map<String, ChatHtml.EmoteFx> = emptyMap()
 ): Map<String, InlineTextContent> {
     if (urls.isEmpty()) return emptyMap()
     val context = LocalContext.current
@@ -173,9 +177,29 @@ private fun inlineEmotes(
     // Bumped when one of THIS row's own emotes first reports its real shape,
     // so only this row re-lays-out with the right width (see EmoteAspect).
     var aspectVersion by remember(urls) { mutableIntStateOf(0) }
-    return remember(urls, emoteHeight, density, aspectVersion) {
+    return remember(urls, emoteHeight, density, aspectVersion, fx) {
         val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
         urls.distinct().associateWith { url ->
+            val effect = fx[url]
+            if (effect != null) {
+                // As wide as the widest emote in it (two, stacked, for an
+                // "/overlay"); smaller for one sized down ("/tiny"), though
+                // never below half size: the channel's own sizes are made
+                // for emotes several times bigger than chat's.
+                val ratio = effect.urls.maxOf { (EmoteAspect[it] ?: 1f).coerceIn(0.2f, 6f) }
+                val size = emoteHeight * (effect.modifier.target.sizeFactor?.coerceIn(0.5f, 1f) ?: 1f)
+                return@associateWith InlineTextContent(
+                    Placeholder(
+                        width = (size * ratio).sp,
+                        height = size.sp,
+                        placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
+                    )
+                ) {
+                    FxEmote(effect, heightPx) { emoteUrl, emoteRatio ->
+                        if (EmoteAspect.record(emoteUrl, emoteRatio)) aspectVersion++
+                    }
+                }
+            }
             val ratio = (EmoteAspect[url] ?: 1f).coerceIn(0.2f, 6f)
             val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
             InlineTextContent(
@@ -1009,7 +1033,7 @@ private fun FlyingCommentItem(
         ChatHtml.render(comment.msg.html, comment.msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
     }
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
-    val inline = inlineEmotes(rendered.imageUrls, emoteHeight)
+    val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
     var measuredWidthPx by remember(comment.id) { mutableFloatStateOf(comment.widthPx) }
 
@@ -1199,7 +1223,7 @@ private fun ChatRow(
     // sitting mid-sentence stays at the compact inline size so it doesn't
     // inflate a normal chat row. See ChatHtml.Rendered.soloEmoteCount.
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
-    val inline = inlineEmotes(rendered.imageUrls, emoteHeight)
+    val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
     if (msg.isServerMessage) {
         Text(
@@ -1705,7 +1729,9 @@ fun UsersPanel(
     /** Our own name, so we don't offer to PM ourselves. */
     localName: String? = null,
     /** Start a private message to that user; null hides the option. */
-    onStartPm: ((String) -> Unit)? = null
+    onStartPm: ((String) -> Unit)? = null,
+    /** The channel's own name colours, from its CSS (see ChannelStyle). */
+    nameColors: com.cytube.mobile.net.NameColors = com.cytube.mobile.net.NameColors.NONE
 ) {
     if (users.isEmpty()) {
         EmptyPanel("No users listed.", modifier)
@@ -1729,11 +1755,19 @@ fun UsersPanel(
                             else MaterialTheme.colorScheme.primary
                         )
                 )
+                val background = MaterialTheme.colorScheme.background
+                val channelColor = remember(user.rank, nameColors, background) {
+                    nameColors.forRank(user.rank)?.let { readableOn(Color(it), background) }
+                }
                 Text(
                     user.name,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (user.afk) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.onSurface,
+                    color = when {
+                        channelColor != null && user.afk -> channelColor.copy(alpha = 0.5f)
+                        channelColor != null -> channelColor
+                        user.afk -> MaterialTheme.colorScheme.onSurfaceVariant
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
                     modifier = Modifier.weight(1f)
                 )
                 rankLabel(user.rank)?.let {
@@ -1752,6 +1786,25 @@ fun UsersPanel(
             }
         }
     }
+}
+
+/**
+ * [color] lightened just enough to read on [background] (3:1 contrast): a
+ * channel picks its colours for its own page, and a deep purple that works
+ * there can all but vanish on the app's dark grey.
+ */
+private fun readableOn(color: Color, background: Color): Color {
+    fun contrast(c: Color): Float {
+        val a = c.luminance(); val b = background.luminance()
+        return (maxOf(a, b) + 0.05f) / (minOf(a, b) + 0.05f)
+    }
+    var c = color
+    var step = 0
+    while (contrast(c) < 3f && step < 10) {
+        c = lerp(c, Color.White, 0.15f)
+        step++
+    }
+    return c
 }
 
 /** Rank thresholds follow src/user.js / Rank flags in the CyTube source. */

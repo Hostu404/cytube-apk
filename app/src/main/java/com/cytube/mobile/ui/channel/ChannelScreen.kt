@@ -1046,6 +1046,7 @@ fun ChannelScreen(
                 )
                 Panel.USERS -> UsersPanel(
                     users = state.users,
+                    nameColors = state.nameColors,
                     localName = state.localUser,
                     onStartPm = if (state.localUser != null) {
                         { name -> onStartPm(name); openPanel = null }
