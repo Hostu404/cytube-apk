@@ -70,6 +70,30 @@ private object PollVoteMemory {
     }
 }
 
+/**
+ * Site-wide announcements already shown, kept between runs. Unlike a poll,
+ * an announcement isn't tied to a channel: the server sends the current one
+ * on joining any channel, so without this it showed up again in every
+ * channel, every visit, for as long as it stayed up (often days). Once
+ * shown, it isn't shown again anywhere; a new or edited one is.
+ */
+private object AnnouncementMemory {
+    private const val PREFS = "announcements"
+    private const val KEY_SEEN = "seen"
+    private const val MAX = 20
+
+    /** True the first time [key] is seen on this device, and remembers it. */
+    @Synchronized fun firstSighting(context: android.content.Context, key: String): Boolean {
+        val id = key.hashCode().toString()
+        val prefs = context.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val seen = prefs.getString(KEY_SEEN, null)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+        if (id in seen) return false
+        val updated = (seen + id).takeLast(MAX)
+        prefs.edit().putString(KEY_SEEN, updated.joinToString(",")).apply()
+        return true
+    }
+}
+
 /** Identifies one poll in one channel, across rejoins (the server keeps its
  *  creation timestamp). */
 private fun pollVoteKey(channel: String, poll: Poll) = "$channel|${poll.timestamp}|${poll.title}"
@@ -758,13 +782,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
                 // Site-wide notices from the server's administrators, shown
                 // in chat the way the website shows them above it. The
-                // server re-sends the current one on every (re)connect, so
-                // each is shown once.
+                // server re-sends the current one on every (re)connect and
+                // in every channel, so each is shown once on this device
+                // (see AnnouncementMemory), not once per channel.
                 is CyTubeEvent.Announcement -> {
                     val key = "${event.title}|${event.html}"
                     if (key != lastAnnouncementKey) {
                         lastAnnouncementKey = key
-                        appendLocalNotice(
+                        if (AnnouncementMemory.firstSighting(getApplication<Application>(), key)) appendLocalNotice(
                             ChatMessage(
                                 username = "",
                                 html = "<strong>${escapeHtml(event.title.ifBlank { "Announcement" })}</strong>: ${event.html}",

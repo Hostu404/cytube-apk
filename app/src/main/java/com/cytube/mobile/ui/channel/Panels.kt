@@ -208,6 +208,7 @@ private fun inlineEmotes(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatPanel(
     messages: ImmutableList<ChatMessage>,
@@ -515,18 +516,23 @@ fun ChatPanel(
             // up. Scoped to just this row rather than the whole panel, right
             // where the padding needs to land: directly between this row and
             // the keyboard, with nothing else in between. Bottom padding is
-            // wider than top/horizontal (16dp vs 8/12dp): the text cursor's
-            // drag handle draws a bit below the cursor line and gets clipped
-            // at the keyboard's top edge with less. 16dp is enough room for
-            // it without reading as a gap.
+            // wider while the keyboard is up (16dp): the text cursor's drag
+            // handle draws a bit below the cursor line and gets clipped at
+            // the keyboard's top edge with less. With the keyboard down
+            // there's nothing to clip, so the row sits lower (and the field
+            // has plenty of air of its own) and the chat gets the space.
             Modifier.fillMaxWidth().imePadding()
-                .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 16.dp),
+                .padding(
+                    start = 12.dp, end = 12.dp,
+                    top = 2.dp,
+                    bottom = if (WindowInsets.isImeVisible) 16.dp else 6.dp
+                ),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (emotes.all.isNotEmpty() && showEmotePickerButton) {
                 IconButton(onClick = { showEmotePicker = true }) {
-                    Icon(Icons.Default.Mood, contentDescription = "Emotes")
+                    Icon(Icons.Default.Mood, contentDescription = "Emotes", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             OutlinedTextField(
