@@ -10,7 +10,7 @@ Watch videos in sync with others, chat in real time, add to the playlist and use
 
 ## Screenshots
 
-<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
+<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/1b8691d7-4d8f-438f-92bf-2bfd65bf58bd" />
 
 ---
 
