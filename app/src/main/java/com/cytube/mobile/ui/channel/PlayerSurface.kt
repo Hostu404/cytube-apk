@@ -64,6 +64,7 @@ import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.player.DownloadWatch
 import com.cytube.mobile.player.MediaBytes
 import com.cytube.mobile.player.NativePlayerHandle
+import com.cytube.mobile.player.PlaybackFailures
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.ResolvedStream
 import com.cytube.mobile.player.StreamResolvers
@@ -153,6 +154,11 @@ private const val PHONE_BUFFER_MAX_MB = 256
  *  under 3.0s accumulate toward quality adaptation rather than being lost. */
 private const val RECENT_STALL_WINDOW_MS = 10_000L
 private const val STALL_TRIGGER_MS = 3_000L
+
+/** Waits before each retry of the same file after a connection failure
+ *  (see PlaybackFailures.isTransient): about 14 seconds in all before the
+ *  failure is reported. */
+private val TRANSIENT_RETRY_DELAYS_MS = longArrayOf(2_000L, 4_000L, 8_000L)
 
 /** Buffering that begins this soon after a seek is attributed to the seek,
  *  not counted as a bandwidth stall — see ExoSurface's listener. */
@@ -948,9 +954,15 @@ private fun ExoSurface(
         // Every buffering spell and what started it, for the log.
         var bufferingSinceMs = 0L
         var bufferingCause = ""
+        // Same-file retries after a connection failure (see onPlayerError).
+        var transientRetries = 0
+        var retryJob: Job? = null
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 reachedReadyOnce = false
+                transientRetries = 0
+                retryJob?.cancel()
+                retryJob = null
                 lastSeekAtMs = 0L
                 stallJob?.cancel()
                 stallJob = null
@@ -1023,6 +1035,21 @@ private fun ExoSurface(
                 // Names alone are enough to tell what came back.
                 Log.w("CyTubePlayer", "Media3 error type=${handle.mediaType} code=$detail id=${handle.mediaId} " +
                     "responseHeaderNames=${http?.headerFields?.keys}")
+                // A dropped connection or a struggling server: the same file
+                // again, a few times with growing waits, before reporting it
+                // (which could then show an error for a few seconds of bad
+                // Wi-Fi). The count resets once it plays again.
+                if (PlaybackFailures.isTransient(detail) && transientRetries < TRANSIENT_RETRY_DELAYS_MS.size) {
+                    val wait = TRANSIENT_RETRY_DELAYS_MS[transientRetries++]
+                    Log.i("CyTubePlayer", "retrying the same source in ${wait}ms (attempt $transientRetries)")
+                    retryJob?.cancel()
+                    retryJob = scope.launch {
+                        delay(wait)
+                        handle.retry()
+                    }
+                    return
+                }
+                transientRetries = 0
                 currentOnFailed(detail)
             }
 
@@ -1058,6 +1085,7 @@ private fun ExoSurface(
                 }
                 when (playbackState) {
                     Player.STATE_READY -> {
+                        transientRetries = 0
                         if (bufferingSinceMs != 0L) {
                             Log.i(
                                 "CyTubeSync",
@@ -1134,6 +1162,7 @@ private fun ExoSurface(
         runCatching { exo.addListener(listener) }
         onDispose {
             stallJob?.cancel()
+            retryJob?.cancel()
             runCatching { exo.removeListener(listener) }
         }
     }
