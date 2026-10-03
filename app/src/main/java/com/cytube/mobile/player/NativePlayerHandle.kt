@@ -256,6 +256,16 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         }
     }
 
+    /**
+     * Tries the failed item again where it stopped: after an error ExoPlayer
+     * keeps the item and position, and preparing it again reopens the same
+     * file. For a connection that dropped (see PlaybackFailures.isTransient).
+     */
+    fun retry() {
+        if (isReleased) return
+        runCatching { exo.prepare() }
+    }
+
     /** What [load] last played, for reloading it after a failure. */
     private var lastLoad: Pair<MediaFrame, Int>? = null
 

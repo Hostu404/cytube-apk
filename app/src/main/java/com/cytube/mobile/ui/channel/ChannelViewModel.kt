@@ -14,6 +14,7 @@ import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
 import com.cytube.mobile.player.BandwidthEstimate
 import com.cytube.mobile.player.NativePlayerHandle
+import com.cytube.mobile.player.PlaybackFailures
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.StreamResolvers
 import com.cytube.mobile.ui.defaultSyncAccuracy
@@ -272,6 +273,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  that belonged to the previous video. */
     private var lastQualityChangeAtMs: Long = 0L
     private var qualityUpgradeAttempts: Int = 0
+    /** The current item's sources (indices into media.direct) that failed
+     *  as broken files; see tryNextSource. */
+    private val failedSourceIndices = mutableSetOf<Int>()
     /** Session-remembered preferred resolution height (e.g. 720, 480).
      *  Maintains a realistic quality ceiling across playlist items so the player
      *  doesn't re-stall on every item on a bandwidth-constrained connection. */
@@ -925,6 +929,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * decoder flushing and rebuffering loops during active playback.
      */
     private fun resolveInitialQualityIndex(media: MediaFrame): Int {
+        // Called once for each new item, which starts with none of its
+        // sources known to be broken (see tryNextSource).
+        failedSourceIndices.clear()
         if (media.direct.isEmpty()) return 0
         val preferredHeight = sessionPreferredQualityHeight ?: return bandwidthBasedStartIndex(media)
 
@@ -1526,6 +1533,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // item coming round again would retry the same dead link.
         if (m != null) StreamResolvers.invalidate(_state.value.player, m.id)
         if (_state.value.effectiveMode == CompatMode.WEB) return
+        if (tryNextSource(m, reason)) return
         val embeddable = m?.embedPlayableSrc
         if (embeddable != null && _state.value.player != MediaTypes.Player.EMBED) {
             Log.d(TAG, "playback fallback: switching to single-video view at $embeddable")
@@ -1533,6 +1541,38 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         update { it.copy(playbackOffer = reason) }
+    }
+
+    /**
+     * A custom manifest can list a quality whose file was never uploaded or
+     * has been taken down (seen live: a manifest's 720p link answered 404
+     * while its 480p and 360p were fine). The browser's player only ever
+     * tries the one it picked, but here a broken source moves on to another
+     * quality instead of giving up on the item: the next one down first,
+     * then, once everything below has failed too, the ones above (the item
+     * may have started below the top after a slow connection). Each at most
+     * once per item, so a manifest of nothing but dead links still ends in
+     * the usual error.
+     *
+     * Only for the file itself being unplayable (PlaybackFailures): a
+     * dropped connection has already been retried on the same file by the
+     * player, and moving down a quality for it would only lower the picture
+     * for the rest of the item. It's a broken file rather than a slow
+     * connection either way, so the session's quality cap is left as it was.
+     */
+    private fun tryNextSource(media: MediaFrame?, reason: String): Boolean {
+        val s = _state.value
+        if (media == null || s.player != MediaTypes.Player.NATIVE) return false
+        if (!PlaybackFailures.isBrokenSource(reason)) return false
+        val current = s.nativeQualityIndex
+        val failed = media.direct.getOrNull(current) ?: return false
+        failedSourceIndices += current
+        val next = ((current + 1)..media.direct.lastIndex).firstOrNull { it !in failedSourceIndices }
+            ?: (current - 1 downTo 0).firstOrNull { it !in failedSourceIndices }
+            ?: return false
+        Log.i(TAG, "quality: ${failed.quality}p failed ($reason); trying ${media.direct[next].quality}p")
+        reloadAtQuality(next)
+        return true
     }
 
     fun acceptWebPlayback() {
