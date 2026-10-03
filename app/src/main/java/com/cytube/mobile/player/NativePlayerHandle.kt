@@ -139,6 +139,9 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         cacheVariant: String = ""
     ) {
         if (isReleased) return
+        // Only after a failure (a fresh address for an expired one): any other
+        // load of a looked-up stream starts where the room says.
+        val keepPosition = if (runCatching { exo.playerError }.getOrNull() != null) positionToKeep(media) else null
         // Cleared first: if the load below throws, the handle must not go on
         // claiming (see hasLoaded) the PREVIOUS item's key for this new one.
         loadedKey = null
@@ -170,7 +173,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                exo.setMediaSource(mediaSource, startPositionMs(media))
+                exo.setMediaSource(mediaSource, keepPosition ?: startPositionMs(media))
             }
             exo.prepare()
             exo.playWhenReady = !media.paused
@@ -194,9 +197,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     fun load(media: MediaFrame, qualityIndex: Int = 0) {
         if (isReleased) return
-        val isQualityChange = (mediaId == media.id &&
-            exo.playbackState != Player.STATE_ENDED &&
-            exo.playbackState != Player.STATE_IDLE)
+        val keepPosition = positionToKeep(media)
         loadedKey = null   // see loadUrl
         mediaId = media.id
         mediaType = media.type
@@ -245,7 +246,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             if (media.isLivestream) {
                 exo.setMediaSource(mediaSource)
             } else {
-                val currentPosMs = if (isQualityChange && exo.currentPosition > 0) exo.currentPosition else startPositionMs(media)
+                val currentPosMs = keepPosition ?: startPositionMs(media)
                 exo.setMediaSource(mediaSource, currentPosMs)
             }
             exo.prepare()
@@ -260,10 +261,39 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * Tries the failed item again where it stopped: after an error ExoPlayer
      * keeps the item and position, and preparing it again reopens the same
      * file. For a connection that dropped (see PlaybackFailures.isTransient).
+     * [rejoinLive] is for a live stream that fell so far behind that the
+     * part it was playing is gone from the server: retrying there fails
+     * every time, so it rejoins at the live edge instead.
      */
-    fun retry() {
+    fun retry(rejoinLive: Boolean = false) {
         if (isReleased) return
-        runCatching { exo.prepare() }
+        runCatching {
+            if (rejoinLive) exo.seekToDefaultPosition()
+            exo.prepare()
+        }
+    }
+
+    /**
+     * Where the same item got to before a reload, or null for a different
+     * item or one that never started. Includes an item stopped by an error
+     * (STATE_IDLE with the error kept), so a reload after a failure picks up
+     * where it failed rather than back at the item's starting position.
+     */
+    private fun positionToKeep(media: MediaFrame): Long? {
+        if (mediaId != media.id || media.isLivestream) return null
+        val state = exo.playbackState
+        if (state == Player.STATE_ENDED) return null
+        if (state == Player.STATE_IDLE && exo.playerError == null) return null
+        return exo.currentPosition.takeIf { it > 0 }
+    }
+
+    /**
+     * Makes [hasLoaded] false for the current item, so the next load of it
+     * goes ahead: for a looked-up stream whose address expired, loaded again
+     * from a fresh one (see PlayerSurface's Media3Surface).
+     */
+    fun forgetLoad() {
+        loadedKey = null
     }
 
     /** What [load] last played, for reloading it after a failure. */

@@ -720,6 +720,41 @@ private fun Media3Surface(
     }
     var error by remember(media.id, player) { mutableStateOf<String?>(null) }
 
+    // A looked-up stream's address can stop working partway through (a
+    // YouTube one expires after a few hours, which a long stream can
+    // outlast). Before giving up on it, the stream is looked up once more
+    // and played on from the fresh address where it stopped — rather than
+    // falling back to the embedded web player for something that only
+    // needed a new link. Once per item: a second failure is reported.
+    var lookedUpAgain by remember(media.id, player) { mutableStateOf(false) }
+    val handleRef = remember { arrayOfNulls<NativePlayerHandle>(1) }
+    val exoOnHandle: (PlayerHandle) -> Unit = { h ->
+        (h as? NativePlayerHandle)?.let { handleRef[0] = it }
+        onHandle(h)
+    }
+    val scope = rememberCoroutineScope()
+    val exoOnFailed: (String) -> Unit = { reason ->
+        if (needsResolve && resolved != null && !lookedUpAgain && PlaybackFailures.isBrokenSource(reason)) {
+            lookedUpAgain = true
+            Log.i("CyTubePlayer", "stream address failed ($reason); looking it up again type=${media.type} id=${media.id}")
+            StreamResolvers.invalidate(player, media.id)
+            scope.launch {
+                StreamResolvers.resolve(player, media.id)
+                    .onSuccess { fresh ->
+                        // The handle still holds this item, stopped by the
+                        // error; forgetting that lets ExoSurface load the new
+                        // address (from where it failed, see loadUrl) when it
+                        // sees `resolved` change.
+                        handleRef[0]?.forgetLoad()
+                        resolved = fresh
+                    }
+                    .onFailure { onFailed(reason) }
+            }
+        } else {
+            onFailed(reason)
+        }
+    }
+
     // The time the lookup takes is accounted for when the item is opened:
     // planStart (ChannelViewModel.plannedStart) starts the channel's item
     // where the room is by then, and a personal pick from its own start.
@@ -742,8 +777,8 @@ private fun Media3Surface(
             resolved = resolved,
             waitingForStream = waiting,
             showControls = showControls,
-            onHandle = onHandle,
-            onFailed = onFailed,
+            onHandle = exoOnHandle,
+            onFailed = exoOnFailed,
             onFrameSnapshot = onFrameSnapshot,
             onEnded = onEnded,
             onStall = onStall,
@@ -957,12 +992,20 @@ private fun ExoSurface(
         // Same-file retries after a connection failure (see onPlayerError).
         var transientRetries = 0
         var retryJob: Job? = null
+        // Set by a playback error and cleared once it plays again: the
+        // buffering while it reconnects is the error's, not a slow
+        // connection's, and mustn't count as a stall (lower the quality).
+        var recoveringFromError = false
+        // MediaBytes.total() when the current stall began, to tell a slow
+        // connection (some data still arriving) from no connection at all.
+        var stallBytesAtStart = 0L
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 reachedReadyOnce = false
                 transientRetries = 0
                 retryJob?.cancel()
                 retryJob = null
+                recoveringFromError = false
                 lastSeekAtMs = 0L
                 stallJob?.cancel()
                 stallJob = null
@@ -1009,12 +1052,13 @@ private fun ExoSurface(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                // A custom manifest's separate sound file failing isn't a
-                // failure of the video: the handle reloads it without the
-                // sound instead (see recoverFromSeparateAudioError).
-                if (handle.recoverFromSeparateAudioError(error)) return
-                transitionFreezeFrame?.recycle()
-                transitionFreezeFrame = null
+                // Whatever stall led up to this was the failure's, not a slow
+                // connection's (see onStall), and so is the buffering while it
+                // recovers.
+                stallJob?.cancel()
+                stallJob = null
+                stallStartedAtMs = 0L
+                recoveringFromError = true
                 // ERROR_CODE_IO_BAD_HTTP_STATUS alone doesn't say WHICH status,
                 // and that's the difference between "fixable" (wrong header)
                 // and "not fixable from here" (403 on a private file). Walk the
@@ -1038,18 +1082,29 @@ private fun ExoSurface(
                 // A dropped connection or a struggling server: the same file
                 // again, a few times with growing waits, before reporting it
                 // (which could then show an error for a few seconds of bad
-                // Wi-Fi). The count resets once it plays again.
-                if (PlaybackFailures.isTransient(detail) && transientRetries < TRANSIENT_RETRY_DELAYS_MS.size) {
+                // Wi-Fi). The count resets once it plays again. Checked
+                // before the separate-audio recovery below: a connection
+                // that drops while the sound file is downloading isn't that
+                // file being broken, and dropping it would leave the rest of
+                // the video silent over a blip.
+                val transient = PlaybackFailures.isTransient(detail)
+                if (transient && transientRetries < TRANSIENT_RETRY_DELAYS_MS.size) {
                     val wait = TRANSIENT_RETRY_DELAYS_MS[transientRetries++]
                     Log.i("CyTubePlayer", "retrying the same source in ${wait}ms (attempt $transientRetries)")
                     retryJob?.cancel()
                     retryJob = scope.launch {
                         delay(wait)
-                        handle.retry()
+                        handle.retry(rejoinLive = detail == "ERROR_CODE_BEHIND_LIVE_WINDOW")
                     }
                     return
                 }
                 transientRetries = 0
+                // A custom manifest's separate sound file failing isn't a
+                // failure of the video: the handle reloads it without the
+                // sound instead (see recoverFromSeparateAudioError).
+                if (!transient && handle.recoverFromSeparateAudioError(error)) return
+                transitionFreezeFrame?.recycle()
+                transitionFreezeFrame = null
                 currentOnFailed(detail)
             }
 
@@ -1086,6 +1141,8 @@ private fun ExoSurface(
                 when (playbackState) {
                     Player.STATE_READY -> {
                         transientRetries = 0
+                        val recovered = recoveringFromError
+                        recoveringFromError = false
                         if (bufferingSinceMs != 0L) {
                             Log.i(
                                 "CyTubeSync",
@@ -1098,6 +1155,8 @@ private fun ExoSurface(
                         stallJob = null
                         if (!reachedReadyOnce) {
                             reachedReadyOnce = true
+                            stallStartedAtMs = 0L
+                        } else if (recovered) {
                             stallStartedAtMs = 0L
                         } else if (stallStartedAtMs != 0L) {
                             val now = SystemClock.elapsedRealtime()
@@ -1128,6 +1187,7 @@ private fun ExoSurface(
                             bufferingSinceMs = nowMs
                             bufferingCause = when {
                                 !reachedReadyOnce -> "opening"
+                                recoveringFromError -> "reconnecting"
                                 seekInduced -> "after a seek"
                                 videoToggleInduced -> "video back on"
                                 else -> "stall"
@@ -1136,16 +1196,28 @@ private fun ExoSurface(
                                 Log.i("CyTubeSync", "stall started; ${downloadWatch.report(knownBitrate())}")
                             }
                         }
-                        if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced && !videoToggleInduced) {
+                        if (reachedReadyOnce && stallStartedAtMs == 0L && !seekInduced && !videoToggleInduced &&
+                            !recoveringFromError
+                        ) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start
+                            stallBytesAtStart = MediaBytes.total()
                             stallJob?.cancel()
                             stallJob = scope.launch {
                                 recentStalls.removeAll { start - it.first > RECENT_STALL_WINDOW_MS }
                                 val priorStalled = recentStalls.sumOf { it.second }
                                 val threshold = (STALL_TRIGGER_MS - priorStalled).coerceIn(500L, STALL_TRIGGER_MS)
                                 delay(threshold)
-                                if (stallStartedAtMs == start) {
+                                if (stallStartedAtMs == start && MediaBytes.total() == stallBytesAtStart) {
+                                    // Not one byte since it stalled: the
+                                    // connection is down, not slow, and a
+                                    // lower quality wouldn't load either.
+                                    // Treated like an error's buffering:
+                                    // not counted when it ends.
+                                    Log.i("CyTubeSync", "stall with no data arriving: connection down, quality kept")
+                                    stallStartedAtMs = 0L
+                                    recoveringFromError = true
+                                } else if (stallStartedAtMs == start) {
                                     recentStalls.clear()
                                     // Still stalled: report what has actually
                                     // accumulated, same as the READY path.
