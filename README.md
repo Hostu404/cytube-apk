@@ -10,7 +10,7 @@ Watch videos in sync with others, chat in real time, add to the playlist and use
 
 ## Screenshots
 
-<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
+<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/1b8691d7-4d8f-438f-92bf-2bfd65bf58bd" />
 
 ---
 
@@ -108,7 +108,6 @@ The full source code is in this repository for anyone to inspect.
 * Some playback synchronisation edge cases remain.
 * Odysee videos need a tap on their play button to start, and don't follow the leader skipping to a new point until you rejoin the channel.
 * If you switch channels very quickly, CyTube may briefly refuse the connection ("Too many connections from your network"); the app waits a few seconds and connects again by itself.
-* Picture-in-picture support is still being improved.
 
 The app is actively being developed, so behaviour may change between releases.
 
