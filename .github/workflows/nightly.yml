@@ -1,0 +1,101 @@
+# Builds a signed release APK every night and publishes it as the "nightly"
+# pre-release on GitHub, replacing the previous night's. Skipped when nothing
+# has been pushed since the last nightly. Can also be run by hand from the
+# Actions tab (Nightly build → Run workflow), which always builds.
+#
+# Needs four repository secrets (Settings → Secrets and variables → Actions):
+#   KEYSTORE_BASE64    the release .jks, base64-encoded
+#   KEYSTORE_PASSWORD  its storePassword
+#   KEY_ALIAS          its keyAlias
+#   KEY_PASSWORD       its keyPassword
+# The same keystore as your normal releases, so a nightly installs over them.
+
+name: Nightly build
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC every day
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to move the nightly tag and replace its release
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Anything new since the last nightly?
+        id: changes
+        run: |
+          last=$(git rev-parse -q --verify "refs/tags/nightly^{commit}" || true)
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$last" = "$(git rev-parse HEAD)" ]; then
+            echo "No new commits since the last nightly; skipping."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-java@v4
+        if: steps.changes.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.changes.outputs.build == 'true'
+
+      - name: Install the Android platform the app compiles against
+        if: steps.changes.outputs.build == 'true'
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" > /dev/null
+
+      - name: Set up release signing
+        if: steps.changes.outputs.build == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > nightly-release.jks
+          {
+            echo "storeFile=nightly-release.jks"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+
+      - name: Build
+        if: steps.changes.outputs.build == 'true'
+        run: |
+          stamp="$(date -u +%Y%m%d).$(git rev-parse --short=7 HEAD)"
+          echo "STAMP=$stamp" >> "$GITHUB_ENV"
+          # "bash" because gradlew is committed without its executable bit.
+          bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PnightlyBuild="$stamp"
+          cp app/build/outputs/apk/release/app-release.apk "cytube-nightly-$stamp.apk"
+
+      - name: Publish the nightly release
+        if: steps.changes.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag || true
+          git tag -f nightly
+          git push -f origin refs/tags/nightly
+          gh release create nightly "cytube-nightly-$STAMP.apk" \
+            --prerelease \
+            --title "Nightly $STAMP" \
+            --notes "Built automatically from $(git rev-parse --short HEAD) on $(date -u '+%Y-%m-%d'). Untested; for trying out what's new before a proper release.
+
+          Changes since the last release: https://github.com/${{ github.repository }}/compare/$(git describe --tags --abbrev=0 --exclude nightly 2>/dev/null || echo HEAD~20)...$(git rev-parse --short HEAD)"
+
+      - name: Remove the signing files
+        if: always()
+        run: rm -f nightly-release.jks keystore.properties
