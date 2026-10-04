@@ -2,6 +2,7 @@ package com.cytube.mobile.player
 
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.MediaTypes
+import com.cytube.mobile.net.TextTrackSource
 
 /** A playable stream a resolver found for an item. */
 data class ResolvedStream(
@@ -12,7 +13,9 @@ data class ResolvedStream(
     /** Which format this is (the resolver's quality label, e.g. "360p"), so
      *  the on-disk media cache keeps different encodes of the same video
      *  apart — see NativePlayerHandle.loadUrl. */
-    val variant: String = ""
+    val variant: String = "",
+    /** Subtitles the resolver found with the stream (YouTube's captions). */
+    val textTracks: List<TextTrackSource> = emptyList()
 )
 
 /**
@@ -27,7 +30,7 @@ object StreamResolvers {
 
     /** A fresh cached stream for [id], without any network work. */
     fun cached(player: MediaTypes.Player, id: String): ResolvedStream? = when (player) {
-        MediaTypes.Player.NEWPIPE -> YouTubeResolver.cached(id)?.let { ResolvedStream(it.url, it.mimeType, variant = it.label) }
+        MediaTypes.Player.NEWPIPE -> YouTubeResolver.cached(id)?.let(::youTubeStream)
         MediaTypes.Player.GDRIVE -> GoogleDriveResolver.cached(id)?.let { driveStream(it) }
         MediaTypes.Player.STREAMABLE -> StreamableResolver.cached(id)?.let { ResolvedStream(it.url, it.mimeType, variant = it.label) }
         MediaTypes.Player.PEERTUBE -> PeerTubeResolver.cached(id)?.let { ResolvedStream(it.url, it.mimeType, variant = it.label) }
@@ -35,7 +38,7 @@ object StreamResolvers {
     }
 
     suspend fun resolve(player: MediaTypes.Player, id: String): Result<ResolvedStream> = when (player) {
-        MediaTypes.Player.NEWPIPE -> YouTubeResolver.resolve(id).map { ResolvedStream(it.url, it.mimeType, variant = it.label) }
+        MediaTypes.Player.NEWPIPE -> YouTubeResolver.resolve(id).map(::youTubeStream)
         MediaTypes.Player.GDRIVE -> GoogleDriveResolver.resolve(Graph.http, id).map { driveStream(it) }
         MediaTypes.Player.STREAMABLE -> StreamableResolver.resolve(Graph.http, id).map { ResolvedStream(it.url, it.mimeType, variant = it.label) }
         MediaTypes.Player.PEERTUBE -> PeerTubeResolver.resolve(Graph.http, id).map { ResolvedStream(it.url, it.mimeType, variant = it.label) }
@@ -63,6 +66,9 @@ object StreamResolvers {
         MediaTypes.Player.PEERTUBE -> "PeerTube"
         else -> player.name
     }
+
+    private fun youTubeStream(it: YouTubeResolver.Resolved) =
+        ResolvedStream(it.url, it.mimeType, variant = it.label, textTracks = it.textTracks)
 
     private fun driveStream(it: GoogleDriveResolver.Resolved) =
         ResolvedStream(it.url, it.mimeType, GoogleDriveResolver.STREAM_HEADERS, it.label)

@@ -947,6 +947,12 @@ private fun ExoSurface(
     // recompose when it changes; the listener just wants whatever the
     // current view is at the moment a frame renders.
     val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
+    // Captions the app draws itself (YouTube's — see ExternalCaptions) go
+    // into whichever PlayerView is current, like the player's own.
+    DisposableEffect(handle) {
+        handle.captionOutput = { cues -> playerViewRef[0]?.subtitleView?.setCues(cues) }
+        onDispose { handle.captionOutput = null }
+    }
     var ambientBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var transitionFreezeFrame by remember { mutableStateOf<Bitmap?>(null) }
     DisposableEffect(Unit) {
@@ -1092,11 +1098,6 @@ private fun ExoSurface(
                 // file being broken, and dropping it would leave the rest of
                 // the video silent over a blip.
                 val transient = PlaybackFailures.isTransient(detail)
-                // A subtitle file failing, of any kind: dropped, or tried
-                // once more if the connection dropped (see
-                // recoverFromSubtitleError). First, so a subtitle server
-                // being down never costs the video the retries below.
-                if (handle.recoverFromSubtitleError(error, transient)) return
                 if (transient && transientRetries < TRANSIENT_RETRY_DELAYS_MS.size) {
                     val wait = TRANSIENT_RETRY_DELAYS_MS[transientRetries++]
                     Log.i("CyTubePlayer", "retrying the same source in ${wait}ms (attempt $transientRetries)")
@@ -1350,7 +1351,7 @@ private fun ExoSurface(
             val fresh = handle.mediaId != media.id
             if (resolved != null) {
                 val start = if (fresh) currentPlanStart(media, resolved.url) else media
-                handle.loadUrl(start, resolved.url, resolved.mimeType, resolved.headers, resolved.variant)
+                handle.loadUrl(start, resolved.url, resolved.mimeType, resolved.headers, resolved.variant, resolved.textTracks)
             } else {
                 val url = NativePlayerHandle.sourceUrl(media, qualityIndex)
                 val start = if (fresh) currentPlanStart(media, url) else media

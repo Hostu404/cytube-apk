@@ -1341,7 +1341,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i(TAG, "background: loading next item type=${media.type} id=${media.id} (${stream.variant})")
                     handle.loadUrl(
                         plannedStart(media.copy(currentTime = backgroundStartTime(media)), stream.url),
-                        stream.url, stream.mimeType, stream.headers, stream.variant
+                        stream.url, stream.mimeType, stream.headers, stream.variant, stream.textTracks
                     )
                     playerAttachedAtMs = SystemClock.elapsedRealtime()
                     attachedMediaId = media.id

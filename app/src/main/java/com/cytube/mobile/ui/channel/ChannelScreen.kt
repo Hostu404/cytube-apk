@@ -1,5 +1,7 @@
 package com.cytube.mobile.ui.channel
 
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
+import androidx.compose.runtime.CompositionLocalProvider
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -719,83 +721,89 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
-                    // Only when the playing item has subtitles: a custom
-                    // manifest's textTracks, or ones inside the stream itself.
-                    // Left of the mute toggle.
-                    if (state.subtitles.available &&
-                        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
-                    ) {
-                        SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
-                    }
-                    // Dedicated mute toggle, immediately left of the Nico
-                    // square. Backed by PlayerHandle.setVolume (already
-                    // implemented by every native/NewPipe/GDrive handle) via
-                    // ChannelViewModel.toggleMute — purely an audio flag, so
-                    // toggling it never pauses, seeks, or otherwise disrupts
-                    // playback. EMBED/WEB have no PlayerHandle to mute (see
-                    // PlayerSurface), so the button is hidden rather than
-                    // shown greyed-out doing nothing.
-                    if (state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
-                        state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
-                    ) {
-                        IconButton(onClick = vm::toggleMute) {
-                            Icon(
-                                if (state.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                                contentDescription = if (state.muted) "Unmute" else "Mute"
+                    // Compact buttons: Material's own small size (40dp) instead
+                    // of the usual 48dp touch box, so the icons sit closer
+                    // together and leave the channel name more room, while
+                    // each is still easy to hit on its own.
+                    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides TOP_BAR_BUTTON_SIZE) {
+                        // Only when the playing item has subtitles: a custom
+                        // manifest's textTracks, or ones inside the stream itself.
+                        // Left of the mute toggle.
+                        if (state.subtitles.available &&
+                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                        ) {
+                            SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
+                        }
+                        // Dedicated mute toggle, immediately left of the Nico
+                        // square. Backed by PlayerHandle.setVolume (already
+                        // implemented by every native/NewPipe/GDrive handle) via
+                        // ChannelViewModel.toggleMute — purely an audio flag, so
+                        // toggling it never pauses, seeks, or otherwise disrupts
+                        // playback. EMBED/WEB have no PlayerHandle to mute (see
+                        // PlayerSurface), so the button is hidden rather than
+                        // shown greyed-out doing nothing.
+                        if (state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
+                            state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
+                        ) {
+                            IconButton(onClick = vm::toggleMute) {
+                                Icon(
+                                    if (state.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                    contentDescription = if (state.muted) "Unmute" else "Mute"
+                                )
+                            }
+                        }
+                        // The sole on/off switch for the Niconico overlay — see
+                        // chatOverlayOn's declaration above. Same idea as the
+                        // favourite star right next to it — filled when on,
+                        // outline when off — but drawn by hand rather than via a
+                        // Material icon: CropSquare turned out to be the crop
+                        // tool's corner-frame glyph, not a plain block, so its
+                        // "filled" theme still rendered as an outline and the
+                        // on/off states looked identical on device. A literal
+                        // square Box can't have that problem.
+                        IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
+                            val squareColor = LocalContentColor.current
+                            Box(
+                                Modifier
+                                    .size(20.dp)
+                                    .then(
+                                        if (chatOverlayOn) {
+                                            Modifier.background(squareColor)
+                                        } else {
+                                            Modifier.border(2.dp, squareColor)
+                                        }
+                                    )
+                                    .semantics {
+                                        contentDescription = if (chatOverlayOn) {
+                                            "Turn off Niconico chat overlay"
+                                        } else {
+                                            "Turn on Niconico chat overlay"
+                                        }
+                                    }
                             )
                         }
-                    }
-                    // The sole on/off switch for the Niconico overlay — see
-                    // chatOverlayOn's declaration above. Same idea as the
-                    // favourite star right next to it — filled when on,
-                    // outline when off — but drawn by hand rather than via a
-                    // Material icon: CropSquare turned out to be the crop
-                    // tool's corner-frame glyph, not a plain block, so its
-                    // "filled" theme still rendered as an outline and the
-                    // on/off states looked identical on device. A literal
-                    // square Box can't have that problem.
-                    IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
-                        val squareColor = LocalContentColor.current
-                        Box(
-                            Modifier
-                                .size(20.dp)
-                                .then(
-                                    if (chatOverlayOn) {
-                                        Modifier.background(squareColor)
-                                    } else {
-                                        Modifier.border(2.dp, squareColor)
-                                    }
-                                )
-                                .semantics {
-                                    contentDescription = if (chatOverlayOn) {
-                                        "Turn off Niconico chat overlay"
-                                    } else {
-                                        "Turn on Niconico chat overlay"
-                                    }
-                                }
-                        )
-                    }
-                    // Compatibility View drops this connection (the page has
-                    // its own), and a vote while disconnected goes nowhere.
-                    if (state.canVoteskip && !state.personalPickActive &&
-                        state.channelCurrentMedia != null &&
-                        state.connection == ConnectionState.CONNECTED &&
-                        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
-                    ) {
-                        VoteskipButton(
-                            voted = state.votedSkip,
-                            tally = state.voteskipTally?.toString(),
-                            onVote = vm::voteSkip
-                        )
-                    }
-                    IconButton(onClick = vm::toggleFavourite) {
-                        Icon(
-                            if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "Favorite"
-                        )
-                    }
-                    IconButton(onClick = { showModeSheet = true }) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "Channel options")
+                        // Compatibility View drops this connection (the page has
+                        // its own), and a vote while disconnected goes nowhere.
+                        if (state.canVoteskip && !state.personalPickActive &&
+                            state.channelCurrentMedia != null &&
+                            state.connection == ConnectionState.CONNECTED &&
+                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                        ) {
+                            VoteskipButton(
+                                voted = state.votedSkip,
+                                tally = state.voteskipTally?.toString(),
+                                onVote = vm::voteSkip
+                            )
+                        }
+                        IconButton(onClick = vm::toggleFavourite) {
+                            Icon(
+                                if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
+                                contentDescription = "Favorite"
+                            )
+                        }
+                        IconButton(onClick = { showModeSheet = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Channel options")
+                        }
                     }
                 }
             )
@@ -1273,6 +1281,10 @@ private fun MotdSection(
 /** How far the channel notice tucks up into the title row's bottom
  *  padding (see MotdSection), so it reads as part of the title. */
 private val NOTICE_PULL_UP = 4.dp
+
+/** Touch size of the top bar's action buttons: Material's compact size,
+ *  down from the usual 48dp (see the TopAppBar actions). */
+private val TOP_BAR_BUTTON_SIZE = 40.dp
 
 /** Draws this [by] higher and gives that space back below it, unlike
  *  offset(), which moves the drawing but leaves a gap where it was. */
