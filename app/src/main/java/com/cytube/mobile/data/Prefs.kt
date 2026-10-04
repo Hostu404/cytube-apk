@@ -31,9 +31,8 @@ data class Settings(
     val syncAccuracy: Double = 2.0,
     val compatMode: CompatMode = CompatMode.AUTOMATIC,
     val showEmotes: Boolean = true,
-    /** Off by default — PiP-to-fullscreen still isn't reliable enough to
-     *  turn on for everyone unasked; see the "Experimental" label on its
-     *  Settings toggle. */
+    /** Off by default: leaving the app only floats the video in a window
+     *  for people who turn this on in Settings. */
     val pipEnabled: Boolean = false,
     /** Soft glow behind the windowed player, colored from the video itself.
      *  On by default — unlike PiP this is pure decoration with nothing to

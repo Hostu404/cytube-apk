@@ -46,6 +46,7 @@ use out of it:
 * Plays DTS, Dolby Digital and Dolby TrueHD audio (common in film rips) even on devices that can't decode it themselves, using built-in FFmpeg decoders
 * For videos offered in several qualities, picks one your connection can handle, steps down if playback stalls and back up when it can
 * Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
+* Subtitles: the **CC** button turns on a video's subtitles and picks between them — a custom manifest's subtitle files, a Google Drive video's, YouTube captions, or ones inside the stream. They stay off until you turn them on, and stay on for the next video once you have
 * Fullscreen, mute toggle, and an ambient glow behind the video
 
 ### Chat
@@ -73,7 +74,7 @@ use out of it:
 
 Works with a TV remote's D-pad. From the video, press **Down**:
 
-* With "stay in sync" **on** (Settings), Down opens a full-screen chat view.
+* With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico square to reach the **CC** button.
 * With "stay in sync" **off**, Down opens a full-screen playlist with a search bar, for picking your own videos (chat isn't available in this mode).
 
 Press **Up** or **Back** to return to the video. Adding videos and private messages are phone-only.

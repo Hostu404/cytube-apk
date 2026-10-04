@@ -107,6 +107,10 @@ class ChannelIndexRepository(
                             lastModified = response.header("Last-Modified")
                         }
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // The caller went away: let that through, as coroutines
+                    // expect, rather than answer it.
+                    throw e
                 } catch (_: Exception) {
                     // Return whatever stale cache we have on network failure
                 }

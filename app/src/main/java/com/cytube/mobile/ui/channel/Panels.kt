@@ -7,9 +7,6 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -351,10 +348,9 @@ fun ChatPanel(
     // no way the user could have scrolled away from a chat that had nothing
     // in it yet, so this is always correct for a fresh join. Once that has
     // happened once, later messages go back to only following if the user
-    // is already at the bottom, same as always — this is a ChatPanel
-    // instance is recreated fresh per channel (see ChannelScreen's note on
-    // switching channels getting a new vm/state entirely), so this flag
-    // naturally resets on the next channel too.
+    // is already at the bottom, same as always. Each channel gets a fresh
+    // ChatPanel (and view model), so this flag resets on the next channel
+    // too.
     var hasJumpedToInitialBottom by remember { mutableStateOf(false) }
 
     // Keyed on the last message's own id, not messages.size: once the chat
@@ -1030,28 +1026,25 @@ private fun FlyingCommentItem(
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
+    // Its real width once laid out (the lane was picked on an estimate).
     var measuredWidthPx by remember(comment.id) { mutableFloatStateOf(comment.widthPx) }
 
     // Where it should be by now, from when it set off: the same share of its
-    // journey across whatever width this overlay has. Also the starting
-    // value, so a comment drawn afresh doesn't show for a frame at the edge.
+    // journey across whatever width this overlay has, so a comment drawn
+    // afresh (switching in or out of fullscreen, rotating) carries on where
+    // it was. It travels its real width off the left edge, not the estimate:
+    // otherwise one wider than estimated (CJK text, emoji) was removed with
+    // its end still on screen.
     fun progressNow(): Float =
         ((System.currentTimeMillis() - comment.spawnAtMs).toFloat() / comment.durationMs).coerceIn(0f, 1f)
-    fun xAt(progress: Float, width: Float): Float = screenWidthPx - progress * (screenWidthPx + width)
-    val x = remember(comment.id) { Animatable(xAt(progressNow(), comment.widthPx)) }
-    LaunchedEffect(comment.id, screenWidthPx) {
-        val width = maxOf(measuredWidthPx, comment.widthPx)
-        val progress = progressNow()
-        val remainingMs = ((1f - progress) * comment.durationMs).toLong()
-        if (remainingMs <= 0L) {
-            onFinished()
-            return@LaunchedEffect
+    var progress by remember(comment.id) { mutableFloatStateOf(progressNow()) }
+    LaunchedEffect(comment.id) {
+        while (true) {
+            val p = progressNow()
+            progress = p
+            if (p >= 1f) break
+            withFrameMillis { }
         }
-        x.snapTo(xAt(progress, width))
-        x.animateTo(
-            targetValue = -width,
-            animationSpec = tween(durationMillis = remainingMs.toInt(), easing = LinearEasing)
-        )
         onFinished()
     }
 
@@ -1063,9 +1056,13 @@ private fun FlyingCommentItem(
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Visible,
-        onTextLayout = { layout -> measuredWidthPx = layout.size.width.toFloat() },
+        // The text's own width: the laid-out size is capped at the
+        // overlay's width, and a long comment runs past it.
+        onTextLayout = { layout -> measuredWidthPx = layout.multiParagraph.maxIntrinsicWidth },
         modifier = Modifier.graphicsLayer {
-            translationX = x.value
+            // Read here, while drawing: each frame only moves the layer.
+            val width = maxOf(measuredWidthPx, comment.widthPx)
+            translationX = screenWidthPx - progress * (screenWidthPx + width)
             translationY = (laneHeightPx * comment.lane).toFloat()
         }
     )

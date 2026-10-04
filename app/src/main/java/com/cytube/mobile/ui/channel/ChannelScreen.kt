@@ -729,8 +729,9 @@ fun ChannelScreen(
                     // each is still easy to hit on its own.
                     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides TOP_BAR_BUTTON_SIZE) {
                         // Only when the playing item has subtitles: a custom
-                        // manifest's textTracks, or ones inside the stream itself.
-                        // Left of the mute toggle.
+                        // manifest's textTracks, Google Drive's, YouTube's
+                        // captions, or ones inside the stream itself. Left of
+                        // the mute toggle.
                         if (state.subtitles.available &&
                             state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
                         ) {
@@ -756,7 +757,7 @@ fun ChannelScreen(
                         }
                         // The sole on/off switch for the Niconico overlay — see
                         // chatOverlayOn's declaration above. Same idea as the
-                        // favourite star right next to it — filled when on,
+                        // favourite star further along — filled when on,
                         // outline when off — but drawn by hand rather than via a
                         // Material icon: CropSquare turned out to be the crop
                         // tool's corner-frame glyph, not a plain block, so its
@@ -1319,7 +1320,7 @@ private fun NowPlayingBar(title: String, leader: String?) {
 }
 
 /**
- * Subtitles, in the top bar beside vote-to-skip, only when the item has
+ * Subtitles, in the top bar left of the mute toggle, only when the item has
  * some. Filled when showing, outlined when not, like the star and the Nico
  * square. With one track a tap switches it on and off; with several, a tap
  * opens a menu to pick one (or Off). The choice carries on to later items.
@@ -1510,18 +1511,17 @@ private fun PanelBar(
 }
 
 /** A tab label in the home page's label style: small, spaced-out capitals
- *  in grey, with its count a step fainter; blue when [active]. */
+ *  in grey, with its count a step fainter. */
 @Composable
 private fun PanelBarButton(
     label: String,
     count: Int?,
     modifier: Modifier = Modifier,
-    active: Boolean = false,
     onClick: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
-    val labelColor = if (active) colors.primary else colors.onSurfaceVariant
-    val countColor = if (active) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.6f)
+    val labelColor = colors.onSurfaceVariant
+    val countColor = colors.onSurfaceVariant.copy(alpha = 0.6f)
     TextButton(
         onClick = onClick,
         modifier = modifier.fillMaxHeight(),

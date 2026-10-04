@@ -86,7 +86,9 @@ object YouTubeResolver {
     /** Drops a cached URL for [videoId] after playback of it failed, so the
      *  next attempt (rejoining, or the item coming round again) resolves a
      *  fresh one instead of reusing the dead link until the cache expires.
-     *  Called from ChannelViewModel.reportPlaybackFailure. */
+     *  Called through StreamResolvers.invalidate: by ChannelViewModel.
+     *  reportPlaybackFailure, and by the player surface before it looks a
+     *  failed stream up again. */
     fun invalidate(videoId: String) = cache.remove(videoId)
 
     /** The cached result for [videoId] if there's a fresh one, without any

@@ -206,7 +206,8 @@ data class AudioTrackSource(val url: String, val contentType: String, val label:
  *
  * - A custom manifest's textTracks, passed through by the server
  *   (custom-media.js) as meta.textTracks: [{url, contentType, name,
- *   default}], WebVTT only. Any marked default starts switched on.
+ *   default}], WebVTT only. Any marked default is the one turning CC on
+ *   shows first.
  * - A Google Drive video's own subtitles, as meta.gdrive_subtitles:
  *   {vid, available: [{lang, lang_original, name}]}. The server converts
  *   each to WebVTT at /gdvtt/<id>/<lang>/<name>.vtt?vid=<vid> on itself

@@ -269,6 +269,12 @@ private class EmbedPlayerHandle(
     @Volatile
     var lastCurrentTime: Double = if (initialMedia.currentTime > 0) initialMedia.currentTime else 0.0
 
+    /** elapsedRealtime() when [lastCurrentTime] was reported (or set by a
+     *  seek), or 0 before the page has said anything; see
+     *  [currentTimeSeconds]. */
+    @Volatile
+    private var lastTimeAtMs: Long = 0L
+
     override val isNative: Boolean
         get() = false
 
@@ -287,6 +293,7 @@ private class EmbedPlayerHandle(
     fun onStateReport(paused: Boolean, currentTime: Double, buffering: Boolean) {
         isPaused = paused
         lastCurrentTime = currentTime
+        lastTimeAtMs = SystemClock.elapsedRealtime()
         isBuffering = buffering
         if (!paused && !volumeAppliedWhilePlaying) {
             volumeAppliedWhilePlaying = true
@@ -318,13 +325,24 @@ private class EmbedPlayerHandle(
 
     override fun seekTo(seconds: Double) {
         lastCurrentTime = seconds
+        lastTimeAtMs = SystemClock.elapsedRealtime()
         webView?.evaluateJavascript(
             "if (window.__cytubeEmbed && window.__cytubeEmbed.seekTo) window.__cytubeEmbed.seekTo($seconds);",
             null
         )
     }
 
-    override suspend fun currentTimeSeconds(): Double = lastCurrentTime
+    /**
+     * The page reports the time once a second, so while it's playing this
+     * adds on the time since the last report: as a room's leader this is
+     * the room's clock, and a value up to a second old would hold the whole
+     * room that far back. Capped, in case the reports stop (a page that hung).
+     */
+    override suspend fun currentTimeSeconds(): Double {
+        if (isPaused || isBuffering || lastTimeAtMs == 0L) return lastCurrentTime
+        val sinceMs = (SystemClock.elapsedRealtime() - lastTimeAtMs).coerceIn(0L, MAX_TIME_ESTIMATE_MS)
+        return lastCurrentTime + sinceMs / 1000.0
+    }
 
     override fun setVolume(volume: Float) {
         this.volume = volume
@@ -340,6 +358,11 @@ private class EmbedPlayerHandle(
 
     override fun release() {
         webView = null
+    }
+
+    private companion object {
+        /** At most this far past the last report: twice its interval. */
+        const val MAX_TIME_ESTIMATE_MS = 2_000L
     }
 }
 
@@ -516,10 +539,14 @@ private fun EmbedSurface(
                                     }));
                                   } catch(e){}
                                 };
+                                // Changes of state straight away; the time
+                                // itself once a second (below), not on every
+                                // timeupdate, which fires about 4 times a
+                                // second and each report is a message for
+                                // the app's main thread to read.
                                 v.addEventListener('play', report);
                                 v.addEventListener('playing', report);
                                 v.addEventListener('pause', report);
-                                v.addEventListener('timeupdate', report);
                                 v.addEventListener('waiting', report);
                                 v.addEventListener('seeking', report);
                                 v.addEventListener('seeked', report);
@@ -947,19 +974,23 @@ private fun ExoSurface(
     // recompose when it changes; the listener just wants whatever the
     // current view is at the moment a frame renders.
     val playerViewRef = remember { arrayOfNulls<PlayerView>(1) }
-    // Captions the app draws itself (YouTube's — see ExternalCaptions) go
-    // into whichever PlayerView is current, like the player's own.
+    // Subtitle files the app draws itself (CyTube's and YouTube's — see
+    // ExternalCaptions) go into whichever PlayerView is current, like the
+    // player's own.
     DisposableEffect(handle) {
         handle.captionOutput = { cues -> playerViewRef[0]?.subtitleView?.setCues(cues) }
         onDispose { handle.captionOutput = null }
     }
     var ambientBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    // Shown over the player while a quality switch reloads. Never
+    // recycle()d, only let go: it can still be in the frame being drawn when
+    // it's replaced, and drawing a recycled bitmap crashes. (The ambient
+    // sample is only ever read, never drawn, so that one is recycled.)
     var transitionFreezeFrame by remember { mutableStateOf<Bitmap?>(null) }
     DisposableEffect(Unit) {
         onDispose {
             ambientBitmap?.recycle()
             ambientBitmap = null
-            transitionFreezeFrame?.recycle()
             transitionFreezeFrame = null
         }
     }
@@ -1046,7 +1077,6 @@ private fun ExoSurface(
             // video for the rest of that item's runtime, rather than this
             // one-shot being the only update it ever gets.
             override fun onRenderedFirstFrame() {
-                transitionFreezeFrame?.recycle()
                 transitionFreezeFrame = null
                 val snapshot = currentOnFrameSnapshot ?: return
                 val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
@@ -1113,7 +1143,6 @@ private fun ExoSurface(
                 // failure of the video: the handle reloads it without the
                 // sound instead (see recoverFromSeparateAudioError).
                 if (!transient && handle.recoverFromSeparateAudioError(error)) return
-                transitionFreezeFrame?.recycle()
                 transitionFreezeFrame = null
                 currentOnFailed(detail)
             }
@@ -1337,10 +1366,7 @@ private fun ExoSurface(
                             (textureView.width / 2).coerceAtLeast(1),
                             (textureView.height / 2).coerceAtLeast(1)
                         )
-                        if (bmp != null) {
-                            transitionFreezeFrame?.recycle()
-                            transitionFreezeFrame = bmp
-                        }
+                        if (bmp != null) transitionFreezeFrame = bmp
                     }
                 }
             }
@@ -1398,7 +1424,7 @@ private fun ExoSurface(
             }
         )
         val freezeFrame = transitionFreezeFrame
-        if (freezeFrame != null && !freezeFrame.isRecycled) {
+        if (freezeFrame != null) {
             Image(
                 bitmap = freezeFrame.asImageBitmap(),
                 contentDescription = null,

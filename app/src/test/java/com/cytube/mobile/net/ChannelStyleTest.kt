@@ -135,7 +135,8 @@ class ChannelStyleTest {
     @Test fun rulesThatLeaveTheLineAreIgnored() {
         val backdrop = mod("/backdrop")
         assertTrue(backdrop.hidden)
-        assertTrue(backdrop.target.isPlain)
+        // Drawn plainly: none of the rule's styling is kept.
+        assertEquals(EmoteStyle(), backdrop.target)
         assertFalse(backdrop.stacks)
     }
 
@@ -145,6 +146,19 @@ class ChannelStyleTest {
         assertEquals(0xFF5D3FD3.toInt(), colors.forRank(2.0))
         assertEquals(0xFFECE3CA.toInt(), colors.forRank(1.0))
         assertEquals(0xFFECE3CA.toInt(), colors.forRank(0.0))
+    }
+
+    @Test fun nameColoursInOtherNotations() {
+        val colors = ChannelStyle.parse(
+            """
+            .userlist_owner {color: #f00a}
+            .userlist_op {color: rgb(100%, 0%, 50%)}
+            .userlist_item {color: rgb(0 128 255 / 50%)}
+            """
+        ).nameColors
+        assertEquals(0xFFFF0000.toInt(), colors.forRank(10.0))
+        assertEquals(0xFFFF0080.toInt(), colors.forRank(2.0))
+        assertEquals(0xFF0080FF.toInt(), colors.forRank(1.0))
     }
 
     @Test(timeout = 5_000)

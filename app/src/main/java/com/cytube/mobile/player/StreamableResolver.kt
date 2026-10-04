@@ -31,7 +31,9 @@ object StreamableResolver {
     /** Drops a cached URL for [id] after playback of it failed, so the
      *  next attempt (rejoining, or the item coming round again) resolves a
      *  fresh one instead of reusing the dead link until the cache expires.
-     *  Called from ChannelViewModel.reportPlaybackFailure. */
+     *  Called through StreamResolvers.invalidate: by ChannelViewModel.
+     *  reportPlaybackFailure, and by the player surface before it looks a
+     *  failed stream up again. */
     fun invalidate(id: String) = cache.remove(id)
 
     /** The cached result for [id] if there's a fresh one, without any

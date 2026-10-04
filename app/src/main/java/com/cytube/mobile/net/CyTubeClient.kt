@@ -106,6 +106,11 @@ class CyTubeClient(
         if (gen != generation) return
 
         val opts = IO.Options().apply {
+            // A connection manager of its own every time. Otherwise the
+            // library keeps the first one for each server in a static map
+            // for good, and with it the reconnect listeners wired below,
+            // holding on to this client after it's done with.
+            forceNew = true
             transports = arrayOf("websocket", "polling")
             reconnection = true
             // Waits between retries double from 1 s but stop at 10 s: that's
@@ -396,6 +401,7 @@ class CyTubeClient(
         generation++
         socket?.let {
             it.off()
+            it.io().off()
             it.disconnect()
             it.close()
         }
