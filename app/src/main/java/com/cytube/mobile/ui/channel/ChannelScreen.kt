@@ -39,10 +39,14 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.outlined.ClosedCaption
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.StarBorder
+import com.cytube.mobile.player.SubtitleOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -715,6 +719,14 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
+                    // Only when the playing item has subtitles: a custom
+                    // manifest's textTracks, or ones inside the stream itself.
+                    // Left of the mute toggle.
+                    if (state.subtitles.available &&
+                        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                    ) {
+                        SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
+                    }
                     // Dedicated mute toggle, immediately left of the Nico
                     // square. Backed by PlayerHandle.setVolume (already
                     // implemented by every native/NewPipe/GDrive handle) via
@@ -1288,6 +1300,60 @@ private fun NowPlayingBar(title: String, leader: String?) {
         )
         leader?.let {
             AssistChip(onClick = {}, label = { Text("Leader: $it", maxLines = 1) })
+        }
+    }
+}
+
+/**
+ * Subtitles, in the top bar beside vote-to-skip, only when the item has
+ * some. Filled when showing, outlined when not, like the star and the Nico
+ * square. With one track a tap switches it on and off; with several, a tap
+ * opens a menu to pick one (or Off). The choice carries on to later items.
+ */
+@Composable
+private fun SubtitleButton(options: SubtitleOptions, onSelect: (Int?, String) -> Unit) {
+    var menuOpen by remember { mutableStateOf(false) }
+    // The list the menu was opened on, so what it shows and what a pick
+    // applies to are the same item's, even as the next item loads; and the
+    // menu closes when that happens rather than switching under the finger.
+    var menuOptions by remember { mutableStateOf(options) }
+    LaunchedEffect(options.key) { if (options.key != menuOptions.key) menuOpen = false }
+    Box {
+        IconButton(
+            onClick = {
+                when {
+                    options.names.size > 1 -> { menuOptions = options; menuOpen = true }
+                    options.showing -> onSelect(null, options.key)
+                    else -> onSelect(0, options.key)
+                }
+            },
+            modifier = Modifier.semantics {
+                contentDescription = when {
+                    options.names.size > 1 -> "Subtitles"
+                    options.showing -> "Turn off subtitles"
+                    else -> "Turn on subtitles"
+                }
+            }
+        ) {
+            Icon(
+                if (options.showing) Icons.Default.ClosedCaption else Icons.Outlined.ClosedCaption,
+                contentDescription = null
+            )
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            val shown = menuOptions
+            DropdownMenuItem(
+                text = { Text("Off") },
+                trailingIcon = { if (!shown.showing) Icon(Icons.Default.Check, contentDescription = null) },
+                onClick = { menuOpen = false; onSelect(null, shown.key) }
+            )
+            shown.names.forEachIndexed { i, name ->
+                DropdownMenuItem(
+                    text = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    trailingIcon = { if (shown.selected == i) Icon(Icons.Default.Check, contentDescription = null) },
+                    onClick = { menuOpen = false; onSelect(i, shown.key) }
+                )
+            }
         }
     }
 }

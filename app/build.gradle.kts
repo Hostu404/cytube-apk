@@ -155,7 +155,12 @@ dependencies {
     implementation(libs.socketio)
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
-    implementation(libs.newpipe.extractor)
+    implementation(libs.newpipe.extractor) {
+        // Rhino's javax.script adapter. NewPipe calls Rhino directly, and
+        // Android has no javax.script, so all it did was make R8 warn about
+        // a "missing service class" (javax.script.ScriptEngineFactory).
+        exclude(group = "org.mozilla", module = "rhino-engine")
+    }
 
     testImplementation(libs.junit)
     // Android's own org.json is only a stub in local unit tests (every call

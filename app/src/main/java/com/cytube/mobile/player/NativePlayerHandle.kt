@@ -5,10 +5,14 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource
@@ -46,6 +50,250 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     init {
         // See AudioDiagnostics: why a video plays without sound.
         exo.addAnalyticsListener(AudioDiagnostics())
+        exo.addListener(object : Player.Listener {
+            override fun onTracksChanged(tracks: Tracks) {
+                if (autoPickSubtitle(tracks)) return   // tracks change again with it showing
+                val options = subtitleOptions(tracks)
+                if (options != lastSubtitleOptions) {
+                    lastSubtitleOptions = options
+                    onSubtitlesChanged?.invoke(options)
+                }
+            }
+        })
+    }
+
+    // ---- subtitles ----
+
+    /**
+     * Told whenever the subtitles on offer, or the one showing, change: when
+     * an item with subtitle tracks loads, when one is switched on or off,
+     * and when an item without any loads (empty, so the CC button goes).
+     * Set by ChannelViewModel; called on the main thread.
+     */
+    var onSubtitlesChanged: ((SubtitleOptions) -> Unit)? = null
+        set(value) {
+            field = value
+            value?.invoke(lastSubtitleOptions)
+        }
+    private var lastSubtitleOptions = SubtitleOptions.NONE
+
+    /**
+     * What was last chosen with the CC button, kept from one item to the
+     * next: null until then (an item's own default subtitle shows, if the
+     * manifest marks one, as on the website), then on or off.
+     *
+     * "On" carries over to the subtitles CyTube supplies (a manifest's
+     * textTracks, Google Drive's): a later item with some starts with one
+     * showing (see autoPickSubtitle). A stream's own built-in subtitles are
+     * left to the stream's own default, so turning CC on for one manifest
+     * doesn't make an unrelated HLS stream start with its subtitles up.
+     * "Off" switches every kind off.
+     */
+    private var subtitlesWanted: Boolean? = null
+
+    /** Counts loads, so each item's subtitles get one automatic pick at
+     *  most, and so [SubtitleOptions.key] changes with every item. */
+    private var loadGeneration = 0
+    private var autoPickedGeneration = -1
+
+    /** Addresses of the CyTube-supplied subtitle tracks of what's loaded. */
+    private var suppliedSubtitleIds: Set<String> = emptySet()
+
+    /**
+     * Shows the [index]th subtitle track of [SubtitleOptions.names], or none
+     * for null, if [key] still matches the tracks on offer (a choice made
+     * from an item that has since been replaced is ignored). Remembered for
+     * the items after this one.
+     */
+    fun selectSubtitle(index: Int?, key: String) {
+        if (isReleased) return
+        if (key != lastSubtitleOptions.key) {
+            Log.i("CyTubePlayer", "subtitle choice ignored: made for an item that's no longer loaded")
+            return
+        }
+        runCatching {
+            val groups = subtitleGroups(exo.currentTracks)
+            val builder = exo.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            val group = index?.let { groups.getOrNull(it) }
+            if (group == null) {
+                subtitlesWanted = false
+                builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            } else {
+                subtitlesWanted = true
+                builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, 0))
+            }
+            exo.trackSelectionParameters = builder.build()
+        }
+    }
+
+    /**
+     * Before each load: no override left from the previous item's tracks,
+     * and whether subtitles show at all as last chosen. Either way only a
+     * default-marked track is picked by ExoPlayer itself; with CC on, one of
+     * the CyTube-supplied tracks is picked once the item's tracks are known
+     * (autoPickSubtitle).
+     */
+    private fun applySubtitlePreference(media: MediaItem) {
+        loadGeneration++
+        suppliedSubtitleIds = media.localConfiguration?.subtitleConfigurations.orEmpty()
+            .mapNotNull { it.id }.toSet()
+        val builder = exo.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setSelectUndeterminedTextLanguage(false)
+        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subtitlesWanted == false)
+        exo.trackSelectionParameters = builder.build()
+    }
+
+    /**
+     * With CC on from an earlier item: the first time this item's tracks are
+     * known, shows one of the subtitles CyTube supplied for it (its default
+     * one, else the first), if nothing is showing already. Returns whether
+     * it picked one.
+     */
+    private fun autoPickSubtitle(tracks: Tracks): Boolean {
+        if (subtitlesWanted != true || autoPickedGeneration == loadGeneration) return false
+        val groups = subtitleGroups(tracks)
+        if (groups.isEmpty()) return false
+        autoPickedGeneration = loadGeneration
+        if (groups.any { it.isSelected }) return false
+        fun supplied(g: Tracks.Group): Boolean {
+            val id = g.getTrackFormat(0).id ?: return false
+            return suppliedSubtitleIds.any { id == it || id.endsWith(":$it") }
+        }
+        val candidates = groups.filter(::supplied)
+        val pick = candidates.firstOrNull { it.getTrackFormat(0).selectionFlags and C.SELECTION_FLAG_DEFAULT != 0 }
+            ?: candidates.firstOrNull()
+            ?: return false
+        runCatching {
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                .setOverrideForType(TrackSelectionOverride(pick.mediaTrackGroup, 0))
+                .build()
+        }
+        return true
+    }
+
+    /**
+     * The text tracks the CC button offers. Leaves out the closed-caption
+     * track ExoPlayer adds to every MPEG-TS stream (plain HLS included) on
+     * the chance its video carries CEA-608 captions: it's there whether or
+     * not any exist, so it would show a CC button that does nothing. One an
+     * HLS playlist actually declares has a name or language, and stays.
+     */
+    private fun subtitleGroups(tracks: Tracks): List<Tracks.Group> =
+        tracks.groups.filter { g ->
+            g.type == C.TRACK_TYPE_TEXT && g.isSupported && !isUndeclaredCaptions(g.getTrackFormat(0))
+        }
+
+    private fun isUndeclaredCaptions(f: Format): Boolean {
+        val captions = listOf(f.sampleMimeType, f.codecs).any {
+            it == MimeTypes.APPLICATION_CEA608 || it == MimeTypes.APPLICATION_CEA708
+        }
+        val language = f.language?.takeIf { it.isNotBlank() && it != C.LANGUAGE_UNDETERMINED }
+        return captions && f.label.isNullOrBlank() && language == null
+    }
+
+    private fun subtitleOptions(tracks: Tracks): SubtitleOptions {
+        val groups = subtitleGroups(tracks)
+        if (groups.isEmpty()) return SubtitleOptions.NONE
+        val names = groups.mapIndexed { i, g ->
+            val f = g.getTrackFormat(0)
+            f.label?.takeIf { it.isNotBlank() }
+                ?: f.language?.takeIf { it.isNotBlank() && it != C.LANGUAGE_UNDETERMINED }
+                    ?.let { java.util.Locale.forLanguageTag(it).displayName }
+                ?: "Subtitles ${i + 1}"
+        }
+        return SubtitleOptions(
+            names,
+            groups.indexOfFirst { it.isSelected },
+            key = "$loadGeneration:${names.joinToString("\u001F")}"
+        )
+    }
+
+    /** The item whose subtitle files failed, and which ones: those are left
+     *  out when it's loaded again (null for all of them, when the failure
+     *  didn't say which). The rest of its subtitles still play. */
+    private var subtitlesFailedFor: String? = null
+    private var failedSubtitleUrls: Set<String>? = emptySet()
+
+    /** Whether the current item was loaded with the manifest's subtitles. */
+    private var subtitlesInUse = false
+
+    /**
+     * Called with a playback error before it's reported, like
+     * [recoverFromSeparateAudioError]: a subtitle file that's missing or
+     * can't be read (the manifest that started this listed one that was a
+     * 404) mustn't stop the video, so the item is loaded again without that
+     * file, from where it got to. The item's other subtitles stay.
+     */
+    fun recoverFromSubtitleError(error: PlaybackException, transient: Boolean): Boolean {
+        if (isReleased || !subtitlesInUse) return false
+        val media = lastLoadedMedia ?: return false
+        val reload = reloadLast ?: return false
+        val failedUris = generateSequence(error as Throwable) { it.cause }
+            .filterIsInstance<HttpDataSource.HttpDataSourceException>()
+            .map { it.dataSpec.uri.toString() }
+            .toList()
+        val failedTracks = media.textTracks.map { it.url }.filter { subtitleUrl(it) in failedUris }.toSet()
+        // A connection that dropped just as a subtitle file was loading:
+        // one more go after a moment, once per item, before giving the file
+        // up. Not for a server too slow to answer (a timeout): that one would
+        // only keep the video waiting again. Otherwise it's dropped whatever
+        // the error — far less of a loss than the video.
+        val timedOut = error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+            error.errorCode == PlaybackException.ERROR_CODE_TIMEOUT
+        if (failedTracks.isNotEmpty() && transient && !timedOut && subtitleRetriedFor != media.id) {
+            subtitleRetriedFor = media.id
+            Log.i("CyTubePlayer", "subtitle file failed (${error.errorCodeName}); trying it once more")
+            mainHandler.postDelayed({ retry() }, SUBTITLE_RETRY_DELAY_MS)
+            return true
+        }
+        val dropped: Set<String>? = when {
+            failedTracks.isNotEmpty() -> failedTracks
+            // A file that downloaded but couldn't be read says no address:
+            // all of them are dropped. If the subtitles weren't to blame the
+            // video fails again without them, and that's reported.
+            !transient && failedUris.isEmpty() && error.errorCodeName.startsWith("ERROR_CODE_PARSING") -> null
+            else -> return false
+        }
+        val earlier = if (subtitlesFailedFor == media.id) failedSubtitleUrls else emptySet()
+        subtitlesFailedFor = media.id
+        failedSubtitleUrls = if (dropped == null || earlier == null) null else earlier + dropped
+        val positionMs = runCatching { exo.currentPosition }.getOrDefault(0L)
+        val playing = runCatching { exo.playWhenReady }.getOrDefault(!media.paused)
+        Log.w("CyTubePlayer", "subtitles failed (${error.errorCodeName}); playing the video without them")
+        reload(media.copy(currentTime = positionMs / 1000.0, paused = !playing))
+        return true
+    }
+
+    /** The item whose subtitle file has had its one more go; see
+     *  recoverFromSubtitleError. */
+    private var subtitleRetriedFor: String? = null
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    /** The item last loaded, by [load] or [loadUrl], and how to load it again
+     *  the same way: for dropping a failed subtitle file. */
+    private var lastLoadedMedia: MediaFrame? = null
+    private var reloadLast: ((MediaFrame) -> Unit)? = null
+
+    /** A subtitle track's address: Google Drive's come as a path on the
+     *  CyTube server itself (see TextTrackSource.fromGoogleDrive). */
+    private fun subtitleUrl(url: String): String =
+        if (url.startsWith("/")) Graph.BASE_URL.trimEnd('/') + url else url
+
+    private fun subtitleConfigurations(media: MediaFrame): List<MediaItem.SubtitleConfiguration> {
+        val skip = if (media.id == subtitlesFailedFor) failedSubtitleUrls else emptySet()
+        val tracks = if (skip == null) emptyList() else media.textTracks.filter { it.url !in skip }
+        subtitlesInUse = tracks.isNotEmpty()
+        return tracks.map { t ->
+            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(subtitleUrl(t.url)))
+                // CyTube only accepts WebVTT here.
+                .setMimeType(MimeTypes.TEXT_VTT)
+                .setLabel(t.name)
+                .setSelectionFlags(if (t.isDefault) C.SELECTION_FLAG_DEFAULT else 0)
+                .setId(t.url)
+                .build()
+        }
     }
 
     @Volatile override var isReleased = false
@@ -109,11 +357,21 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             )
     }
 
-    private fun createMediaSourceFactory(headers: Map<String, String> = emptyMap()): DefaultMediaSourceFactory {
+    /** [item]'s subtitle files go through their own data source; see
+     *  SubtitleRoutingDataSourceFactory. */
+    private fun createMediaSourceFactory(
+        item: MediaItem,
+        headers: Map<String, String> = emptyMap()
+    ): DefaultMediaSourceFactory {
         val extractorsFactory = DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES)
-        return DefaultMediaSourceFactory(cachedDataSourceFactory(headers), extractorsFactory)
+        val subtitleUris = item.localConfiguration?.subtitleConfigurations.orEmpty()
+            .map { it.uri.toString() }.toSet()
+        return DefaultMediaSourceFactory(
+            SubtitleRoutingDataSourceFactory(cachedDataSourceFactory(headers), subtitleUris),
+            extractorsFactory
+        )
     }
 
     /**
@@ -165,8 +423,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 // this, a hardware remote's transport overlay or Alexa's own
                 // response just has a blank title to show for what's playing.
                 .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
+                // A looked-up Google Drive video's own subtitles, when
+                // CyTube's server sent them (see TextTrackSource).
+                .setSubtitleConfigurations(subtitleConfigurations(media))
                 .build()
-            val mediaSource = createMediaSourceFactory(headers).createMediaSource(item)
+            lastLoadedMedia = media
+            reloadLast = { m -> loadUrl(m, url, mimeType, headers, cacheVariant) }
+            val mediaSource = createMediaSourceFactory(item, headers).createMediaSource(item)
             exo.setPlaybackSpeed(1f)
             // Seed the real starting position instead of always beginning at 0 —
             // see the comment on startPositionMs() below for why this matters.
@@ -175,6 +438,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             } else {
                 exo.setMediaSource(mediaSource, keepPosition ?: startPositionMs(media))
             }
+            applySubtitlePreference(item)
             exo.prepare()
             exo.playWhenReady = !media.paused
             loadedKey = loadKey(media, url)
@@ -220,21 +484,25 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                     .setUri(source.link)
                     .apply { if (source.contentType.isNotBlank()) setMimeType(source.contentType) }
                     .setMediaMetadata(metadata)
+                    .setSubtitleConfigurations(subtitleConfigurations(media))
                     .build()
             } else {
-                MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata).build()
+                MediaItem.fromUri(media.id).buildUpon().setMediaMetadata(metadata)
+                    .setSubtitleConfigurations(subtitleConfigurations(media)).build()
             }
             Log.i("CyTubePlayer", "native load type=${media.type} " +
                 "source=${source?.quality ?: "id"} mime=${source?.contentType.orEmpty()} qualityIndex=$qualityIndex " +
-                "separateAudio=${media.audioTracks.size}")
+                "separateAudio=${media.audioTracks.size} subtitles=${item.localConfiguration?.subtitleConfigurations?.size ?: 0}")
             exo.setPlaybackSpeed(1f)
             // Routed through the same cached, longer-timeout data source as
             // loadUrl() below (see cachedDataSourceFactory) rather than
             // exo.setMediaItem()'s default HTTP stack — this is the main native
             // playback path (a straight "fi" file off CyTube's own playlist),
             // exactly where a large file's buffering has to hold up.
-            val factory = createMediaSourceFactory()
+            val factory = createMediaSourceFactory(item)
             lastLoad = media to qualityIndex
+            lastLoadedMedia = media
+            reloadLast = { m -> load(m, qualityIndex) }
             val mediaSource = withSeparateAudio(factory, factory.createMediaSource(item), media)
             // Seed the real starting position instead of always beginning at 0 —
             // see the comment on startPositionMs() below for why this matters.
@@ -249,6 +517,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 val currentPosMs = keepPosition ?: startPositionMs(media)
                 exo.setMediaSource(mediaSource, currentPosMs)
             }
+            applySubtitlePreference(item)
             exo.prepare()
             exo.playWhenReady = !media.paused
             loadedKey = loadKey(media, qualityIndex)
@@ -531,6 +800,10 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     }
 
     companion object {
+        /** Wait before the one more go at a subtitle file whose connection
+         *  dropped (see recoverFromSubtitleError). */
+        private const val SUBTITLE_RETRY_DELAY_MS = 2_000L
+
         /** A target this close to the end of the buffer is treated as
          *  unbuffered: EXACT still needs data past it before it can resume. */
         private const val SEEK_BUFFER_MARGIN_MS = 1_000L

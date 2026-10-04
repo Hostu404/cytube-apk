@@ -55,6 +55,44 @@ class FramesTest {
         assertTrue(MediaFrame.from(json("""{"id":"x","type":"fi","seconds":5}""")).audioTracks.isEmpty())
     }
 
+    @Test fun mediaFrameReadsSubtitleTracks() {
+        // The shape CyTube's server passes through from a manifest's textTracks.
+        val m = MediaFrame.from(json("""
+            {"id":"https://x/manifest.json","type":"cm","seconds":5141,
+             "meta":{"direct":{"480":[{"link":"https://x/v.480.mp4","contentType":"video/mp4"}]},
+                     "textTracks":[
+                        {"url":"https://x/en.vtt","contentType":"text/vtt","name":"English subtitles","default":true},
+                        {"url":"https://x/fr.vtt","contentType":"text/vtt","name":"Français"},
+                        {"url":"file:///etc/passwd","contentType":"text/vtt","name":"Bad"}]}}
+        """))
+        assertEquals(
+            listOf(
+                TextTrackSource("https://x/en.vtt", "text/vtt", "English subtitles", true),
+                TextTrackSource("https://x/fr.vtt", "text/vtt", "Français", false)
+            ),
+            m.textTracks
+        )
+        assertTrue(MediaFrame.from(json("""{"id":"x","type":"fi","seconds":5}""")).textTracks.isEmpty())
+    }
+
+    @Test fun mediaFrameReadsGoogleDriveSubtitles() {
+        // The shape mediaquery's Google Drive lookup stores and the server
+        // passes on; the files themselves come from the server's /gdvtt.
+        val m = MediaFrame.from(json("""
+            {"id":"1AbC-d_9","type":"gd","seconds":600,
+             "meta":{"gdrive_subtitles":{"vid":"a1b2c3","available":[
+                {"lang":"en","lang_original":"English","name":"SDH"},
+                {"lang":"fr","lang_original":"Français","name":""}]}}}
+        """))
+        assertEquals(
+            listOf(
+                TextTrackSource("/gdvtt/1AbC-d_9/en/SDH.vtt?vid=a1b2c3", "text/vtt", "English (SDH)", false),
+                TextTrackSource("/gdvtt/1AbC-d_9/fr/.vtt?vid=a1b2c3", "text/vtt", "Français", false)
+            ),
+            m.textTracks
+        )
+    }
+
     @Test fun zeroLengthIsLive() =
         assertTrue(MediaFrame.from(json("""{"id":"x","type":"hl","seconds":0}""")).isLivestream)
 
