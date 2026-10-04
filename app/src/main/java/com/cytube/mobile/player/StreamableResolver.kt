@@ -72,7 +72,11 @@ object StreamableResolver {
                 ?: throw IllegalStateException("No playable MP4 found for Streamable video")
 
             // Host only: the full address is a signed link to the stream.
-            Log.i(TAG, "resolved $id -> ${resolved.label} (${android.net.Uri.parse(resolved.url).host})")
+            // java.net.URI rather than android.net.Uri, which unit tests only
+            // have as a stub returning null: that made this log line throw
+            // and fail the whole lookup under test.
+            val host = runCatching { java.net.URI(resolved.url).host }.getOrNull()
+            Log.i(TAG, "resolved $id -> ${resolved.label} ($host)")
             cache.put(id, resolved)
             resolved
         }.onFailure {

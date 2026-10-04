@@ -4,13 +4,20 @@
 
 Watch videos in sync with others, chat in real time, add to the playlist and use channel emotes, as a real Android app rather than the CyTube website wrapped in a WebView. The interface adapts to phones, tablets and TVs.
 
+[![Latest release](https://img.shields.io/github/v/release/Hostu404/cytube-apk?label=latest&sort=date)](https://github.com/Hostu404/cytube-apk/releases/latest)
+[![Nightly](https://img.shields.io/github/release-date-pre/Hostu404/cytube-apk?label=nightly)](https://github.com/Hostu404/cytube-apk/releases/tag/nightly)
+[![Nightly build](https://img.shields.io/github/actions/workflow/status/Hostu404/cytube-apk/nightly.yml?label=nightly%20build)](https://github.com/Hostu404/cytube-apk/actions/workflows/nightly.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/Hostu404/cytube-apk/ci.yml?branch=main&label=tests)](https://github.com/Hostu404/cytube-apk/actions/workflows/ci.yml)
+![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
+
 [**Download the latest APK →**](https://github.com/Hostu404/CyTube-APK/releases/latest)
+&nbsp;·&nbsp; [Nightly build](https://github.com/Hostu404/cytube-apk/releases/tag/nightly) (built every night from the newest code; untested)
 
 ---
 
 ## Screenshots
 
-<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/1b8691d7-4d8f-438f-92bf-2bfd65bf58bd" />
+<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
 
 ---
 
@@ -108,6 +115,7 @@ The full source code is in this repository for anyone to inspect.
 * Some playback synchronisation edge cases remain.
 * Odysee videos need a tap on their play button to start, and don't follow the leader skipping to a new point until you rejoin the channel.
 * If you switch channels very quickly, CyTube may briefly refuse the connection ("Too many connections from your network"); the app waits a few seconds and connects again by itself.
+* Picture-in-picture support is still being improved.
 
 The app is actively being developed, so behaviour may change between releases.
 
