@@ -3,11 +3,13 @@
 # has been pushed since the last nightly. Can also be run by hand from the
 # Actions tab (Nightly build → Run workflow), which always builds.
 #
-# Needs four repository secrets (Settings → Secrets and variables → Actions):
+# Needs three repository secrets (Settings → Secrets and variables →
+# Actions → Secrets):
 #   KEYSTORE_BASE64    the release .jks, base64-encoded
 #   KEYSTORE_PASSWORD  its storePassword
-#   KEY_ALIAS          its keyAlias
 #   KEY_PASSWORD       its keyPassword
+# and one variable (same page → Variables):
+#   KEY_ALIAS          its keyAlias
 # The same keystore as your normal releases, so a nightly installs over them.
 
 name: Nightly build
@@ -64,7 +66,9 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          # A variable, not a secret: it only names the key in the file, and
+          # as a secret every "cytube" in the logs would be masked as ***.
+          KEY_ALIAS: ${{ vars.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > nightly-release.jks
@@ -80,8 +84,7 @@ jobs:
         run: |
           stamp="$(date -u +%Y%m%d).$(git rev-parse --short=7 HEAD)"
           echo "STAMP=$stamp" >> "$GITHUB_ENV"
-          # "bash" because gradlew is committed without its executable bit.
-          bash ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PnightlyBuild="$stamp"
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PnightlyBuild="$stamp"
           cp app/build/outputs/apk/release/app-release.apk "cytube-nightly-$stamp.apk"
 
       - name: Publish the nightly release
@@ -103,7 +106,12 @@ jobs:
               echo
               echo "### New since $since"
               echo
-              git log --no-merges --format='- %s (%h)' "$since..HEAD" | head -n 30
+              # Only commits that changed the app itself (app/src/main), so
+              # README, workflow and test-only commits stay out. A commit
+              # can also leave itself out with "[skip notes]" in its message.
+              changes=$(git log --no-merges --invert-grep --fixed-strings --grep='[skip notes]' \
+                --format='- %s (%h)' "$since..HEAD" -- app/src/main | head -n 30)
+              echo "${changes:-No changes to the app itself yet, only to the project around it.}"
               echo
               echo "[All changes since $since]($REPO_URL/compare/$since...$commit)"
             fi

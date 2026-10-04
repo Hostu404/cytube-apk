@@ -148,7 +148,7 @@ class SimulatedExoPlayer(
         bufStart = maxOf(bufStart, position - BACK_BUFFER)
     }
 
-    private fun nearestKeyframe(t: Double) = Math.round(t / keyframeSeconds) * keyframeSeconds.toDouble()
+    private fun nearestKeyframe(t: Double) = Math.round(t / keyframeSeconds) * keyframeSeconds
 
     override fun setPlaybackRate(rate: Float) { this.rate = rate.toDouble() }
     override fun play() { playWhenReady = true }
