@@ -7,11 +7,15 @@ import coil.ImageLoaderFactory
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
+import coil.intercept.Interceptor
 import coil.memory.MemoryCache
+import coil.request.ImageResult
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.player.BandwidthEstimate
 import com.cytube.mobile.player.YouTubeResolver
 import com.cytube.mobile.ui.isTvDevice
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import java.util.concurrent.TimeUnit
@@ -89,6 +93,7 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                     .build()
             }
             .components {
+                add(OneFetchPerImage())
                 // Animated GIF emotes in chat and emote picker (CyTube channels
                 // use a lot of them). Registered globally on the loader.
                 //
@@ -130,5 +135,38 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             .respectCacheHeaders(false)   // emote URLs are effectively immutable
             .crossfade(false)             // no animation cost in a scrolling list
             .build()
+    }
+}
+
+/**
+ * One load at a time per image address. A message's emotes start loading as
+ * it arrives (EmoteImages.prefetch), and its chat row and Niconico comment
+ * ask for the same images a moment later. Coil doesn't notice a load for the
+ * same address already under way, so each of those started its own download
+ * and showed nothing until it finished. Here a later one waits for the
+ * earlier to finish, then gets it from the cache: from memory at once when
+ * it's the same size, else from disk, never downloaded twice.
+ *
+ * Runs before Coil's own memory cache lookup, but an image nothing else is
+ * loading doesn't wait, so a cached emote still shows in the same frame.
+ */
+private class OneFetchPerImage : Interceptor {
+    private class Lock {
+        val mutex = Mutex()
+        /** Loads holding or waiting for [mutex]; gone at 0. */
+        var users = 0
+    }
+
+    private val locks = HashMap<String, Lock>()
+
+    override suspend fun intercept(chain: Interceptor.Chain): ImageResult {
+        val url = chain.request.data as? String
+        if (url == null || !url.startsWith("https://")) return chain.proceed(chain.request)
+        val lock = synchronized(locks) { locks.getOrPut(url) { Lock() }.also { it.users++ } }
+        try {
+            return lock.mutex.withLock { chain.proceed(chain.request) }
+        } finally {
+            synchronized(locks) { if (--lock.users == 0) locks.remove(url) }
+        }
     }
 }
