@@ -67,7 +67,7 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                     // which is all this is — the same request a browser's
                     // own <img> tag would have made.
                     .addNetworkInterceptor { chain ->
-                        chain.proceed(
+                        val response = chain.proceed(
                             chain.request().newBuilder()
                                 .header(
                                     "User-Agent",
@@ -76,6 +76,15 @@ class CyTubeApp : Application(), ImageLoaderFactory {
                                 )
                                 .build()
                         )
+                        // A redirect to plain http is followed over https
+                        // instead, as resolveMediaUrl does for the first
+                        // request: cleartext is blocked, so it would fail.
+                        val location = response.header("Location")
+                        if (response.isRedirect && location != null && location.startsWith("http:", ignoreCase = true)) {
+                            response.newBuilder().header("Location", "https:" + location.substring(5)).build()
+                        } else {
+                            response
+                        }
                     }
                     .build()
             }

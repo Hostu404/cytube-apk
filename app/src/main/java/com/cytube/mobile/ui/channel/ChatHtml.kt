@@ -26,9 +26,10 @@ import org.jsoup.nodes.TextNode
  *
  * Emotes are substituted here first (EmoteSet.apply — the server doesn't do
  * it), which turns them into <img> tags. Rather than fall back to the alt
- * text, each <img> becomes an inline content placeholder that ChatRow fills
- * with the real image, so emotes render in the flow of the sentence exactly
- * as they do on the site.
+ * text, each emote <img> becomes an inline content placeholder that ChatRow
+ * fills with the real image, so emotes render in the flow of the sentence
+ * exactly as they do on the site. Any other <img> (a posted picture) is shown
+ * as its link instead.
  */
 object ChatHtml {
 
@@ -413,6 +414,28 @@ object ChatHtml {
                                 }
                             }
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
+                            // Any other picture (a channel's chat filter
+                            // turning a posted image link into an <img>) is
+                            // shown as the link, never loaded.
+                            !isEmote -> {
+                                flushStack(builder, ctx)
+                                // As posted: src has http made https.
+                                val link = child.attr("src").trim()
+                                    .takeIf { it.startsWith("http:", ignoreCase = true) } ?: src
+                                when {
+                                    // Inline bytes, not a link anyone could open.
+                                    link.startsWith("data:", ignoreCase = true) -> builder.append(alt.ifBlank { "[image]" })
+                                    ctx.inHiddenSpoiler -> builder.append(link)
+                                    // Its <a> already makes it a link.
+                                    child.parents().any { it.normalName() == "a" } -> builder.append(link)
+                                    else -> {
+                                        builder.pushStringAnnotation(LINK_TAG, link)
+                                        builder.pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
+                                        builder.append(link)
+                                        builder.pop(); builder.pop()
+                                    }
+                                }
+                            }
                             // Cap applies to every image with a src,
                             // whether or not it's drawn as a picture. (With
                             // images off, emote codes aren't turned into
@@ -527,6 +550,45 @@ object ChatHtml {
         builder.pushStyle(style)
         walk(child, builder, ctx)
         builder.pop()
+    }
+
+    /**
+     * [rendered] with its links taken out (Niconico comments, which nobody
+     * can tap), and the spaces either side of each closed up.
+     */
+    fun withoutLinks(rendered: Rendered): Rendered {
+        val text = rendered.text
+        val links = text.getStringAnnotations(LINK_TAG, 0, text.length)
+        if (links.isEmpty()) return rendered
+        val cut = BooleanArray(text.length)
+        for (link in links) for (i in link.start until link.end) cut[i] = true
+        // Left in: whatever isn't a link, minus a space after another space
+        // (or at the start) once the link between them is gone.
+        val keep = BooleanArray(text.length)
+        var lastKeptIsSpace = true
+        for (i in text.indices) {
+            if (cut[i]) continue
+            val space = text[i].isWhitespace()
+            if (space && lastKeptIsSpace) continue
+            keep[i] = true
+            lastKeptIsSpace = space
+        }
+        var end = text.length
+        while (end > 0 && (!keep[end - 1] || text[end - 1].isWhitespace())) end--
+        val stripped = buildAnnotatedString {
+            var i = 0
+            while (i < end) {
+                if (!keep[i]) { i++; continue }
+                var j = i
+                while (j < end && keep[j]) j++
+                append(text.subSequence(i, j))
+                i = j
+            }
+        }
+        return rendered.copy(
+            text = stripped,
+            soloEmoteCount = soloEmoteCount(stripped, rendered.imageUrls)
+        )
     }
 
     fun linkAt(text: AnnotatedString, offset: Int): String? =
