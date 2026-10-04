@@ -33,8 +33,7 @@ jobs:
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" > /dev/null
 
       - name: Unit tests
-        # "bash" because gradlew is committed without its executable bit.
-        run: bash ./gradlew --no-daemon :app:testDebugUnitTest
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
 
       - name: Keep the test report
         if: failure()

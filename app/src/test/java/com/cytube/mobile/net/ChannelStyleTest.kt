@@ -171,7 +171,7 @@ class ChannelStyleTest {
         val nan = big.getValue("/nan").target.frameAt(0, 90f, 90f, 1f)
         assertTrue(nan.scaleX.isFinite() && nan.scaleX <= 4f)
         assertTrue(nan.blurPx <= 45f)
-        assertTrue(nan.colorMatrix == null || nan.colorMatrix!!.all { it.isFinite() })
+        assertTrue(nan.colorMatrix == null || nan.colorMatrix.all { it.isFinite() })
     }
 
     @Test fun nothingUsefulMeansNothing() {
