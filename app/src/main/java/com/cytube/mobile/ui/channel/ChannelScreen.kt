@@ -9,6 +9,18 @@ import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -39,9 +51,11 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.outlined.ClosedCaption
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.outlined.DarkMode as DarkModeOutlined
 import androidx.compose.material.icons.outlined.StarBorder
 import com.cytube.mobile.player.SubtitleOptions
 import androidx.compose.material3.*
@@ -56,6 +70,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.ExpandLess
@@ -127,7 +142,7 @@ private class AmbientGlow(initial: Color) {
 /**
  * The glow behind the windowed player: [target] faded in over
  * GLOW_FADE_MS, times a slow brightness pulse (0.85 to 1 and back, 4s each
- * way) while [pulsing]. Moved on about GLOW_STEPS_PER_SECOND times a second
+ * way) while [pulsing]. Moved on about [stepsPerSecond] times a second
  * rather than every screen frame: it's a soft gradient that changes slowly, so it
  * looks the same, but animated every frame it kept the whole screen
  * redrawing 60-120 times a second for as long as a video played. Still
@@ -136,12 +151,20 @@ private class AmbientGlow(initial: Color) {
  * drawing, so each step redraws the glow alone.
  */
 @Composable
-private fun rememberAmbientGlow(target: Color, pulsing: Boolean, active: Boolean): AmbientGlow {
+private fun rememberAmbientGlow(
+    target: Color,
+    pulsing: Boolean,
+    active: Boolean,
+    /** Fewer while it only tints lights down's dark wash, where each step's
+     *  change is too faint to see. */
+    stepsPerSecond: Int = GLOW_STEPS_PER_SECOND
+): AmbientGlow {
     // Starts at [target], as the windowed layout comes back from
     // fullscreen with a color already known: shown at once, not faded in.
     val glow = remember { AmbientGlow(target) }
     val currentTarget by rememberUpdatedState(target)
     val currentPulsing by rememberUpdatedState(pulsing)
+    val currentStepsPerSecond by rememberUpdatedState(stepsPerSecond)
     LaunchedEffect(glow, active) {
         if (!active) return@LaunchedEffect
         var from = glow.color
@@ -174,7 +197,7 @@ private fun rememberAmbientGlow(target: Color, pulsing: Boolean, active: Boolean
             }
             wasPulsing = currentPulsing
             if (fading || currentPulsing) {
-                delay(1_000L / GLOW_STEPS_PER_SECOND)
+                delay(1_000L / currentStepsPerSecond)
             } else {
                 snapshotFlow { currentTarget != to || currentPulsing }.first { it }
             }
@@ -182,6 +205,26 @@ private fun rememberAmbientGlow(target: Color, pulsing: Boolean, active: Boolean
     }
     return glow
 }
+
+/** How dark lights down makes everything around the video (black at this
+ *  opacity), how strongly the video's colour tints it, how long the fades
+ *  take (going down, coming up), and how long a tap around the video
+ *  brings the lights up for. */
+private const val LIGHTS_DIM = 0.85f
+private const val LIGHTS_TINT = 0.16f
+private const val LIGHTS_DOWN_MS = 350
+private const val LIGHTS_UP_MS = 220
+/** A touch around the video: how much of the dark it lifts, and its fades
+ *  up and back down, sine-shaped (gentler at both ends). */
+private const val LIGHTS_PEEK_LIFT = 0.5f
+private const val LIGHTS_PEEK_UP_MS = 450
+private const val LIGHTS_PEEK_DOWN_MS = 600
+private val LIGHTS_PEEK_EASING = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
+private const val LIGHTS_PEEK_MS = 4_000L
+/** How often the dark wash follows the video's colour while the lights are
+ *  down: its changes are tiny (a 16% tint under 85% black), so a few steps
+ *  a second look the same as the glow's 20 and cost far less. */
+private const val LIGHTS_TINT_STEPS_PER_SECOND = 4
 
 private const val GLOW_FADE_MS = 2_800L
 private const val GLOW_PULSE_MS = 4_000L
@@ -242,6 +285,10 @@ fun ChannelScreen(
     val nekoState = remember(chatOverlayOn) { NekoOverlayState() }
     var openPanel by remember { mutableStateOf<Panel?>(null) }
     var showModeSheet by remember { mutableStateOf(false) }
+    // Lights down: everything around the windowed video dimmed (see
+    // LIGHTS_DIM below). For this visit only: the next channel opens with
+    // the lights up.
+    var lightsDown by rememberSaveable { mutableStateOf(false) }
     var passwordDraft by remember { mutableStateOf("") }
 
     LaunchedEffect(channel) { vm.start(channel) }
@@ -285,6 +332,9 @@ fun ChannelScreen(
     val pipModeState = rememberUpdatedState(isInPictureInPicture)
 
     val ambientGlowEnabledState = rememberUpdatedState(state.ambientGlowEnabled)
+    // Lights down tints the dimmed screen with the video's colour, so its
+    // frames are sampled then too, glow setting or not.
+    val lightsDownState = rememberUpdatedState(lightsDown)
 
     // Dominant color behind the windowed player (the glow drawn behind it
     // in the windowed layout below) — a single stable holder for the whole life of this screen, not
@@ -329,12 +379,13 @@ fun ChannelScreen(
                 // per the LaunchedEffect above) so a fresh item still snaps
                 // to its own color immediately rather than easing up from
                 // the previous item's leftover one. Only when the glow is on
-                // and can be seen: never on TV, which has no windowed layout
+                // (or the lights are down, for their tint) and can be seen:
+                // never on TV, which has no windowed layout
                 // to show it in (and whose setting is hidden, so it stays at
                 // its default of on), and not in fullscreen or PiP, where
                 // it isn't drawn — sampling there was a frame grab every few
                 // seconds for nothing.
-                onFrameSnapshot = if (ambientGlowEnabledState.value && !isTv &&
+                onFrameSnapshot = if ((ambientGlowEnabledState.value || lightsDownState.value) && !isTv &&
                     !fullscreen && !pipModeState.value
                 ) {
                     { bitmap ->
@@ -590,12 +641,12 @@ fun ChannelScreen(
 
         // CyTubeChannelTheme wraps this the same way it wraps the windowed
         // Scaffold below — without it, TvChatView's ChatPanel and its Nico
-        // toggle square inherit whatever the ambient app theme happens to be
+        // toggle circle inherit whatever the ambient app theme happens to be
         // instead of the channel's own always-readable-on-dark palette, and
         // (worse) nothing here uses a Surface the way Scaffold does for the
         // windowed layout, so LocalContentColor never gets set at all and
         // falls back to its plain Compose default of black — black chat text
-        // and a black on/off square on a near-black screen. TvChatView's own
+        // and a black on/off circle on a near-black screen. TvChatView's own
         // Surface (below) is what actually fixes the content color; this is
         // what makes MaterialTheme.colorScheme resolve to the right palette
         // for it to use.
@@ -742,7 +793,125 @@ fun ChannelScreen(
     // rememberSystemBarInsets.
     val barInsets = rememberSystemBarInsets()
 
+    val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
+    // Video the windowed layout can dim around: not Compatibility View,
+    // which is the whole page rather than a video.
+    val canDimAround = !webMode && state.media != null
+
+    // Lights down stays down whatever playback does (pausing, a new video,
+    // buffering, a dropped connection): only a touch around the video brings
+    // the lights partly up, for a few seconds (peeking), or the moon button turning
+    // it off. The one exception is typing, which a touch starts: with the
+    // keyboard open, the message box being written in stays lit.
+    var peeking by remember { mutableStateOf(false) }
+    var peeks by remember { mutableIntStateOf(0) }
+    LaunchedEffect(peeks) {
+        if (peeks == 0) return@LaunchedEffect
+        peeking = true
+        delay(LIGHTS_PEEK_MS)
+        peeking = false
+    }
+    val lightsAreDown = lightsDown && canDimAround && !peeking && !WindowInsets.isImeVisible
+    val currentLightsAreDown by rememberUpdatedState(lightsAreDown)
+    // A touch around the video only lifts the dark part of the way
+    // (LIGHTS_PEEK_LIFT), and that fade, and the one back down after it, is
+    // a little slower and smoother than the moon button's.
+    var fadeFromTouch by remember { mutableStateOf(false) }
+    val dimTarget = when {
+        !lightsDown || !canDimAround || WindowInsets.isImeVisible -> 0f
+        peeking -> LIGHTS_DIM * (1f - LIGHTS_PEEK_LIFT)
+        else -> LIGHTS_DIM
+    }
+    // One short fade each way, then still: nothing animates while it sits.
+    val dimAnimation = animateFloatAsState(
+        targetValue = dimTarget,
+        animationSpec = when {
+            fadeFromTouch -> tween(
+                if (peeking) LIGHTS_PEEK_UP_MS else LIGHTS_PEEK_DOWN_MS,
+                easing = LIGHTS_PEEK_EASING
+            )
+            // The moon button: down eases in and out; up starts at full
+            // speed, so the tap is answered at once.
+            dimTarget == LIGHTS_DIM -> tween(LIGHTS_DOWN_MS, easing = FastOutSlowInEasing)
+            else -> tween(LIGHTS_UP_MS, easing = LinearOutSlowInEasing)
+        },
+        label = "lightsDown"
+    )
+    // Where the video is, in the Box around the Scaffold: left undimmed, and
+    // taps there go to the player as usual.
+    var videoInRoot by remember { mutableStateOf(Rect.Zero) }
+    var screenInRoot by remember { mutableStateOf(Offset.Zero) }
+
+    // Reserved as soon as this item is eligible at all (setting on,
+    // not Compatibility View or an embed) rather than waiting for a
+    // color — that way the margin never pops in as a sudden layout
+    // shift once the snapshot lands. Before a color exists (or when
+    // the setting is off) it's just 16dp of ordinary background,
+    // indistinguishable from normal spacing.
+    val ambientGlowActive = state.ambientGlowEnabled && !webMode &&
+        state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
+
+    // Crossfades to each new color over most of the gap between
+    // samples (see AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface:
+    // samples land every 3s, the fade takes 2.8s), so the hue is
+    // nearly always gently in motion. Combined with the sample
+    // blending in onFrameSnapshot above (which keeps any one step
+    // small), the color drifts slowly instead of visibly "updating".
+    // On top of that, while playing with a color, a slow brightness
+    // pulse: the "hypnotic" part. See rememberAmbientGlow for how
+    // it's kept cheap. Also the colour lights down tints the dimmed
+    // screen with, so it runs then too; the pulse doesn't, as the glow
+    // itself is off while the lights are down.
+    val isGlowVisuallyActive = ambientGlowActive && state.playing &&
+        ambientColor != null && !lightsAreDown
+    val glow = rememberAmbientGlow(
+        target = ambientColor ?: Color.Transparent,
+        pulsing = isGlowVisuallyActive,
+        active = ambientGlowActive || (lightsDown && canDimAround),
+        stepsPerSecond = if (lightsAreDown) LIGHTS_TINT_STEPS_PER_SECOND else GLOW_STEPS_PER_SECOND
+    )
+
     CyTubeChannelTheme {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { screenInRoot = it.positionInRoot() }
+            // Drawn over everything but the video: black, with a faint wash
+            // of the video's own colour (as if the screen lit the room).
+            // Black rather than grey, so an OLED screen switches those
+            // pixels off. The status and navigation bars' backgrounds are
+            // the app's, so they dim too; their icons are the system's.
+            .drawWithContent {
+                drawContent()
+                val dim = dimAnimation.value
+                if (dim <= 0f) return@drawWithContent
+                val tint = glow.color
+                val wash = lerp(Color.Black, tint.copy(alpha = 1f), LIGHTS_TINT * tint.alpha)
+                    .copy(alpha = dim)
+                val video = videoInRoot.translate(-screenInRoot)
+                // Not laid out yet (a frame, coming back from fullscreen):
+                // nothing rather than dimming the video with everything.
+                if (video.isEmpty) return@drawWithContent
+                // Above, below, left and right of the video.
+                drawRect(wash, Offset.Zero, Size(size.width, video.top))
+                drawRect(wash, Offset(0f, video.bottom), Size(size.width, size.height - video.bottom))
+                drawRect(wash, Offset(0f, video.top), Size(video.left, video.height))
+                drawRect(wash, Offset(video.right, video.top), Size(size.width - video.right, video.height))
+            }
+            // Touching the screen anywhere around the video brings the
+            // lights partly up for a few seconds, and does whatever it would anyway
+            // (everything stays usable while dimmed). Touching it again while
+            // they're up, scrolling chat say, keeps them up a while longer.
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (!currentLightsAreDown && !peeking) return@awaitEachGesture
+                    if (videoInRoot.translate(-screenInRoot).contains(down.position)) return@awaitEachGesture
+                    fadeFromTouch = true
+                    peeks++
+                }
+            }
+    ) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.background,
@@ -793,6 +962,22 @@ fun ChannelScreen(
                     // together and leave the channel name more room, while
                     // each is still easy to hit on its own.
                     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides TOP_BAR_BUTTON_SIZE) {
+                        // Leftmost, with the CC button: the two that only show
+                        // up once the channel or the video says so, so their
+                        // arrival moves nothing else along. Compatibility View
+                        // drops this connection (the page has its own), and a
+                        // vote while disconnected goes nowhere.
+                        if (state.canVoteskip && !state.personalPickActive &&
+                            state.channelCurrentMedia != null &&
+                            state.connection == ConnectionState.CONNECTED &&
+                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                        ) {
+                            VoteskipButton(
+                                voted = state.votedSkip,
+                                tally = state.voteskipTally?.toString(),
+                                onVote = vm::voteSkip
+                            )
+                        }
                         // Only when the playing item has subtitles: a custom
                         // manifest's textTracks, Google Drive's, YouTube's
                         // captions, or ones inside the stream itself. Left of
@@ -803,7 +988,7 @@ fun ChannelScreen(
                             SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
                         }
                         // Dedicated mute toggle, immediately left of the Nico
-                        // square. Backed by PlayerHandle.setVolume (already
+                        // circle. Backed by PlayerHandle.setVolume (already
                         // implemented by every native/NewPipe/GDrive handle) via
                         // ChannelViewModel.toggleMute — purely an audio flag, so
                         // toggling it never pauses, seeks, or otherwise disrupts
@@ -821,24 +1006,21 @@ fun ChannelScreen(
                             }
                         }
                         // The sole on/off switch for the Niconico overlay — see
-                        // chatOverlayOn's declaration above. Same idea as the
-                        // favourite star further along — filled when on,
-                        // outline when off — but drawn by hand rather than via a
-                        // Material icon: CropSquare turned out to be the crop
-                        // tool's corner-frame glyph, not a plain block, so its
-                        // "filled" theme still rendered as an outline and the
-                        // on/off states looked identical on device. A literal
-                        // square Box can't have that problem.
+                        // chatOverlayOn's declaration above. A small circle,
+                        // filled when on and an outline when off, like the
+                        // moon and star after it (earth, moon and stars).
+                        // Drawn by hand rather than with a Material icon, so
+                        // the two states can't end up looking the same.
                         IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
-                            val squareColor = LocalContentColor.current
+                            val circleColor = LocalContentColor.current
                             Box(
                                 Modifier
-                                    .size(20.dp)
+                                    .size(12.dp)
                                     .then(
                                         if (chatOverlayOn) {
-                                            Modifier.background(squareColor)
+                                            Modifier.background(circleColor, CircleShape)
                                         } else {
-                                            Modifier.border(2.dp, squareColor)
+                                            Modifier.border(1.5.dp, circleColor, CircleShape)
                                         }
                                     )
                                     .semantics {
@@ -850,18 +1032,27 @@ fun ChannelScreen(
                                     }
                             )
                         }
-                        // Compatibility View drops this connection (the page has
-                        // its own), and a vote while disconnected goes nowhere.
-                        if (state.canVoteskip && !state.personalPickActive &&
-                            state.channelCurrentMedia != null &&
-                            state.connection == ConnectionState.CONNECTED &&
-                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
-                        ) {
-                            VoteskipButton(
-                                voted = state.votedSkip,
-                                tally = state.voteskipTally?.toString(),
-                                onVote = vm::voteSkip
-                            )
+                        // Lights down, left of the star: filled while on,
+                        // like the star. There from the moment the channel
+                        // opens (it dims once there is a video), so it doesn't
+                        // pop in; not in Compatibility View, which has no
+                        // video of its own to dim around.
+                        if (!webMode) {
+                            IconButton(onClick = {
+                                lightsDown = !lightsDown
+                                // The touch on this button also counted as
+                                // bringing the lights up for a few seconds
+                                // (see the Box around the Scaffold); cancelled,
+                                // so they fade down or up at once, every tap.
+                                peeks = 0
+                                fadeFromTouch = false
+                                peeking = false
+                            }) {
+                                Icon(
+                                    if (lightsDown) Icons.Filled.DarkMode else Icons.Outlined.DarkModeOutlined,
+                                    contentDescription = if (lightsDown) "Lights up" else "Lights down"
+                                )
+                            }
                         }
                         IconButton(onClick = vm::toggleFavourite) {
                             Icon(
@@ -924,8 +1115,6 @@ fun ChannelScreen(
         // would restart the video.
         Column(Modifier.fillMaxSize().padding(padding)) {
 
-            val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
-
             // The fullscreen toggle fades out after a moment idle
             // (CONTROLS_AUTO_HIDE_MS) and back in the instant the player is
             // touched, like the true-fullscreen controls below — left up, a
@@ -938,37 +1127,14 @@ fun ChannelScreen(
                 }
             }
 
-            // Reserved as soon as this item is eligible at all (setting on,
-            // not Compatibility View or an embed) rather than waiting for a
-            // color — that way the margin never pops in as a sudden layout
-            // shift once the snapshot lands. Before a color exists (or when
-            // the setting is off) it's just 16dp of ordinary background,
-            // indistinguishable from normal spacing.
-            val ambientGlowActive = state.ambientGlowEnabled && !webMode &&
-                state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
-
-            // Crossfades to each new color over most of the gap between
-            // samples (see AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface:
-            // samples land every 3s, the fade takes 2.8s), so the hue is
-            // nearly always gently in motion. Combined with the sample
-            // blending in onFrameSnapshot above (which keeps any one step
-            // small), the color drifts slowly instead of visibly "updating".
-            // On top of that, while playing with a color, a slow brightness
-            // pulse: the "hypnotic" part. See rememberAmbientGlow for how
-            // it's kept cheap.
-            val isGlowVisuallyActive = ambientGlowActive && state.playing &&
-                ambientColor != null
-            val glow = rememberAmbientGlow(
-                target = ambientColor ?: Color.Transparent,
-                pulsing = isGlowVisuallyActive,
-                active = ambientGlowActive
-            )
-
             Box(
                 Modifier.fillMaxWidth()
                     .then(
                         if (ambientGlowActive) Modifier.drawBehind {
-                            val color = glow.color
+                            // Fades out as the lights go down: it would
+                            // light up the very area being darkened.
+                            val lit = 1f - dimAnimation.value / LIGHTS_DIM
+                            val color = glow.color.let { it.copy(alpha = it.alpha * lit) }
                             if (color.alpha <= 0f) return@drawBehind
                             val pulse = glow.pulse
                             // Bottom-only: color hangs below the video and
@@ -994,6 +1160,7 @@ fun ChannelScreen(
                         if (webMode) Modifier.weight(1f)
                         else Modifier.aspectRatio(16f / 9f)
                     )
+                    .onGloballyPositioned { videoInRoot = it.boundsInRoot() }
                     .background(Color.Black)
                     .then(
                         if (webMode) Modifier else Modifier.pointerInput(Unit) {
@@ -1067,7 +1234,10 @@ fun ChannelScreen(
             }
 
             // In portrait the chat gets whatever is left below the video, which
-            // is the panel people actually keep open.
+            // is the panel people actually keep open. Its animated emotes hold
+            // still while the lights are down: behind the dark layer, moving
+            // them would only cost battery.
+            CompositionLocalProvider(LocalEmotesStill provides lightsAreDown) {
             ChatPanel(
                 messages = state.messages,
                 canSend = state.connection == ConnectionState.CONNECTED,
@@ -1081,7 +1251,9 @@ fun ChannelScreen(
                 onCancelPm = onCancelPm,
                 modifier = Modifier.weight(1f)
             )
+            }
         }
+    }
     }
 
     // ---- overlays ----
@@ -1363,7 +1535,7 @@ private fun NowPlayingBar(title: String, leader: String?) {
 /**
  * Subtitles, in the top bar left of the mute toggle, only when the item has
  * some. Filled when showing, outlined when not, like the star and the Nico
- * square. With one track a tap switches it on and off; with several, a tap
+ * circle. With one track a tap switches it on and off; with several, a tap
  * opens a menu to pick one (or Off). The choice carries on to later items.
  */
 @Composable
@@ -1458,7 +1630,7 @@ private fun SubtitleMenu(
 }
 
 /**
- * Vote to skip, in the top bar between the Niconico square and the star.
+ * Vote to skip, leftmost in the top bar.
  * Only there when the channel allows it and our rank may vote (and not on a
  * personal pick — the vote is on the channel's item). Once voted it stays,
  * dimmed, until the next video: the server counts one vote per video. While
@@ -1686,7 +1858,7 @@ private fun backendNote(state: ChannelUiState): String {
  * plumbing added on top: filling the screen (a real view transition, not a
  * panel next to a still-visible video), treating Up as "back to fullscreen
  * video" from anywhere inside it via onPreviewKeyEvent, and a focusable,
- * D-pad-reachable stand-in for the phone's touch-only Nico square button in
+ * D-pad-reachable stand-in for the phone's touch-only Nico circle button in
  * its TopAppBar — same on/off visual, same behavior (toggles the shared
  * chatOverlayOn state hoisted in ChannelScreen), just reachable without a
  * touchscreen.
@@ -1737,7 +1909,7 @@ private fun TvChatView(
     // onBackground). A raw background() modifier only paints a color, it
     // doesn't touch LocalContentColor, which otherwise stays at Compose's
     // default of plain black — the cause of the chat text and the Nico
-    // square both rendering dark-on-dark here.
+    // circle both rendering dark-on-dark here.
     Surface(
         modifier = modifier,
         color = MaterialTheme.colorScheme.background,
@@ -1807,7 +1979,7 @@ private fun TvChatView(
                     onDown = { runCatching { chatInputFocusRequester.requestFocus() } }
                 )
             }
-            // Explicit, not LocalContentColor — this square being legible in
+            // Explicit, not LocalContentColor — this circle being legible in
             // both its on/off states is the whole point of it, so it doesn't
             // depend on ambient content color resolving correctly.
             val squareColor = MaterialTheme.colorScheme.onBackground
@@ -1864,14 +2036,15 @@ private fun TvChatView(
                         }
                     }
             ) {
+                // A circle, as on the phone.
                 Box(
                     Modifier
-                        .size(20.dp)
+                        .size(12.dp)
                         .then(
                             if (chatOverlayOn) {
-                                Modifier.background(squareColor)
+                                Modifier.background(squareColor, CircleShape)
                             } else {
-                                Modifier.border(2.dp, squareColor)
+                                Modifier.border(1.5.dp, squareColor, CircleShape)
                             }
                         )
                 )

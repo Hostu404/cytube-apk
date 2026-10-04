@@ -7,7 +7,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.withFrameMillis
@@ -60,11 +63,14 @@ private fun StyledEmote(
     onAspect: (String, Float) -> Unit
 ) {
     val context = LocalContext.current
+    var drawable by remember { mutableStateOf<android.graphics.drawable.Drawable?>(null) }
+    HoldStill(drawable)
     val painter = rememberAsyncImagePainter(
         // The same request as a plain emote's, so one cached copy serves both.
         model = EmoteImages.request(context, url, heightPx),
         imageLoader = context.imageLoader,
         onSuccess = { state ->
+            drawable = state.result.drawable
             val size = state.painter.intrinsicSize
             if (size.width > 0f && size.height > 0f && size.width.isFinite() && size.height.isFinite()) {
                 onAspect(url, size.width / size.height)
@@ -83,8 +89,11 @@ private fun StyledEmote(
     val startedAt = rememberSaveable { System.currentTimeMillis() }
     val now = remember { mutableLongStateOf(System.currentTimeMillis()) }
     val anim = style.animation
+    // Held still (no ticks) while LocalEmotesStill, like a GIF: see HoldStill.
+    val holdStill = LocalEmotesStill.current
     if (anim != null) {
-        LaunchedEffect(anim) {
+        LaunchedEffect(anim, holdStill) {
+            if (holdStill) return@LaunchedEffect
             val endsAt = anim.endsAtMs
             while (true) {
                 withFrameMillis { }

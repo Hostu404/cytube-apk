@@ -1,7 +1,12 @@
 package com.cytube.mobile.ui.channel
 
 import android.content.Context
+import android.graphics.drawable.Animatable
+import android.graphics.drawable.Drawable
 import android.util.TypedValue
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import coil.imageLoader
 import coil.request.ImageRequest
 import coil.size.Dimension
@@ -14,6 +19,24 @@ import kotlin.math.roundToInt
  * the prefetch when its message arrives ask the same way: Coil's memory
  * cache only hands back an image for a request it fits.
  */
+/** True where emotes should hold still: the chat while the lights are down
+ *  (ChannelScreen), where they're behind a dark layer and animating them
+ *  would only cost battery. See [HoldStill]. */
+internal val LocalEmotesStill = compositionLocalOf { false }
+
+/**
+ * Stops [drawable]'s animation (a GIF or animated WebP emote) on its current
+ * frame while [LocalEmotesStill] says so, and starts it again after.
+ */
+@Composable
+internal fun HoldStill(drawable: Drawable?) {
+    val still = LocalEmotesStill.current
+    LaunchedEffect(drawable, still) {
+        val animation = drawable as? Animatable ?: return@LaunchedEffect
+        if (still) animation.stop() else if (!animation.isRunning) animation.start()
+    }
+}
+
 internal object EmoteImages {
 
     /** A chat emote's height mid-sentence. */
