@@ -121,7 +121,7 @@ private fun formatTime(timestamp: Long): String =
  * the practical ceiling before rows start growing — used for an emote sitting
  * inline in a sentence, where a taller placeholder inflates that whole row.
  */
-private const val EMOTE_HEIGHT = 28f
+private const val EMOTE_HEIGHT = EmoteImages.INLINE_HEIGHT_SP
 
 /**
  * A message that's nothing but emotes (see ChatHtml.Rendered.soloEmoteCount)
@@ -201,7 +201,6 @@ private fun inlineEmotes(
                 }
             }
             val ratio = (EmoteAspect[url] ?: 1f).coerceIn(0.2f, 6f)
-            val widthPx = (heightPx * ratio).toInt().coerceAtLeast(1)
             InlineTextContent(
                 Placeholder(
                     width = (emoteHeight * ratio).sp,
@@ -210,11 +209,7 @@ private fun inlineEmotes(
                 )
             ) {
                 AsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(url)
-                        .size(Size(widthPx, heightPx))
-                        .precision(Precision.EXACT)
-                        .build(),
+                    model = EmoteImages.request(context, url, heightPx),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize(),
