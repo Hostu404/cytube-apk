@@ -175,10 +175,10 @@ object ChatHtml {
          *  of the cache key, so a mismatch makes every prewarm a wasted
          *  parse and every row a fresh one on the main thread. */
         revealSpoilers: Boolean = false
-    ) {
+    ): Rendered {
         // Pre-parse using Unspecified link color; ChatHtml.render will hit cache
         // or fast path with zero contention on UI layout passes.
-        render(
+        return render(
             raw = raw,
             greentext = greentext,
             linkColor = Color.Unspecified,

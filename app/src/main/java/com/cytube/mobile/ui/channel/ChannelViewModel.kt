@@ -2017,13 +2017,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             for (item in batch) {
                 if (item !is ChatInboxItem.Message) continue
                 runCatching {
-                    ChatHtml.prewarm(
+                    val rendered = ChatHtml.prewarm(
                         raw = item.message.html,
                         greentext = item.message.addClass == "greentext",
                         showImages = s.showEmotes,
                         emotes = s.emotes,
                         revealSpoilers = isTv
                     )
+                    // Its emotes start loading now, not when its row is
+                    // first drawn (see EmoteImages).
+                    if (s.showEmotes) EmoteImages.prefetch(getApplication(), rendered.imageUrls)
                 }
             }
             val items = batch.toList()
