@@ -11,7 +11,8 @@ Watch videos in sync with others, chat in real time, add to the playlist and use
 ![Android 8.0+](https://img.shields.io/badge/Android-8.0%2B-3DDC84?logo=android&logoColor=white)
 
 [**Download the latest APK →**](https://github.com/Hostu404/CyTube-APK/releases/latest)
-&nbsp;·&nbsp; [Nightly build](https://github.com/Hostu404/cytube-apk/releases/tag/nightly) (built every night from the newest code; untested)
+
+[**Download the latest nightly build →**](https://github.com/Hostu404/cytube-apk/releases/tag/nightly) 
 
 ---
 
