@@ -8,13 +8,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
@@ -97,6 +91,7 @@ import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import com.cytube.mobile.ui.theme.ChannelTopBar
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 
 private enum class Panel { PLAYLIST, USERS, POLL }
 
@@ -121,6 +116,76 @@ private const val AMBIENT_SAMPLE_BLEND = 0.22f
  *  sluggish, the controls still sitting there well after playback had
  *  started. */
 internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
+
+/** The windowed player's glow as it's drawn; see [rememberAmbientGlow]. */
+@Stable
+private class AmbientGlow(initial: Color) {
+    var color by mutableStateOf(initial)
+    var pulse by mutableFloatStateOf(1f)
+}
+
+/**
+ * The glow behind the windowed player: [target] faded in over
+ * GLOW_FADE_MS, times a slow brightness pulse (0.85 to 1 and back, 4s each
+ * way) while [pulsing]. Moved on about GLOW_STEPS_PER_SECOND times a second
+ * rather than every screen frame: it's a soft gradient that changes slowly, so it
+ * looks the same, but animated every frame it kept the whole screen
+ * redrawing 60-120 times a second for as long as a video played. Still
+ * while there's nothing to fade or pulse, and not running at all unless
+ * [active]. Read [AmbientGlow.color] and [AmbientGlow.pulse] while
+ * drawing, so each step redraws the glow alone.
+ */
+@Composable
+private fun rememberAmbientGlow(target: Color, pulsing: Boolean, active: Boolean): AmbientGlow {
+    // Starts at [target], as the windowed layout comes back from
+    // fullscreen with a color already known: shown at once, not faded in.
+    val glow = remember { AmbientGlow(target) }
+    val currentTarget by rememberUpdatedState(target)
+    val currentPulsing by rememberUpdatedState(pulsing)
+    LaunchedEffect(glow, active) {
+        if (!active) return@LaunchedEffect
+        var from = glow.color
+        var to = glow.color
+        var fadeStartMs = 0L
+        var fading = false
+        var pulseStartMs = 0L
+        var wasPulsing = false
+        while (true) {
+            val now = withFrameMillis { it }
+            if (currentTarget != to) {
+                from = glow.color
+                to = currentTarget
+                fadeStartMs = now
+                fading = true
+            }
+            if (fading) {
+                val t = ((now - fadeStartMs).toFloat() / GLOW_FADE_MS).coerceIn(0f, 1f)
+                glow.color = lerp(from, to, FastOutSlowInEasing.transform(t))
+                if (t >= 1f) fading = false
+            }
+            if (currentPulsing) {
+                if (!wasPulsing) pulseStartMs = now
+                // Up for one half, back down for the other.
+                val phase = ((now - pulseStartMs) % (2 * GLOW_PULSE_MS)).toFloat() / GLOW_PULSE_MS
+                val t = if (phase <= 1f) phase else 2f - phase
+                glow.pulse = 0.85f + 0.15f * FastOutSlowInEasing.transform(t)
+            } else {
+                glow.pulse = 1f
+            }
+            wasPulsing = currentPulsing
+            if (fading || currentPulsing) {
+                delay(1_000L / GLOW_STEPS_PER_SECOND)
+            } else {
+                snapshotFlow { currentTarget != to || currentPulsing }.first { it }
+            }
+        }
+    }
+    return glow
+}
+
+private const val GLOW_FADE_MS = 2_800L
+private const val GLOW_PULSE_MS = 4_000L
+private const val GLOW_STEPS_PER_SECOND = 20
 
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
@@ -882,54 +947,30 @@ fun ChannelScreen(
             val ambientGlowActive = state.ambientGlowEnabled && !webMode &&
                 state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
 
-            // Animated, not snapped: this crossfades from fully transparent
-            // up to the real color (and directly between two colors on a
-            // channel switch) over most of the gap between samples (see
-            // AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface — samples land
-            // every 3s, this runs 2.8s of it), so the hue is nearly always
-            // gently in motion rather than easing in and then sitting still
-            // until the next sample. Combined with the sample blending in
-            // onFrameSnapshot above (which keeps any one step small), the
-            // color drifts continuously and slowly instead of visibly
-            // "updating". Reading .value inside drawBehind below — rather
-            // than destructuring this with `by` up here in the composable
-            // body — is what keeps this cheap: that defers the read to the
-            // draw phase, so each animation tick only re-runs this one
-            // gradient draw, not a recomposition of the screen around it.
-            val animatedGlow = animateColorAsState(
-                targetValue = ambientColor ?: Color.Transparent,
-                animationSpec = tween(durationMillis = 2_800),
-                label = "ambientGlow"
-            )
-
-            // A slow, independent brightness pulse on top of the hue drift
-            // above — the actual "hypnotic" part. Only animated when the glow
-            // is visually active (playing, with a non-null color sample) to
-            // avoid keeping the 60/120Hz render loop running endlessly during
-            // pause or before the video starts. Nothing to check for the
-            // background: Compose stops animating when the app isn't visible.
+            // Crossfades to each new color over most of the gap between
+            // samples (see AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface:
+            // samples land every 3s, the fade takes 2.8s), so the hue is
+            // nearly always gently in motion. Combined with the sample
+            // blending in onFrameSnapshot above (which keeps any one step
+            // small), the color drifts slowly instead of visibly "updating".
+            // On top of that, while playing with a color, a slow brightness
+            // pulse: the "hypnotic" part. See rememberAmbientGlow for how
+            // it's kept cheap.
             val isGlowVisuallyActive = ambientGlowActive && state.playing &&
                 ambientColor != null
-
-            val glowPulse = if (isGlowVisuallyActive) {
-                rememberInfiniteTransition(label = "ambientPulse").animateFloat(
-                    initialValue = 0.85f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(durationMillis = 4_000, easing = FastOutSlowInEasing),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "ambientPulseAlpha"
-                )
-            } else null
+            val glow = rememberAmbientGlow(
+                target = ambientColor ?: Color.Transparent,
+                pulsing = isGlowVisuallyActive,
+                active = ambientGlowActive
+            )
 
             Box(
                 Modifier.fillMaxWidth()
                     .then(
                         if (ambientGlowActive) Modifier.drawBehind {
-                            val glow = animatedGlow.value
-                            if (glow.alpha <= 0f) return@drawBehind
-                            val pulse = glowPulse?.value ?: 1f
+                            val color = glow.color
+                            if (color.alpha <= 0f) return@drawBehind
+                            val pulse = glow.pulse
                             // Bottom-only: color hangs below the video and
                             // fades out toward the outer edge, like light
                             // spilling out from underneath rather than a
@@ -942,7 +983,7 @@ fun ChannelScreen(
                             drawRect(
                                 brush = Brush.verticalGradient(
                                     0f to Color.Transparent,
-                                    0.93f to glow.copy(alpha = glow.alpha * 0.55f * pulse),
+                                    0.93f to color.copy(alpha = color.alpha * 0.55f * pulse),
                                     1f to Color.Transparent
                                 )
                             )

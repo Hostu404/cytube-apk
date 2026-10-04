@@ -13,6 +13,7 @@ import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URI
+import java.util.concurrent.TimeUnit
 
 /**
  * The CyTube protocol client. Owns the socket and nothing else — it knows no
@@ -35,6 +36,15 @@ class CyTubeClient(
     }
 
     private val resolver = SocketConfigResolver(http, baseUrl)
+
+    /** What the socket connects with: the app's own HTTP client, rather
+     *  than the separate one the library makes for itself otherwise, so the
+     *  whole app shares one set of connections and threads. With the
+     *  library's own read timeout (a minute): a polling request is held
+     *  open until the server has something to send. */
+    private val socketHttp: OkHttpClient by lazy {
+        http.newBuilder().readTimeout(1, TimeUnit.MINUTES).build()
+    }
 
     /**
      * Two queues, because they can't be treated the same when the app falls
@@ -111,6 +121,8 @@ class CyTubeClient(
             // for good, and with it the reconnect listeners wired below,
             // holding on to this client after it's done with.
             forceNew = true
+            callFactory = socketHttp
+            webSocketFactory = socketHttp
             transports = arrayOf("websocket", "polling")
             reconnection = true
             // Waits between retries double from 1 s but stop at 10 s: that's

@@ -1,0 +1,26 @@
+# Code Android compiles ahead of time instead of interpreting it at first,
+# so the app opens and scrolls chat smoothly from the start rather than once
+# it has warmed up. Installed with the app (androidx.profileinstaller) and
+# compiled by Android in the background, usually while the device is idle.
+#
+# Libraries such as Compose, Coil, coroutines and OkHttp ship rules of their
+# own; these cover what has none: the app itself, and what every chat
+# message goes through (the socket connection, its HTML parser and the
+# chat list's collections). Media3 is left out: it's big, and only part of
+# it runs for any one video.
+
+# The app itself.
+Lcom/cytube/mobile/**;
+HSPLcom/cytube/mobile/**->**(**)**
+
+# The chat connection.
+Lio/socket/**;
+HSPLio/socket/**->**(**)**
+
+# Chat message HTML.
+Lorg/jsoup/**;
+HSPLorg/jsoup/**->**(**)**
+
+# The chat, user list and playlist collections.
+Lkotlinx/collections/immutable/**;
+HSPLkotlinx/collections/immutable/**->**(**)**

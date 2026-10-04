@@ -46,6 +46,15 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
     private var lastNonNativeCorrectionMs: Long = 0L
     private var lastNativeCorrectionMs: Long = 0L
 
+    /** How long an embedded player is left after a correction before the
+     *  next; doubles while corrections don't bring it into line (see the
+     *  embed branch of [apply]). */
+    private var nonNativeCooldownMs: Long = NON_NATIVE_CORRECTION_COOLDOWN_MS
+
+    /** The embedded player has been within tolerance since its last
+     *  correction. */
+    private var nonNativeInStep = true
+
     /** When the native player last went from not-playing (buffering, loading,
      *  paused) to playing. 0 while it is not playing. */
     private var playingSinceMs: Long = 0L
@@ -171,6 +180,8 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
         // resumes once the new item is loaded and this player reports its id.
         if (newMediaId != null && newMediaId != player.mediaId) {
             lastNonNativeCorrectionMs = 0L
+            nonNativeCooldownMs = NON_NATIVE_CORRECTION_COOLDOWN_MS
+            nonNativeInStep = true
             lastNativeCorrectionMs = 0L
             playingSinceMs = 0L
             pendingLeadCheck = false
@@ -323,26 +334,47 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
         // Positive = player is BEHIND the server; negative = AHEAD.
         val diff = currentTime - local
 
+        val absDiff = abs(diff)
+        val hardSeekThreshold = maxOf(HARD_SEEK_THRESHOLD_SECONDS, safeAccuracy * 2)
+
         // Non-native / external players (WebView embeds: YouTube IFrame API, Vimeo SDK,
         // Dailymotion SDK, PeerTube, Streamable, generic HTML5 embeds):
         //
-        // 1. External player embeds run inside a WebView JS environment with async bridge latency.
-        // 2. Repeated seeking in external iframes forces full pipeline stalls and rebuffering.
-        // 3. Ignore drift under 10 seconds and let playback continue normally.
-        // 4. At 10+ seconds drift (ahead or behind), allow a corrective seek with a cooldown.
+        // 1. They can't be sped up or slowed down, so a seek is the only
+        //    correction, made where a native player would seek too
+        //    (hardSeekThreshold: 6s, or twice the tolerance setting). Their
+        //    time is estimated between the page's once-a-second reports
+        //    (EmbedPlayerHandle), so drift that small can be told.
+        // 2. Seeking an embed means it rebuffers, so corrections are spaced
+        //    out (the cooldown). One that doesn't bring it into line (a slow
+        //    connection, where every seek's rebuffer costs more than the
+        //    tolerance) doubles the wait before the next, rather than seeking
+        //    over and over; back in line, the wait goes back to normal.
         if (!player.isNative) {
-            if (nowMs - lastNonNativeCorrectionMs < NON_NATIVE_CORRECTION_COOLDOWN_MS) return
-            when {
-                diff >= NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
-                    lastNonNativeCorrectionMs = nowMs
-                    log("embed ${diff.s1()}s behind: seeking to ${currentTime.s1()}s")
-                    player.seekTo(currentTime)
+            if (absDiff < hardSeekThreshold) {
+                // Only once the last correction has had time to play out:
+                // straight after a seek the handle gives the time it was
+                // sent to until the page next reports, not where it landed.
+                if (nowMs - lastNonNativeCorrectionMs >= NON_NATIVE_CORRECTION_COOLDOWN_MS) {
+                    nonNativeInStep = true
+                    nonNativeCooldownMs = NON_NATIVE_CORRECTION_COOLDOWN_MS
                 }
-                diff <= -NON_NATIVE_DRIFT_THRESHOLD_SECONDS -> {
-                    lastNonNativeCorrectionMs = nowMs
-                    log("embed ${(-diff).s1()}s ahead: seeking to ${(currentTime + 1.0).s1()}s")
-                    player.seekTo(currentTime + 1.0)
-                }
+                return
+            }
+            if (nowMs - lastNonNativeCorrectionMs < nonNativeCooldownMs) return
+            nonNativeCooldownMs = if (lastNonNativeCorrectionMs != 0L && !nonNativeInStep) {
+                (nonNativeCooldownMs * 2).coerceAtMost(MAX_NON_NATIVE_CORRECTION_COOLDOWN_MS)
+            } else {
+                NON_NATIVE_CORRECTION_COOLDOWN_MS
+            }
+            nonNativeInStep = false
+            lastNonNativeCorrectionMs = nowMs
+            if (diff > 0) {
+                log("embed ${diff.s1()}s behind: seeking to ${currentTime.s1()}s")
+                player.seekTo(currentTime)
+            } else {
+                log("embed ${(-diff).s1()}s ahead: seeking to ${(currentTime + 1.0).s1()}s")
+                player.seekTo(currentTime + 1.0)
             }
             return
         }
@@ -364,9 +396,6 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 .coerceIn(0.0, MAX_SEEK_LEAD_SECONDS)
             log("forward seek settled ${offset(diff)} the room; seek lead now ${seekLeadSeconds.s1()}s")
         }
-
-        val absDiff = abs(diff)
-        val hardSeekThreshold = maxOf(HARD_SEEK_THRESHOLD_SECONDS, safeAccuracy * 2)
 
         // Big drift: a seek is the only sensible fix.
         if (absDiff >= hardSeekThreshold) {
@@ -438,8 +467,8 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
     private fun Double.s2() = String.format(Locale.ROOT, "%.2f", this)
 
     private companion object {
-        const val NON_NATIVE_DRIFT_THRESHOLD_SECONDS = 10.0
         const val NON_NATIVE_CORRECTION_COOLDOWN_MS = 5000L
+        const val MAX_NON_NATIVE_CORRECTION_COOLDOWN_MS = 60_000L
         const val NATIVE_CORRECTION_COOLDOWN_MS = 3000L
 
         /** Uninterrupted playback required before native drift is judged. */
