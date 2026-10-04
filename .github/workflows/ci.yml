@@ -27,7 +27,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Install the Android platform the app compiles against
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" > /dev/null
+        # The package is "android-37.0" (Google names newer platforms with a
+        # minor version). The runner has the SDK licences accepted already.
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" > /dev/null
 
       - name: Unit tests
         # "bash" because gradlew is committed without its executable bit.

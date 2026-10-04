@@ -54,7 +54,10 @@ jobs:
 
       - name: Install the Android platform the app compiles against
         if: steps.changes.outputs.build == 'true'
-        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" > /dev/null
+        # The package is "android-37.0" (Google names newer platforms with a
+        # minor version). The runner has the SDK licences accepted already.
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" > /dev/null
 
       - name: Set up release signing
         if: steps.changes.outputs.build == 'true'
