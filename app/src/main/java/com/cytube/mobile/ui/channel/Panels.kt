@@ -740,7 +740,7 @@ fun NekoChatOverlay(
         LaunchedEffect(state) {
             if (state.hasCaughtUp) return@LaunchedEffect
             state.hasCaughtUp = true
-            val catchUp = messages.filterNot { it.isServerMessage || it.isPm }.takeLast(NEKO_CATCHUP_COUNT)
+            val catchUp = messages.filter { flies(it, showEmotes, emotes) }.takeLast(NEKO_CATCHUP_COUNT)
             for (msg in catchUp) {
                 state.pending.addLast(msg)
             }
@@ -761,9 +761,7 @@ fun NekoChatOverlay(
                 val m = messages[i]
                 if (m.seq <= state.lastSpawnedSeq) break
                 if (fresh.size >= NEKO_MAX_BURST) break
-                // Never PMs: this flies messages across the video for
-                // anyone looking at the screen (a TV, a screen share).
-                if (!m.isServerMessage && !m.isPm) fresh.add(m)
+                if (flies(m, showEmotes, emotes)) fresh.add(m)
             }
             fresh.reverse()
             for (msg in fresh) {
@@ -903,7 +901,17 @@ private const val NEKO_MAX_BURST = 20
 /** Most messages waiting to fly at once — see NekoOverlayState.pending. */
 private const val NEKO_MAX_QUEUE = 30
 
-private val NEKO_LINK_COLOR = Color(0xFF80D8FF)
+/** A comment as it flies: links left out, as nobody can tap one. */
+private fun nekoRendered(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet): ChatHtml.Rendered =
+    ChatHtml.withoutLinks(
+        ChatHtml.render(msg.html, msg.addClass == "greentext", Color.Unspecified, showEmotes, emotes)
+    )
+
+/** Never PMs: this flies messages across the video for anyone looking at
+ *  the screen (a TV, a screen share). Nor one that's only a link, which
+ *  would fly past as nothing. */
+private fun flies(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet): Boolean =
+    !msg.isServerMessage && !msg.isPm && nekoRendered(msg, showEmotes, emotes).text.isNotBlank()
 
 /** White with a soft black glow instead of a background box. */
 private val NEKO_TEXT_STYLE = TextStyle(
@@ -925,7 +933,7 @@ private fun estimateCommentWidthPx(
     emotes: EmoteSet,
     density: Density
 ): Float {
-    val rendered = ChatHtml.render(msg.html, msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
+    val rendered = nekoRendered(msg, showEmotes, emotes)
     val soloEmotePx = with(density) { SOLO_EMOTE_HEIGHT.sp.toPx() }
     val emotePx = with(density) { EMOTE_HEIGHT.sp.toPx() }
     val charWidthPx = with(density) { 13.dp.toPx() }
@@ -1020,9 +1028,7 @@ private fun FlyingCommentItem(
     emotes: EmoteSet,
     onFinished: () -> Unit
 ) {
-    val rendered = remember(comment.id) {
-        ChatHtml.render(comment.msg.html, comment.msg.addClass == "greentext", NEKO_LINK_COLOR, showEmotes, emotes)
-    }
+    val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes) }
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 

@@ -15,7 +15,7 @@ package com.cytube.mobile.net
  *  - root-relative ("/uploads/emotes/foo.png") — an image hosted on the
  *    CyTube server itself; meaningless without `https://cytu.be` in front
  *    of it.
- * Anything already absolute (http://, https://) is returned as-is.
+ * Anything already https:// is returned as-is, and http:// becomes https://.
  *
  * Every one of these values — an emote's saved image URL, or a raw `<img>`
  * tag inside chat/MOTD HTML — is channel/server-controlled, not something
@@ -35,11 +35,20 @@ package com.cytube.mobile.net
  * or is simply not fetched).
  */
 fun resolveMediaUrl(url: String): String {
+    // Surrounding whitespace, which a browser ignores, would otherwise hide
+    // the scheme and get the image rejected.
+    val trimmed = url.trim()
     val absolute = when {
-        url.startsWith("//") -> "https:$url"
-        url.startsWith("/") -> CyTubeClient.DEFAULT_BASE_URL + url
-        else -> url
+        trimmed.startsWith("//") -> "https:$trimmed"
+        trimmed.startsWith("/") -> CyTubeClient.DEFAULT_BASE_URL + trimmed
+        else -> trimmed
     }
     val scheme = absolute.substringBefore(':', missingDelimiterValue = "").lowercase()
-    return if (scheme == "http" || scheme == "https" || scheme == "data") absolute else ""
+    return when (scheme) {
+        // Fetched over https, as a browser does with an http image on an
+        // https page like CyTube's: the app doesn't allow plain http at all.
+        "http" -> "https" + absolute.substring(scheme.length)
+        "https", "data" -> absolute
+        else -> ""
+    }
 }
