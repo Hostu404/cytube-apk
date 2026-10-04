@@ -31,9 +31,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import coil.compose.rememberAsyncImagePainter
 import coil.imageLoader
-import coil.request.ImageRequest
-import coil.size.Dimension
-import coil.size.Precision
 import com.cytube.mobile.net.EmoteFrame
 import com.cytube.mobile.net.EmoteStyle
 import kotlin.math.min
@@ -64,11 +61,8 @@ private fun StyledEmote(
 ) {
     val context = LocalContext.current
     val painter = rememberAsyncImagePainter(
-        model = ImageRequest.Builder(context)
-            .data(url)
-            .size(coil.size.Size(Dimension.Undefined, Dimension(heightPx.coerceAtLeast(1))))
-            .precision(Precision.INEXACT)
-            .build(),
+        // The same request as a plain emote's, so one cached copy serves both.
+        model = EmoteImages.request(context, url, heightPx),
         imageLoader = context.imageLoader,
         onSuccess = { state ->
             val size = state.painter.intrinsicSize

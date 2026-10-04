@@ -7,6 +7,7 @@ import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -187,9 +188,12 @@ data class EmoteStyle(
     val originY: Float = 0.5f,
     val animation: CssAnimation? = null
 ) {
-    val isPlain: Boolean
-        get() = transform.isEmpty() && filter.isEmpty() && opacity == null &&
-            sizeFactor == null && animation == null
+    // Each property's keyframes, worked out once rather than on every frame
+    // drawn (up to 30 a second per animated emote). Not part of equals: a
+    // data class only compares its constructor's values.
+    private val transformPoints by lazy { keyframePoints({ it.transform }, transform) }
+    private val filterPoints by lazy { keyframePoints({ it.filter }, filter) }
+    private val opacityPoints by lazy { keyframePoints({ it.opacity }, opacity ?: 1f) }
 
     /**
      * How the emote looks [elapsedMs] after it appeared, for a box of
@@ -203,9 +207,9 @@ data class EmoteStyle(
         val anim = animation
         val progress = anim?.let { progressAt(it, elapsedMs) }
         if (anim != null && progress != null) {
-            transformNow = keyframeValue(anim, progress, { it.transform }, transform, ::lerpFns)
-            filterNow = keyframeValue(anim, progress, { it.filter }, filter, ::lerpFns)
-            opacityNow = keyframeValue(anim, progress, { it.opacity }, opacity ?: 1f) { a, b, t -> a + (b - a) * t }
+            transformNow = keyframeValue(anim, progress, transformPoints, ::lerpFns) ?: transform
+            filterNow = keyframeValue(anim, progress, filterPoints, ::lerpFns) ?: filter
+            opacityNow = keyframeValue(anim, progress, opacityPoints) { a, b, t -> a + (b - a) * t } ?: (opacity ?: 1f)
         }
         return buildFrame(transformNow, filterNow, opacityNow, width, height, pxScale)
     }
@@ -228,17 +232,25 @@ data class EmoteStyle(
         return if (anim.alternate && iteration % 2 == 1L) 1f - p else p
     }
 
+    /** The keyframes that set a property, as (offset, value), with [base]
+     *  (the value outside the animation) at 0 and 1 where they don't. Empty
+     *  when none set it, or there's no animation. */
+    private fun <T : Any> keyframePoints(get: (CssKeyframe) -> T?, base: T): List<Pair<Float, T>> {
+        val anim = animation ?: return emptyList()
+        val points = anim.keyframes.mapNotNull { k -> get(k)?.let { k.offset to it } }.toMutableList()
+        if (points.isEmpty()) return points
+        if (points.first().first > 0f) points.add(0, 0f to base)
+        if (points.last().first < 1f) points.add(1f to base)
+        return points
+    }
+
     private fun <T : Any> keyframeValue(
         anim: CssAnimation,
         progress: Float,
-        get: (CssKeyframe) -> T?,
-        base: T,
+        points: List<Pair<Float, T>>,
         lerp: (T, T, Float) -> T
-    ): T {
-        val points = anim.keyframes.mapNotNull { k -> get(k)?.let { k.offset to it } }.toMutableList()
-        if (points.isEmpty()) return base
-        if (points.first().first > 0f) points.add(0, 0f to base)
-        if (points.last().first < 1f) points.add(1f to base)
+    ): T? {
+        if (points.isEmpty()) return null
         for (i in 0 until points.size - 1) {
             val (o0, v0) = points[i]
             val (o1, v1) = points[i + 1]
@@ -651,7 +663,7 @@ private class CssReader(css: String) {
         var alternate = false
         decls["animation"]?.let { shorthand ->
             // Several animations, comma separated: only the first is used.
-            val first = shorthand.split(Regex(",(?![^()]*\\))")).first()
+            val first = shorthand.split(TOP_LEVEL_COMMA).first()
             for (token in ANIMATION_TOKEN.findAll(first).map { it.value }) {
                 val ms = time(token)
                 when {
@@ -734,10 +746,18 @@ private val MOD_NEXT = Regex("^$TITLE\\+$EMOTE$")
 private val MOD_NEXT_NEXT = Regex("^$TITLE\\+$EMOTE\\+$EMOTE$")
 private val NAME_CLASS = Regex("^\\.userlist_(siteadmin|owner|op|guest|item)$")
 
+// Built once here rather than on every use: some run for every selector in
+// the stylesheet, and a channel's can have thousands.
+private val COMBINATOR_SPACE = Regex("\\s*([+>~])\\s*")
+private val WHITESPACE = Regex("\\s+")
+/** A comma not inside brackets: between animations, not in cubic-bezier(). */
+private val TOP_LEVEL_COMMA = Regex(",(?![^()]*\\))")
+private val COLOR_ARG_SEPARATOR = Regex("[,\\s/]+")
+
 private fun normalizeSelector(s: String): String = s.trim()
     .replace('\'', '"')
-    .replace(Regex("\\s*([+>~])\\s*"), "$1")
-    .replace(Regex("\\s+"), " ")
+    .replace(COMBINATOR_SPACE, "$1")
+    .replace(WHITESPACE, " ")
 
 private fun declarations(body: String): Map<String, String> {
     val out = LinkedHashMap<String, String>()
@@ -783,7 +803,7 @@ private fun cssValue(token: String): CssValue? {
 
 private fun amount(token: String): Float? = cssValue(token)?.amount()
 
-private fun px(token: String): Float? = cssValue(token.trim().split(Regex("\\s+")).first())?.number
+private fun px(token: String): Float? = cssValue(token.trim().split(WHITESPACE).first())?.number
 
 private fun time(token: String): Long? {
     val t = token.trim().lowercase()
@@ -818,7 +838,7 @@ private fun timing(token: String): CssTiming? = when (val t = token.trim().lower
 }
 
 private fun origin(value: String): Pair<Float, Float> {
-    val parts = value.trim().lowercase().split(Regex("\\s+"))
+    val parts = value.trim().lowercase().split(WHITESPACE)
     fun one(p: String?, horizontal: Boolean): Float = when (p) {
         null, "center" -> 0.5f
         "left" -> if (horizontal) 0f else 0.5f
@@ -843,24 +863,32 @@ private val NAMED_COLORS = mapOf(
     "silver" to 0xC0C0C0, "violet" to 0xEE82EE, "crimson" to 0xDC143C, "teal" to 0x008080
 )
 
-/** #rgb, #rrggbb, #rrggbbaa, rgb()/rgba() or a common colour name,
- *  as opaque ARGB; null for anything else. */
+/** #rgb, #rgba, #rrggbb, #rrggbbaa, rgb()/rgba() (numbers or
+ *  percentages) or a common colour name, as opaque ARGB; null for anything
+ *  else. */
 private fun parseColor(value: String): Int? {
     val v = value.trim().lowercase()
     if (v.startsWith("#")) {
         val hex = v.drop(1)
         val rgb = when (hex.length) {
-            3 -> hex.map { "$it$it" }.joinToString("")
+            3, 4 -> hex.take(3).map { "$it$it" }.joinToString("")
             6, 8 -> hex.take(6)
             else -> return null
         }
         return rgb.toLongOrNull(16)?.let { (0xFF000000 or it).toInt() }
     }
     if (v.startsWith("rgb")) {
-        val n = v.substringAfter('(').substringBefore(')').split(Regex("[,\\s/]+"))
-            .mapNotNull { it.trim().removeSuffix("%").toFloatOrNull() }
+        val n = v.substringAfter('(').substringBefore(')').split(COLOR_ARG_SEPARATOR)
+            .filter { it.isNotBlank() }
+            .take(3)
+            .mapNotNull { part ->
+                val t = part.trim()
+                // 100% is full strength, as 255 is.
+                if (t.endsWith("%")) t.removeSuffix("%").toFloatOrNull()?.times(2.55f)
+                else t.toFloatOrNull()
+            }
         if (n.size < 3) return null
-        val (r, g, b) = n.take(3).map { it.toInt().coerceIn(0, 255) }
+        val (r, g, b) = n.map { it.roundToInt().coerceIn(0, 255) }
         return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
     }
     return NAMED_COLORS[v]?.let { (0xFF000000 or it.toLong()).toInt() }

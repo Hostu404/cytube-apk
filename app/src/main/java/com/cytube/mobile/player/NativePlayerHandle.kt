@@ -437,7 +437,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 "separateAudio=${media.audioTracks.size} subtitles=${media.textTracks.size}")
             exo.setPlaybackSpeed(1f)
             // Routed through the same cached, longer-timeout data source as
-            // loadUrl() below (see cachedDataSourceFactory) rather than
+            // loadUrl() above (see cachedDataSourceFactory) rather than
             // exo.setMediaItem()'s default HTTP stack — this is the main native
             // playback path (a straight "fi" file off CyTube's own playlist),
             // exactly where a large file's buffering has to hold up.
@@ -719,7 +719,8 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * session (a headset, a TV remote) would otherwise prepare it again and
      * play the previous video under the spinner. With no [mediaId],
      * SyncEngine and the leader clock leave the player alone until the new
-     * item is loaded.
+     * item is loaded. Its subtitles go too, so the CC button doesn't offer
+     * the previous video's under the spinner.
      */
     fun stop() {
         if (isReleased) return
@@ -730,6 +731,8 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         runCatching {
             exo.stop()
             exo.clearMediaItems()
+            externalCaptions.reset(emptyList(), sameItem = false)
+            publishSubtitleOptions(exo.currentTracks)
         }
     }
 

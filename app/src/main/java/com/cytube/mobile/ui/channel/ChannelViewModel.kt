@@ -207,7 +207,7 @@ data class ChannelUiState(
     val channelCurrentMedia: MediaFrame? = null,
     /** Whether this user may add videos / add them to play next, per the
      *  channel's permissions, their rank and whether the playlist is locked
-     *  (see ChannelViewModel.refreshQueuePermissions). The server silently
+     *  (see ChannelViewModel.refreshPermissions). The server silently
      *  ignores a queue request from someone without permission, so the add
      *  box is only shown when this is true. */
     val canQueue: Boolean = false,
@@ -737,17 +737,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     retuneLeaderTicker()
                 }
 
-                is CyTubeEvent.Emotes ->
-                    update { s -> s.copy(emotes = EmoteSet.from(event.emotes, s.emotes.effects)) }
-                is CyTubeEvent.EmoteUpdated ->
-                    update { s -> s.copy(emotes = s.emotes.withUpdated(event.emote)) }
-                is CyTubeEvent.EmoteRenamed ->
-                    update { s -> s.copy(emotes = s.emotes.withRenamed(event.oldName, event.emote)) }
-                is CyTubeEvent.EmoteRemoved ->
-                    update { s -> s.copy(emotes = s.emotes.withRemoved(event.name)) }
+                is CyTubeEvent.Emotes -> changeEmotes { EmoteSet.from(event.emotes) }
+                is CyTubeEvent.EmoteUpdated -> changeEmotes { it.withUpdated(event.emote) }
+                is CyTubeEvent.EmoteRenamed -> changeEmotes { it.withRenamed(event.oldName, event.emote) }
+                is CyTubeEvent.EmoteRemoved -> changeEmotes { it.withRemoved(event.name) }
                 // Read off the main thread: a channel's CSS can be long. A
                 // newer copy (a moderator saving again) replaces any read
                 // still in progress, so an older one can't finish last.
+                // Only the effects are changed on the emote set, so an
+                // emote list still being built (changeEmotes) keeps them.
                 is CyTubeEvent.ChannelCss -> {
                     channelCssJob?.cancel()
                     channelCssJob = viewModelScope.launch {
@@ -832,6 +830,28 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 Log.e("CyTube", "Error handling ${event::class.simpleName}", e)
             }
+        }
+    }
+
+    /** The last emote change still being worked out; see [changeEmotes]. */
+    private var emoteJob: Job? = null
+
+    /**
+     * Applies [change] to the channel's emotes off the main thread: building
+     * a set means indexing every emote and compiling a pattern for each one
+     * with a space in its name, which on a channel with thousands of them
+     * made joining stutter. One at a time, in the order they arrived, so an
+     * edit straight after the full list can't be overtaken by it. The
+     * channel's CSS may arrive meanwhile (see ChannelCss), so its effects are
+     * put back on at the end rather than taken from before.
+     */
+    private fun changeEmotes(change: (EmoteSet) -> EmoteSet) {
+        val previous = emoteJob
+        emoteJob = viewModelScope.launch {
+            previous?.join()
+            val base = _state.value.emotes
+            val next = withContext(Dispatchers.Default) { change(base) }
+            update { s -> s.copy(emotes = next.withEffects(s.emotes.effects)) }
         }
     }
 

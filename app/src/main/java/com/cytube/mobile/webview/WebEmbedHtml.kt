@@ -112,10 +112,10 @@ fun dailymotionSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boo
               });
               player.addEventListener('pause', function() { lastKnownPaused = true; reportState(); });
               player.addEventListener('playing', function() { lastKnownPaused = false; isBuffering = false; reportState(); });
+              // Just kept: the time is reported once a second (below).
               player.addEventListener('timeupdate', function(e) {
                 if (typeof player.currentTime === 'number') lastKnownTime = player.currentTime;
                 else if (e && typeof e.time === 'number') lastKnownTime = e.time;
-                reportState();
               });
               player.addEventListener('seeking', function() { isBuffering = true; reportState(); });
               player.addEventListener('seeked', function() { isBuffering = false; reportState(); });
@@ -301,9 +301,9 @@ fun vimeoSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boolean =
 
           player.on('pause', function() { lastKnownPaused = true; reportState(); });
           player.on('play', function() { lastKnownPaused = false; isBuffering = false; reportState(); });
+          // Just kept: the time is reported once a second (below).
           player.on('timeupdate', function(data) {
             if (data && typeof data.seconds === 'number') lastKnownTime = data.seconds;
-            reportState();
           });
           player.on('bufferstart', function() { isBuffering = true; reportState(); });
           player.on('bufferend', function() { isBuffering = false; reportState(); });
@@ -353,7 +353,7 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
         <div id="ptwrap">
         <iframe id="ptplayer" src="$src" allow="autoplay; fullscreen" allowfullscreen style="display:block;width:100%;height:100%;border:0;margin:0;padding:0;"></iframe>
         </div>
-        <script src="https://unpkg.com/@peertube/embed-api/build/player.min.js"></script>
+        <script src="https://unpkg.com/@peertube/embed-api@0.2.0/build/player.min.js"></script>
         <script>
           var player = new PeerTubePlayer(document.getElementById('ptplayer'));
           var lastKnownPaused = ${if (initialPaused) "true" else "false"};
@@ -385,13 +385,14 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
               lastKnownPaused = (status === 'paused');
               reportState();
             });
+            // Several times a second: the position is just kept, and
+            // reported once a second (below).
             player.addEventListener('playbackStatusUpdate', function(status) {
               if (typeof status.position === 'number') lastKnownPosition = status.position;
               if (status.playbackState === 'ended' && !ended) {
                 ended = true;
                 console.log('$EMBED_ENDED_SENTINEL');
               }
-              reportState();
             });
             if ($autoplayParam === 1) {
               player.play().catch(function(e) { console.log('peertube play() rejected: ' + (e && e.message ? e.message : e)); });
@@ -488,6 +489,8 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
               }
               reportState();
             });
+            // The time is just kept here, and reported once a second
+            // (below), not on every update.
             player.on('timeupdate', function(time) {
               if (typeof time.seconds === 'number') lastKnownTime = time.seconds;
               var nearEnd = typeof time.duration === 'number' && typeof time.seconds === 'number' &&
@@ -503,7 +506,6 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
                   console.log('$EMBED_ENDED_SENTINEL');
                 }, (time.duration - time.seconds) * 1000);
               }
-              reportState();
             });
             player.on('error', function(e) {
               console.log('$EMBED_ERROR_SENTINEL' + (e && e.message ? e.message : 'unknown'));
