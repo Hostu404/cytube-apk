@@ -1,5 +1,6 @@
 package com.cytube.mobile.ui.channel
 
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.runtime.CompositionLocalProvider
 import android.app.Activity
@@ -607,6 +608,7 @@ fun ChannelScreen(
                     onSendChat = onSendChat,
                     chatOverlayOn = chatOverlayOn,
                     onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
+                    onSelectSubtitle = vm::selectSubtitle,
                     onExit = { tvShowingChat = false },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -1352,20 +1354,63 @@ private fun SubtitleButton(options: SubtitleOptions, onSelect: (Int?, String) ->
                 contentDescription = null
             )
         }
-        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            val shown = menuOptions
-            DropdownMenuItem(
-                text = { Text("Off") },
-                trailingIcon = { if (!shown.showing) Icon(Icons.Default.Check, contentDescription = null) },
-                onClick = { menuOpen = false; onSelect(null, shown.key) }
-            )
-            shown.names.forEachIndexed { i, name ->
-                DropdownMenuItem(
-                    text = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    trailingIcon = { if (shown.selected == i) Icon(Icons.Default.Check, contentDescription = null) },
-                    onClick = { menuOpen = false; onSelect(i, shown.key) }
-                )
+        SubtitleMenu(
+            expanded = menuOpen,
+            options = menuOptions,
+            onDismiss = { menuOpen = false },
+            onSelect = onSelect
+        )
+    }
+}
+
+/**
+ * The CC button's track menu: Off, then each track, the one showing
+ * ticked. [options] is the list the menu was opened on (see SubtitleButton).
+ * With [focusCurrent] (TV), the ticked entry takes focus as it opens, so
+ * the remote starts from what's showing rather than from nothing, and the
+ * focused entry is clearly highlighted: Material's own focus tint is too
+ * faint to follow from across a room.
+ */
+@Composable
+private fun SubtitleMenu(
+    expanded: Boolean,
+    options: SubtitleOptions,
+    onDismiss: () -> Unit,
+    onSelect: (Int?, String) -> Unit,
+    focusCurrent: Boolean = false
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        val current = remember { FocusRequester() }
+        // -1 for Off, else the track's index.
+        var focusedEntry by remember { mutableStateOf<Int?>(null) }
+        val highlight = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+        fun entry(index: Int, isCurrent: Boolean): Modifier {
+            val base = if (isCurrent) Modifier.focusRequester(current) else Modifier
+            if (!focusCurrent) return base
+            return base
+                .onFocusChanged { if (it.isFocused) focusedEntry = index else if (focusedEntry == index) focusedEntry = null }
+                .background(if (focusedEntry == index) highlight else Color.Transparent)
+        }
+        if (focusCurrent) {
+            LaunchedEffect(Unit) {
+                // A frame for the popup to be laid out and focusable.
+                withFrameNanos { }
+                runCatching { current.requestFocus() }
             }
+        }
+        DropdownMenuItem(
+            text = { Text("Off") },
+            trailingIcon = { if (!options.showing) Icon(Icons.Default.Check, contentDescription = null) },
+            onClick = { onDismiss(); onSelect(null, options.key) },
+            modifier = entry(-1, isCurrent = !options.showing)
+        )
+        options.names.forEachIndexed { i, name ->
+            DropdownMenuItem(
+                text = { Text(name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                trailingIcon = { if (options.selected == i) Icon(Icons.Default.Check, contentDescription = null) },
+                onClick = { onDismiss(); onSelect(i, options.key) },
+                modifier = entry(i, isCurrent = options.selected == i)
+            )
         }
     }
 }
@@ -1604,6 +1649,10 @@ private fun backendNote(state: ChannelUiState): String {
  * its TopAppBar — same on/off visual, same behavior (toggles the shared
  * chatOverlayOn state hoisted in ChannelScreen), just reachable without a
  * touchscreen.
+ *
+ * When the video has subtitles, the CC button sits left of Nico, as on the
+ * phone: the two form the top row, Left/Right move between them, and Up
+ * and Down behave the same from either (see TvSubtitleButton).
  */
 @Composable
 private fun TvChatView(
@@ -1611,12 +1660,31 @@ private fun TvChatView(
     onSendChat: (String) -> Unit,
     chatOverlayOn: Boolean,
     onToggleChatOverlay: () -> Unit,
+    onSelectSubtitle: (Int?, String) -> Unit,
     onExit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val nicoFocusRequester = remember { FocusRequester() }
+    val ccFocusRequester = remember { FocusRequester() }
     val chatInputFocusRequester = remember { FocusRequester() }
     var nicoFocused by remember { mutableStateOf(false) }
+    var ccFocused by remember { mutableStateOf(false) }
+    val ccAvailable = state.subtitles.available &&
+        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+    // Whether CC is where focus is (or its menu, opened from it): set when
+    // it gains focus, cleared only when Nico or the chat bar does, so that
+    // focus moving into the menu, or the button's removal clearing focus,
+    // doesn't lose track of it.
+    //
+    // The next video having no subtitles takes the CC button away. If it
+    // had focus (or its menu did), focus goes to its neighbour Nico rather
+    // than to nothing, which would leave the remote's next press dead.
+    LaunchedEffect(ccAvailable) {
+        if (!ccAvailable && ccFocused) {
+            ccFocused = false
+            runCatching { nicoFocusRequester.requestFocus() }
+        }
+    }
     // Focus the Nico toggle on entry so there's an immediate, visible focus
     // target — without this the chat view opened with nothing focused at
     // all, leaving the remote's first press to go nowhere.
@@ -1664,7 +1732,9 @@ private fun TvChatView(
                     false
                 } else {
                     if (event.type == KeyEventType.KeyUp) {
-                        if (nicoFocused) onExit() else runCatching { nicoFocusRequester.requestFocus() }
+                        // The top row (Nico, or CC beside it) leaves; from
+                        // the chat bar, Up goes to Nico first.
+                        if (nicoFocused || ccFocused) onExit() else runCatching { nicoFocusRequester.requestFocus() }
                     }
                     true
                 }
@@ -1682,6 +1752,20 @@ private fun TvChatView(
                 overflow = TextOverflow.Ellipsis
             )
 
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+            if (ccAvailable) {
+                TvSubtitleButton(
+                    options = state.subtitles,
+                    onSelect = onSelectSubtitle,
+                    focusRequester = ccFocusRequester,
+                    onFocused = { ccFocused = it },
+                    onRight = { runCatching { nicoFocusRequester.requestFocus() } },
+                    onDown = { runCatching { chatInputFocusRequester.requestFocus() } }
+                )
+            }
             // Explicit, not LocalContentColor — this square being legible in
             // both its on/off states is the whole point of it, so it doesn't
             // depend on ambient content color resolving correctly.
@@ -1689,8 +1773,26 @@ private fun TvChatView(
             Box(
                 Modifier
                     .focusRequester(nicoFocusRequester)
-                    .onFocusChanged { nicoFocused = it.isFocused }
+                    .onFocusChanged {
+                        nicoFocused = it.isFocused
+                        if (it.isFocused) ccFocused = false
+                    }
                     .focusable()
+                    // Left to CC when it's there; Right has nowhere to go.
+                    // Both phases taken, so the default focus search (which
+                    // runs on KeyDown) never picks something else.
+                    .onPreviewKeyEvent { event ->
+                        when (event.key) {
+                            Key.DirectionLeft -> {
+                                if (event.type == KeyEventType.KeyUp && ccAvailable) {
+                                    runCatching { ccFocusRequester.requestFocus() }
+                                }
+                                true
+                            }
+                            Key.DirectionRight -> true
+                            else -> false
+                        }
+                    }
                     .onKeyEvent { event ->
                         if (event.type != KeyEventType.KeyUp) {
                             false
@@ -1733,6 +1835,7 @@ private fun TvChatView(
                         )
                 )
             }
+            }
         }
 
         // Same ChatPanel the phone layout uses (message list, input, send)
@@ -1751,7 +1854,9 @@ private fun TvChatView(
             // list stays pinned to the latest message and is never a focus
             // stop, so it can't get in the way of Nico <-> chat bar <-> video.
             messagesFocusable = false,
-            inputFieldModifier = Modifier.focusRequester(chatInputFocusRequester),
+            inputFieldModifier = Modifier
+                .focusRequester(chatInputFocusRequester)
+                .onFocusChanged { if (it.isFocused) ccFocused = false },
             // No touch to pick an emote with on TV, and the picker's grid
             // is its own separate focus surface this screen isn't built to
             // host — see ChatPanel's doc comment on the parameter.
@@ -1761,6 +1866,96 @@ private fun TvChatView(
             // separate flag needed at this level.
         )
     }
+    }
+}
+
+/**
+ * TV's CC button, in TvChatView's top row left of Nico, drawn and focused
+ * the same way as Nico (a primary-coloured outline when focused). OK turns
+ * the one track on or off, or with several opens the same menu as the
+ * phone (SubtitleMenu), with what's showing focused; picking from it or
+ * Back closes it and puts focus back here, where it started.
+ *
+ * Right goes to Nico and Down to the chat bar ([onRight], [onDown]); Left
+ * has nowhere to go; Up is TvChatView's (back to the video). Moves happen
+ * on KeyUp and both phases are taken, so Compose's own focus search (on
+ * KeyDown) never lands on anything else, as with Nico.
+ */
+@Composable
+private fun TvSubtitleButton(
+    options: SubtitleOptions,
+    onSelect: (Int?, String) -> Unit,
+    focusRequester: FocusRequester,
+    onFocused: (Boolean) -> Unit,
+    onRight: () -> Unit,
+    onDown: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var menuOptions by remember { mutableStateOf(options) }
+    // As on the phone: the menu closes when the item changes under it.
+    LaunchedEffect(options.key) { if (options.key != menuOptions.key) menuOpen = false }
+    // Focus back here when the menu closes, whichever way: a pick, Back,
+    // or the item changing.
+    var menuWasOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(menuOpen) {
+        if (menuOpen) menuWasOpen = true
+        else if (menuWasOpen) {
+            menuWasOpen = false
+            withFrameNanos { }
+            runCatching { focusRequester.requestFocus() }
+        }
+    }
+    Box {
+        Box(
+            Modifier
+                .focusRequester(focusRequester)
+                .onFocusChanged {
+                    focused = it.isFocused
+                    if (it.isFocused) onFocused(true)
+                }
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    val up = event.type == KeyEventType.KeyUp
+                    when (event.key) {
+                        Key.DirectionRight -> { if (up) onRight(); true }
+                        Key.DirectionDown -> { if (up) onDown(); true }
+                        Key.DirectionLeft -> true
+                        Key.Enter, Key.DirectionCenter, Key.NumPadEnter -> {
+                            if (up) when {
+                                options.names.size > 1 -> { menuOptions = options; menuOpen = true }
+                                options.showing -> onSelect(null, options.key)
+                                else -> onSelect(0, options.key)
+                            }
+                            true
+                        }
+                        else -> false
+                    }
+                }
+                .border(2.dp, if (focused) MaterialTheme.colorScheme.primary else Color.Transparent)
+                .padding(4.dp)
+                .semantics {
+                    contentDescription = when {
+                        options.names.size > 1 -> "Subtitles"
+                        options.showing -> "Turn off subtitles"
+                        else -> "Turn on subtitles"
+                    }
+                }
+        ) {
+            Icon(
+                if (options.showing) Icons.Default.ClosedCaption else Icons.Outlined.ClosedCaption,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.size(24.dp)
+            )
+        }
+        SubtitleMenu(
+            expanded = menuOpen,
+            options = menuOptions,
+            onDismiss = { menuOpen = false },
+            onSelect = onSelect,
+            focusCurrent = true
+        )
     }
 }
 

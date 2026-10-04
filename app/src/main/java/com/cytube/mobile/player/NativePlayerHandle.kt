@@ -98,8 +98,9 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
 
     /**
      * What was last chosen with the CC button, kept from one item to the
-     * next: null until then (an item's own default subtitle shows, if the
-     * manifest marks one, as on the website), then on or off.
+     * next: null until then, then on or off. Subtitles never come on by
+     * themselves: until CC is turned on, none show, even one a manifest or
+     * stream marks as default.
      *
      * "On" carries over to the subtitle files the app fetches (CyTube's,
      * YouTube's): a later item with some starts with one showing (see
@@ -159,10 +160,10 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
 
     /**
      * Before each load: no override left from the previous item's tracks,
-     * and whether subtitles show at all as last chosen (the player itself
-     * only ever picks a stream track marked default). Then the subtitle
-     * files on offer for it ([files]: CyTube's and the resolver's), one of
-     * which may start showing straight away (see pickExternalOnLoad).
+     * and subtitles off unless CC is on (with it on, the player itself only
+     * ever picks a stream track marked default). Then the subtitle files on
+     * offer for it ([files]: CyTube's and the resolver's), one of which
+     * starts showing straight away with CC on (see pickExternalOnLoad).
      */
     private fun applySubtitlePreference(files: List<TextTrackSource>, sameItem: Boolean) {
         loadGeneration++
@@ -174,23 +175,21 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         // With a file showing, the stream's own default stays off, so two
         // never show at once.
         val fileShowing = showFile || externalCaptions.selected >= 0
-        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subtitlesWanted == false || fileShowing)
+        builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, subtitlesWanted != true || fileShowing)
         exo.trackSelectionParameters = builder.build()
     }
 
     /**
-     * Starts one of the new item's subtitle files showing, if it should:
-     * the one the manifest marks default unless CC was switched off (as on
-     * the website), or with CC switched on, the default else the first
-     * (the resolver puts its likeliest first). Fetched in the background,
-     * so the video doesn't wait for it. Returns whether it started one.
+     * With CC on, starts one of the new item's subtitle files showing: the
+     * one the manifest marks default, else the first (the resolver puts its
+     * likeliest first). Fetched in the background, so the video doesn't
+     * wait for it. Returns whether it started one.
      */
     private fun pickExternalOnLoad(): Boolean {
-        if (subtitlesWanted == false) return false
+        if (subtitlesWanted != true) return false
         val files = externalCaptions.tracks
-        val index = files.indexOfFirst { it.isDefault }.takeIf { it >= 0 }
-            ?: (if (subtitlesWanted == true && files.isNotEmpty()) 0 else return false)
-        externalCaptions.select(index)
+        if (files.isEmpty()) return false
+        externalCaptions.select(files.indexOfFirst { it.isDefault }.takeIf { it >= 0 } ?: 0)
         return true
     }
 
