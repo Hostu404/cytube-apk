@@ -14,7 +14,6 @@ import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -86,6 +85,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.unit.Constraints
+import kotlin.math.roundToInt
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
@@ -876,28 +877,6 @@ fun ChannelScreen(
         Modifier
             .fillMaxSize()
             .onGloballyPositioned { screenInRoot = it.positionInRoot() }
-            // Drawn over everything but the video: black, with a faint wash
-            // of the video's own colour (as if the screen lit the room).
-            // Black rather than grey, so an OLED screen switches those
-            // pixels off. The status and navigation bars' backgrounds are
-            // the app's, so they dim too; their icons are the system's.
-            .drawWithContent {
-                drawContent()
-                val dim = dimAnimation.value
-                if (dim <= 0f) return@drawWithContent
-                val tint = glow.color
-                val wash = lerp(Color.Black, tint.copy(alpha = 1f), LIGHTS_TINT * tint.alpha)
-                    .copy(alpha = dim)
-                val video = videoInRoot.translate(-screenInRoot)
-                // Not laid out yet (a frame, coming back from fullscreen):
-                // nothing rather than dimming the video with everything.
-                if (video.isEmpty) return@drawWithContent
-                // Above, below, left and right of the video.
-                drawRect(wash, Offset.Zero, Size(size.width, video.top))
-                drawRect(wash, Offset(0f, video.bottom), Size(size.width, size.height - video.bottom))
-                drawRect(wash, Offset(0f, video.top), Size(video.left, video.height))
-                drawRect(wash, Offset(video.right, video.top), Size(size.width - video.right, video.height))
-            }
             // Touching the screen anywhere around the video brings the
             // lights partly up for a few seconds, and does whatever it would anyway
             // (everything stays usable while dimmed). Touching it again while
@@ -1190,20 +1169,9 @@ fun ChannelScreen(
                     )
                 } else {
                     playerContent()
-                    // Same switch, same remembered comment state as the
-                    // fullscreen player below — see chatOverlayOn/nekoState
-                    // above. Confined to this Box (fillMaxSize of its own
-                    // BoxWithConstraints, which only ever sees this Box's
-                    // bounds), so it flies across the video area only, not
-                    // the whole screen, while windowed.
-                    if (chatOverlayOn) {
-                        NekoChatOverlay(
-                            messages = state.messages,
-                            showEmotes = state.showEmotes,
-                            emotes = state.emotes,
-                            state = nekoState
-                        )
-                    }
+                    // The Niconico comments over this video are drawn by
+                    // the Box around the Scaffold, above lights down's dark
+                    // layer: see there.
                     // Top-right, not bottom-right: Media3's own PlayerView
                     // draws its settings/gear control in the bottom corner,
                     // and the two would sit right on top of each other.
@@ -1252,6 +1220,56 @@ fun ChannelScreen(
                 modifier = Modifier.weight(1f)
             )
             }
+        }
+    }
+    // Lights down's dark layer, over everything but the video: black, with
+    // a faint wash of the video's own colour (as if the screen lit the
+    // room). Black rather than grey, so an OLED screen switches those pixels
+    // off. The status and navigation bars' backgrounds are the app's, so
+    // they dim too; their icons are the system's.
+    Spacer(
+        Modifier.fillMaxSize().drawBehind {
+            val dim = dimAnimation.value
+            if (dim <= 0f) return@drawBehind
+            val tint = glow.color
+            val wash = lerp(Color.Black, tint.copy(alpha = 1f), LIGHTS_TINT * tint.alpha)
+                .copy(alpha = dim)
+            val video = videoInRoot.translate(-screenInRoot)
+            // Not laid out yet (a frame, coming back from fullscreen):
+            // nothing rather than dimming the video with everything.
+            if (video.isEmpty) return@drawBehind
+            // Above, below, left and right of the video.
+            drawRect(wash, Offset.Zero, Size(size.width, video.top))
+            drawRect(wash, Offset(0f, video.bottom), Size(size.width, size.height - video.bottom))
+            drawRect(wash, Offset(0f, video.top), Size(video.left, video.height))
+            drawRect(wash, Offset(video.right, video.top), Size(size.width - video.right, video.height))
+        }
+    )
+    // The Niconico comments flying across the video, placed exactly over it.
+    // Here rather than inside the video's own Box so they're drawn above the
+    // dark layer: a comment in the bottom lane (a tall emote, say) runs a
+    // little past the video's edge, and that part was being dimmed. Same
+    // switch and remembered comment state as the fullscreen player's (see
+    // chatOverlayOn/nekoState above).
+    if (chatOverlayOn && !webMode) {
+        Box(
+            Modifier.layout { measurable, constraints ->
+                val video = videoInRoot.translate(-screenInRoot)
+                if (video.isEmpty) return@layout layout(0, 0) {}
+                val placeable = measurable.measure(
+                    Constraints.fixed(video.width.roundToInt(), video.height.roundToInt())
+                )
+                layout(constraints.maxWidth, constraints.maxHeight) {
+                    placeable.place(video.left.roundToInt(), video.top.roundToInt())
+                }
+            }
+        ) {
+            NekoChatOverlay(
+                messages = state.messages,
+                showEmotes = state.showEmotes,
+                emotes = state.emotes,
+                state = nekoState
+            )
         }
     }
     }
