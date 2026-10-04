@@ -72,6 +72,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Density
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.coroutines.delay
@@ -126,20 +127,25 @@ private const val EMOTE_HEIGHT = EmoteImages.INLINE_HEIGHT_SP
  * actually be seen — roughly double EMOTE_HEIGHT, the same move Discord/
  * Telegram/Slack make for an emoji-only message.
  */
-private const val SOLO_EMOTE_HEIGHT = 56f
+private const val SOLO_EMOTE_HEIGHT = EmoteImages.SOLO_HEIGHT_SP
+
+/** How far an emote's width-to-height ratio has to be off before its row is
+ *  laid out again for it. */
+private const val ASPECT_CHANGE = 0.05f
 
 /**
  * Inline content needs a size before the image has loaded, but emotes are all
- * sorts of shapes. So we reserve a square, then record each emote's real aspect
- * ratio the first time it loads and reuse it everywhere after — which is why
- * emotes settle into the right width and stay there for the rest of the session.
+ * sorts of shapes. So each emote's real aspect ratio is recorded the first time
+ * it loads, usually by the prefetch as its message arrives (EmoteImages), so
+ * the row is drawn the right width from the start; one that isn't known yet
+ * gets a square until it loads.
  */
-private object EmoteAspect {
+internal object EmoteAspect {
     // A plain map, not Compose state: a mutableStateMapOf read by every row
     // would invalidate every visible chat row on each newly loaded emote
     // (state maps notify all readers on any write). Rows watch their own
     // emotes instead — see inlineEmotes. Only touched on the main thread
-    // (composition and Coil's onSuccess).
+    // (composition and Coil's callbacks, which run there).
     private val ratios = HashMap<String, Float>()
     // A long session across a few busy channels can see thousands of
     // distinct emote URLs, so the map is capped with a blunt full-clear once
@@ -150,14 +156,12 @@ private object EmoteAspect {
 
     operator fun get(url: String): Float? = ratios[url]
 
-    /** Returns true if this changed what's known for [url] enough to be worth
-     *  re-laying-out the row (a new emote, or a real change in shape). */
-    fun record(url: String, ratio: Float): Boolean {
+    /** Remembers [url]'s shape: a new emote, or a real change in one. */
+    fun record(url: String, ratio: Float) {
         val previous = ratios[url]
-        if (previous != null && kotlin.math.abs(previous - ratio) < 0.05f) return false
+        if (previous != null && abs(previous - ratio) < ASPECT_CHANGE) return
         if (ratios.size >= MAX_ENTRIES && previous == null) ratios.clear()
         ratios[url] = ratio
-        return true
     }
 }
 
@@ -171,8 +175,11 @@ private fun inlineEmotes(
     if (urls.isEmpty()) return emptyMap()
     val context = LocalContext.current
     val density = LocalDensity.current
-    // Bumped when one of THIS row's own emotes first reports its real shape,
-    // so only this row re-lays-out with the right width (see EmoteAspect).
+    // Bumped when one of THIS row's own emotes loads a different shape from
+    // the one its space was made with, so only this row re-lays-out with the
+    // right width (see EmoteAspect). Compared with what the row used, not
+    // with whether the shape was news: another row with the same emote may
+    // have recorded it first.
     var aspectVersion by remember(urls) { mutableIntStateOf(0) }
     return remember(urls, emoteHeight, density, aspectVersion, fx) {
         val heightPx = with(density) { emoteHeight.sp.roundToPx() }.coerceAtLeast(1)
@@ -183,7 +190,8 @@ private fun inlineEmotes(
                 // "/overlay"); smaller for one sized down ("/tiny"), though
                 // never below half size: the channel's own sizes are made
                 // for emotes several times bigger than chat's.
-                val ratio = effect.urls.maxOf { (EmoteAspect[it] ?: 1f).coerceIn(0.2f, 6f) }
+                fun fxRatio() = effect.urls.maxOf { (EmoteAspect[it] ?: 1f).coerceIn(0.2f, 6f) }
+                val ratio = fxRatio()
                 val size = emoteHeight * (effect.modifier.target.sizeFactor?.coerceIn(0.5f, 1f) ?: 1f)
                 return@associateWith InlineTextContent(
                     Placeholder(
@@ -193,11 +201,13 @@ private fun inlineEmotes(
                     )
                 ) {
                     FxEmote(effect, heightPx) { emoteUrl, emoteRatio ->
-                        if (EmoteAspect.record(emoteUrl, emoteRatio)) aspectVersion++
+                        EmoteAspect.record(emoteUrl, emoteRatio)
+                        if (abs(fxRatio() - ratio) >= ASPECT_CHANGE) aspectVersion++
                     }
                 }
             }
-            val ratio = (EmoteAspect[url] ?: 1f).coerceIn(0.2f, 6f)
+            fun plainRatio() = (EmoteAspect[url] ?: 1f).coerceIn(0.2f, 6f)
+            val ratio = plainRatio()
             InlineTextContent(
                 Placeholder(
                     width = (emoteHeight * ratio).sp,
@@ -215,7 +225,8 @@ private fun inlineEmotes(
                         if (size.width > 0f && size.height > 0f &&
                             size.width.isFinite() && size.height.isFinite()
                         ) {
-                            if (EmoteAspect.record(url, size.width / size.height)) aspectVersion++
+                            EmoteAspect.record(url, size.width / size.height)
+                            if (abs(plainRatio() - ratio) >= ASPECT_CHANGE) aspectVersion++
                         }
                     }
                 )

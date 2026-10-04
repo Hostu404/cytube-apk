@@ -16,9 +16,11 @@ import kotlin.math.roundToInt
  */
 internal object EmoteImages {
 
-    /** A chat emote's height mid-sentence (a message that's only emotes
-     *  shows them bigger). */
+    /** A chat emote's height mid-sentence. */
     const val INLINE_HEIGHT_SP = 28f
+
+    /** A chat emote's height in a message that's only emotes. */
+    const val SOLO_HEIGHT_SP = 56f
 
     /**
      * [url] at [heightPx] tall. Height only: the width follows the image's
@@ -35,31 +37,47 @@ internal object EmoteImages {
             .precision(Precision.INEXACT)
             .build()
 
-    /** [INLINE_HEIGHT_SP] in pixels, as a chat row works it out. */
-    fun inlineHeightPx(context: Context): Int =
-        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, INLINE_HEIGHT_SP, context.resources.displayMetrics)
+    /** [sp] in pixels, as a chat row works it out. */
+    private fun heightPx(context: Context, sp: Float): Int =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sp, context.resources.displayMetrics)
             .roundToInt().coerceAtLeast(1)
 
-    // Recently asked for, so a busy chat repeating the same emotes doesn't
-    // queue the same request over and over (each would only hit the cache,
-    // but still costs a trip through Coil). Small and cleared when full.
+    // Recently asked for (each at its size), so a busy chat repeating the
+    // same emotes doesn't queue the same request over and over (each would
+    // only hit the cache, but still costs a trip through Coil). Small and
+    // cleared when full.
     private val recent = HashSet<String>()
     private const val MAX_RECENT = 300
 
     /**
      * Starts loading [urls] (a message's emotes, as it arrives) into Coil's
      * caches, so by the time its chat row is drawn they're usually there
-     * rather than only then fetched. Any thread.
+     * rather than only then fetched, and their shape is known (EmoteAspect)
+     * so the row is laid out the right width at once. At the size the row
+     * will ask for ([solo]: a message that's only emotes), as a copy
+     * decoded smaller than that can't stand in for it. Any thread.
      */
-    fun prefetch(context: Context, urls: List<String>) {
+    fun prefetch(context: Context, urls: List<String>, solo: Boolean) {
         if (urls.isEmpty()) return
+        val sizeSp = if (solo) SOLO_HEIGHT_SP else INLINE_HEIGHT_SP
         val fresh = synchronized(recent) {
             if (recent.size > MAX_RECENT) recent.clear()
-            urls.filter { recent.add(it) }
+            urls.filter { recent.add("$sizeSp $it") }
         }
         if (fresh.isEmpty()) return
         val loader = context.imageLoader
-        val heightPx = inlineHeightPx(context)
-        for (url in fresh) loader.enqueue(request(context, url, heightPx))
+        val heightPx = heightPx(context, sizeSp)
+        for (url in fresh) {
+            loader.enqueue(
+                request(context, url, heightPx).newBuilder()
+                    // Coil calls this on the main thread, where EmoteAspect lives.
+                    .listener(onSuccess = { _, result ->
+                        val w = result.drawable.intrinsicWidth
+                        val h = result.drawable.intrinsicHeight
+                        if (w > 0 && h > 0) EmoteAspect.record(url, w.toFloat() / h)
+                    })
+                    .build()
+            )
+        }
     }
 }

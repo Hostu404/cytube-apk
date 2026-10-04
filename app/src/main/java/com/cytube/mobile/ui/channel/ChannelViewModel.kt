@@ -2045,8 +2045,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         revealSpoilers = isTv
                     )
                     // Its emotes start loading now, not when its row is
-                    // first drawn (see EmoteImages).
-                    if (s.showEmotes) EmoteImages.prefetch(getApplication(), rendered.imageUrls)
+                    // first drawn (see EmoteImages). One drawn with a
+                    // channel effect is listed by its id: its own images.
+                    if (s.showEmotes) {
+                        EmoteImages.prefetch(
+                            getApplication(),
+                            rendered.imageUrls.flatMap { rendered.fx[it]?.urls ?: listOf(it) },
+                            solo = rendered.soloEmoteCount > 0
+                        )
+                    }
                 }
             }
             val items = batch.toList()
