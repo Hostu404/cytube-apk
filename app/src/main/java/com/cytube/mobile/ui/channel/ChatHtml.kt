@@ -28,8 +28,9 @@ import org.jsoup.nodes.TextNode
  * it), which turns them into <img> tags. Rather than fall back to the alt
  * text, each emote <img> becomes an inline content placeholder that ChatRow
  * fills with the real image, so emotes render in the flow of the sentence
- * exactly as they do on the site. Any other <img> (a posted picture) is shown
- * as its link instead.
+ * exactly as they do on the site. So does a picture from the folder the
+ * channel keeps its emotes in (its scripts' pictures); any other <img> (a
+ * posted picture) is shown as its link instead.
  */
 object ChatHtml {
 
@@ -37,6 +38,10 @@ object ChatHtml {
     /** Tags the span of an inline emote with the shortcode to insert on tap —
      *  e.g. ":smile:", not the image URL appendInlineContent keys on. */
     const val EMOTE_TAG = "EMOTE"
+    /** Tags a picture from the channel's own image folder (see
+     *  EmoteSet.inChannelImageFolder): drawn like an emote, but tapping it
+     *  inserts nothing, as it has no code to type. */
+    const val PICTURE_TAG = "PICTURE"
     /** Tags the span of a spoiler (CyTube's own `<span class="spoiler">`)
      *  with its 0-based index among this message's spoilers, in document
      *  order — see [render]'s revealedSpoilers and ChatRow's tap handling. */
@@ -77,7 +82,8 @@ object ChatHtml {
         val budget: EmoteBudget,
         val revealSpoilers: Boolean,
         val revealedSpoilers: Set<Int>,
-        val effects: EmoteEffects = EmoteEffects.NONE
+        val effects: EmoteEffects = EmoteEffects.NONE,
+        val emotes: EmoteSet = EmoteSet.EMPTY
     ) {
         /** Emotes drawn with a channel modifier, by inline content id. */
         val fx = HashMap<String, EmoteFx>()
@@ -279,7 +285,7 @@ object ChatHtml {
         val body = Jsoup.parseBodyFragment(html).body()
         val ctx = RenderCtx(
             key.showImages, key.dropImages, images, EmoteBudget(),
-            key.revealSpoilers, key.revealedSpoilers, emotes.effects
+            key.revealSpoilers, key.revealedSpoilers, emotes.effects, emotes
         )
 
         var annotated = buildAnnotatedString {
@@ -323,7 +329,8 @@ object ChatHtml {
      *  emotes, no sentence around them) and there aren't too many of them. */
     private fun soloEmoteCount(annotated: AnnotatedString, images: List<String>): Int {
         if (images.isEmpty()) return 0
-        val spans = annotated.getStringAnnotations(EMOTE_TAG, 0, annotated.text.length)
+        val spans = annotated.getStringAnnotations(EMOTE_TAG, 0, annotated.text.length) +
+            annotated.getStringAnnotations(PICTURE_TAG, 0, annotated.text.length)
         if (spans.isEmpty()) return 0
         val covered = BooleanArray(annotated.text.length)
         for (span in spans) for (i in span.start until span.end) covered[i] = true
@@ -414,6 +421,22 @@ object ChatHtml {
                                 }
                             }
                             src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
+                            // A picture from the channel's own image folder,
+                            // where its emotes live: its scripts' (a rolled
+                            // Pokémon, say), shown as a picture like before.
+                            !isEmote && ctx.showImages && !ctx.inHiddenSpoiler &&
+                                ctx.emotes.inChannelImageFolder(src) -> {
+                                flushStack(builder, ctx)
+                                if (ctx.budget.take()) {
+                                    ctx.images.add(src)
+                                    builder.pushStringAnnotation(PICTURE_TAG, src)
+                                    builder.appendInlineContent(src, alt.ifBlank { "[image]" })
+                                    builder.pop()
+                                } else {
+                                    ctx.droppedEmote = true
+                                    ctx.swallowLeadingSpace = true
+                                }
+                            }
                             // Any other picture (a channel's chat filter
                             // turning a posted image link into an <img>) is
                             // shown as the link, never loaded.

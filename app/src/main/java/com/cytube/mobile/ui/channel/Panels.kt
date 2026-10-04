@@ -215,12 +215,15 @@ private fun inlineEmotes(
                     placeholderVerticalAlign = PlaceholderVerticalAlign.TextCenter
                 )
             ) {
+                var drawable by remember { mutableStateOf<android.graphics.drawable.Drawable?>(null) }
+                HoldStill(drawable)
                 AsyncImage(
                     model = EmoteImages.request(context, url, heightPx),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize(),
                     onSuccess = { state ->
+                        drawable = state.result.drawable
                         val size = state.painter.intrinsicSize
                         if (size.width > 0f && size.height > 0f &&
                             size.width.isFinite() && size.height.isFinite()

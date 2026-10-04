@@ -1,6 +1,7 @@
 package com.cytube.mobile.net
 
 import androidx.compose.runtime.Immutable
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * Emote substitution, ported from the official client.
@@ -42,6 +43,21 @@ class EmoteSet private constructor(
     /** Different for every set ever built (sets are never changed in place),
      *  so a cache can tell them apart without holding on to old ones. */
     val id: Long = NEXT_ID.getAndIncrement()
+
+    /** The folders the channel keeps its emote images in (see [folderOf]). */
+    private val imageFolders: Set<String> by lazy { all.mapNotNullTo(HashSet()) { folderOf(it.image) } }
+
+    /**
+     * Whether [url] is in one of the folders the channel's emotes are kept
+     * in: the channel's own image space, which its scripts use too (a
+     * rolled Pokémon, say). Such a picture in chat is shown, where any other
+     * is shown as its link (see ChatHtml).
+     */
+    fun inChannelImageFolder(url: String): Boolean {
+        if (all.isEmpty()) return false
+        val folder = folderOf(url) ?: return false
+        return folder in imageFolders
+    }
 
     /** Substitution is skipped entirely when there is nothing to substitute. */
     fun apply(message: String): String {
@@ -128,6 +144,45 @@ class EmoteSet private constructor(
         val EMPTY = EmoteSet(emptyList(), emptyMap(), emptyList())
 
         private val TOKEN = Regex("[^\\s]+")
+
+        /**
+         * Image hosts anyone can upload to, whose folders ("attachments",
+         * "emote") hold everyone's pictures, not one channel's: a channel
+         * keeping its emotes there doesn't make every picture from there its
+         * own. Matched with their subdomains.
+         */
+        private val PUBLIC_UPLOAD_HOSTS = listOf(
+            "discordapp.com", "discordapp.net", "discord.com",
+            "imgur.com", "catbox.moe", "ibb.co", "postimg.cc", "gyazo.com",
+            "redd.it", "redditmedia.com", "twimg.com", "tenor.com", "giphy.com",
+            // GitHub's upload hosts; raw.githubusercontent.com is left out,
+            // as its first folder there is one account's own.
+            "googleusercontent.com", "user-images.githubusercontent.com",
+            "private-user-images.githubusercontent.com", "github.com",
+            "7tv.app", "betterttv.net", "frankerfacez.com", "jtvnw.net",
+            "tumblr.com", "pinimg.com", "fbcdn.net", "cdninstagram.com"
+        )
+
+        private fun isPublicUploadHost(host: String): Boolean {
+            val h = host.lowercase()
+            return PUBLIC_UPLOAD_HOSTS.any { h == it || h.endsWith(".$it") }
+        }
+
+        /**
+         * "host/first-folder" for an https image address, e.g.
+         * "anax.feralhosting.com/tetr4" for .../tetr4/v4c-assets/x.gif: on a
+         * shared host, the folder that's one person's own. Null for an image
+         * straight under the host ("i.imgur.com/abc.gif"), where that first
+         * part is the file itself, not a folder: the whole host is anyone's.
+         */
+        private fun folderOf(url: String): String? {
+            val parsed = url.toHttpUrlOrNull() ?: return null
+            if (!parsed.isHttps) return null
+            if (isPublicUploadHost(parsed.host)) return null
+            val segments = parsed.pathSegments
+            if (segments.size < 2 || segments[0].isBlank()) return null
+            return parsed.host.lowercase() + "/" + segments[0]
+        }
         private val WHITESPACE = Regex("\\s+")
 
         fun from(emotes: List<Emote>, effects: EmoteEffects = EmoteEffects.NONE): EmoteSet {
