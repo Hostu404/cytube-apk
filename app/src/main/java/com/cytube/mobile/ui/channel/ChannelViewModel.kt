@@ -15,6 +15,7 @@ import com.cytube.mobile.net.*
 import com.cytube.mobile.player.BandwidthEstimate
 import com.cytube.mobile.player.NativePlayerHandle
 import com.cytube.mobile.player.PlaybackFailures
+import com.cytube.mobile.player.SubtitleOptions
 import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.StreamResolvers
 import com.cytube.mobile.ui.defaultSyncAccuracy
@@ -227,7 +228,10 @@ data class ChannelUiState(
      *  for normal public chat — see startPm/cancelPm. Phone only; TV never
      *  sets it. */
     val pmTarget: String? = null,
-    val unreadPm: UnreadPm? = null
+    val unreadPm: UnreadPm? = null,
+    /** The playing item's subtitles, for the CC button; see
+     *  NativePlayerHandle.onSubtitlesChanged. */
+    val subtitles: SubtitleOptions = SubtitleOptions.NONE
 ) {
     val isLeader: Boolean get() = leader != null && leader == localUser
 }
@@ -1166,12 +1170,26 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (handle !== player || handle.mediaId != attachedMediaId) {
             playerAttachedAtMs = SystemClock.elapsedRealtime()
         }
+        if (handle !== player) (player as? NativePlayerHandle)?.onSubtitlesChanged = null
         player = handle
         attachedMediaId = handle.mediaId
         handle.setVolume(if (_state.value.muted) 0f else 1f)
         (handle as? NativePlayerHandle)?.setVideoEnabled(!AppVisibility.inBackground.value)
+        val native = handle as? NativePlayerHandle
+        if (native != null) {
+            native.onSubtitlesChanged = { options -> update { it.copy(subtitles = options) } }
+        } else {
+            // A web or embedded player: its subtitles are its own business.
+            update { it.copy(subtitles = SubtitleOptions.NONE) }
+        }
         client.signalPlayerReady()
         evaluateSync()
+    }
+
+    /** From the CC button: show the [index]th subtitle track, or none, of
+     *  the tracks [key] was read from (see SubtitleOptions.key). */
+    fun selectSubtitle(index: Int?, key: String) {
+        (player as? NativePlayerHandle)?.selectSubtitle(index, key)
     }
 
     // ---- audio / PiP playback control ----

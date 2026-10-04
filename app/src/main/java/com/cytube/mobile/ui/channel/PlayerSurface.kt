@@ -50,6 +50,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.AudioTrackAudioOutputProvider
 import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
@@ -833,15 +834,18 @@ private fun ExoSurface(
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
             ): AudioSink? {
+                // A fixed 750 ms audio buffer: within the 0.5–2 s range the
+                // old size-scaling setters (deprecated in Media3 1.11) gave.
                 val bufferSizeProvider = DefaultAudioTrackBufferSizeProvider.Builder()
-                    .setMinPcmBufferDurationUs(500_000)
-                    .setMaxPcmBufferDurationUs(2_000_000)
-                    .setPcmBufferMultiplicationFactor(6)
+                    .setTargetPcmBufferDurationUs(750_000)
+                    .build()
+                val audioOutputProvider = AudioTrackAudioOutputProvider.Builder(context)
+                    .setAudioTrackBufferSizeProvider(bufferSizeProvider)
                     .build()
                 return DefaultAudioSink.Builder(context)
                     .setEnableFloatOutput(enableFloatOutput)
-                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                    .setAudioTrackBufferSizeProvider(bufferSizeProvider)
+                    .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams)
+                    .setAudioOutputProvider(audioOutputProvider)
                     .build()
             }
         }.apply {
@@ -1088,6 +1092,11 @@ private fun ExoSurface(
                 // file being broken, and dropping it would leave the rest of
                 // the video silent over a blip.
                 val transient = PlaybackFailures.isTransient(detail)
+                // A subtitle file failing, of any kind: dropped, or tried
+                // once more if the connection dropped (see
+                // recoverFromSubtitleError). First, so a subtitle server
+                // being down never costs the video the retries below.
+                if (handle.recoverFromSubtitleError(error, transient)) return
                 if (transient && transientRetries < TRANSIENT_RETRY_DELAYS_MS.size) {
                     val wait = TRANSIENT_RETRY_DELAYS_MS[transientRetries++]
                     Log.i("CyTubePlayer", "retrying the same source in ${wait}ms (attempt $transientRetries)")

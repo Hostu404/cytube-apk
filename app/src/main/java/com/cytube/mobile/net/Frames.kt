@@ -33,7 +33,9 @@ data class MediaFrame(
     val scuri: String?,
     /** A custom manifest's separate sound files (meta.audioTracks), for
      *  video streams that carry no sound of their own; empty otherwise. */
-    val audioTracks: List<AudioTrackSource> = emptyList()
+    val audioTracks: List<AudioTrackSource> = emptyList(),
+    /** A custom manifest's subtitle files (meta.textTracks); empty otherwise. */
+    val textTracks: List<TextTrackSource> = emptyList()
 ) {
     val isLivestream: Boolean get() = seconds <= 0
     val hasDirect: Boolean get() = direct.isNotEmpty()
@@ -82,7 +84,9 @@ data class MediaFrame(
                 direct = DirectSource.parse(meta.optJSONObject("direct")),
                 embedSrc = embed?.optString("src")?.ifBlank { null },
                 scuri = meta.optString("scuri").ifBlank { null },
-                audioTracks = AudioTrackSource.parse(meta.optJSONArray("audioTracks"))
+                audioTracks = AudioTrackSource.parse(meta.optJSONArray("audioTracks")),
+                textTracks = TextTrackSource.parse(meta.optJSONArray("textTracks")) +
+                    TextTrackSource.fromGoogleDrive(o.optString("id", ""), meta.optJSONObject("gdrive_subtitles"))
             )
         }
 
@@ -190,6 +194,64 @@ data class AudioTrackSource(val url: String, val contentType: String, val label:
                     contentType = t.optString("contentType"),
                     label = t.optString("label"),
                     language = t.optString("language")
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A subtitle file for the playing item, from either of the two places
+ * CyTube has them (its player, videojs.coffee, reads both):
+ *
+ * - A custom manifest's textTracks, passed through by the server
+ *   (custom-media.js) as meta.textTracks: [{url, contentType, name,
+ *   default}], WebVTT only. Any marked default starts switched on.
+ * - A Google Drive video's own subtitles, as meta.gdrive_subtitles:
+ *   {vid, available: [{lang, lang_original, name}]}. The server converts
+ *   each to WebVTT at /gdvtt/<id>/<lang>/<name>.vtt?vid=<vid> on itself
+ *   (google2vtt.js), so their [url] is that path, resolved against the
+ *   server's address when played.
+ *
+ * The app offers them from its CC button (see NativePlayerHandle).
+ */
+@Immutable
+data class TextTrackSource(val url: String, val contentType: String, val name: String, val isDefault: Boolean) {
+    companion object {
+        fun parse(a: JSONArray?): List<TextTrackSource> {
+            if (a == null) return emptyList()
+            return (0 until a.length()).mapNotNull { i ->
+                val t = a.optJSONObject(i) ?: return@mapNotNull null
+                val url = t.optString("url")
+                // Checked again here, as with audioTracks.
+                if (!url.startsWith("https://") && !url.startsWith("http://")) return@mapNotNull null
+                TextTrackSource(
+                    url = url,
+                    contentType = t.optString("contentType"),
+                    name = t.optString("name"),
+                    isDefault = t.optBoolean("default", false)
+                )
+            }
+        }
+
+        /** meta.gdrive_subtitles, labelled as the website labels them:
+         *  the language's own name, then the track's name in brackets. */
+        fun fromGoogleDrive(id: String, subs: JSONObject?): List<TextTrackSource> {
+            if (subs == null || id.isBlank()) return emptyList()
+            val vid = subs.optString("vid").ifBlank { return emptyList() }
+            val available = subs.optJSONArray("available") ?: return emptyList()
+            fun enc(s: String) = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
+            return (0 until available.length()).mapNotNull { i ->
+                val t = available.optJSONObject(i) ?: return@mapNotNull null
+                val lang = t.optString("lang").ifBlank { return@mapNotNull null }
+                val name = t.optString("name")
+                val label = t.optString("lang_original").ifBlank { lang } +
+                    if (name.isNotBlank()) " ($name)" else ""
+                TextTrackSource(
+                    url = "/gdvtt/${enc(id)}/${enc(lang)}/${enc(name)}.vtt?vid=${enc(vid)}",
+                    contentType = "text/vtt",
+                    name = label,
+                    isDefault = false
                 )
             }
         }
