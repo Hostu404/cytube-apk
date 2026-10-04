@@ -88,16 +88,33 @@ jobs:
         if: steps.changes.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
+          commit=$(git rev-parse --short HEAD)
+          # The newest real release this build has everything since.
+          since=$(git describe --tags --abbrev=0 --exclude nightly 2>/dev/null || true)
+          {
+            echo "**Nightly build** · $(date -u '+%-d %b %Y') · commit [\`$commit\`]($REPO_URL/commit/$commit)"
+            echo
+            echo "Built from the newest code, with the unit tests passing. It's ahead of the latest release but hasn't had a release's hands-on testing yet, so if something's off, the [latest release]($REPO_URL/releases/latest) is the steadier choice."
+            echo
+            echo "Installs over the normal app, and the normal app installs back over it."
+            if [ -n "$since" ]; then
+              echo
+              echo "### New since $since"
+              echo
+              git log --no-merges --format='- %s (%h)' "$since..HEAD" | head -n 30
+              echo
+              echo "[All changes since $since]($REPO_URL/compare/$since...$commit)"
+            fi
+          } > nightly-notes.md
           gh release delete nightly --yes --cleanup-tag || true
           git tag -f nightly
           git push -f origin refs/tags/nightly
           gh release create nightly "cytube-nightly-$STAMP.apk" \
             --prerelease \
-            --title "Nightly $STAMP" \
-            --notes "Built automatically from $(git rev-parse --short HEAD) on $(date -u '+%Y-%m-%d'). Untested; for trying out what's new before a proper release.
-
-          Changes since the last release: https://github.com/${{ github.repository }}/compare/$(git describe --tags --abbrev=0 --exclude nightly 2>/dev/null || echo HEAD~20)...$(git rev-parse --short HEAD)"
+            --title "Nightly $(date -u '+%-d %b %Y')" \
+            --notes-file nightly-notes.md
 
       - name: Remove the signing files
         if: always()
