@@ -224,12 +224,6 @@ private const val LIGHTS_UP_MS = 220
 /** A touch around the video: how much of the dark it lifts, and its fades
  *  up and back down, sine-shaped (gentler at both ends). */
 private const val LIGHTS_PEEK_LIFT = 0.5f
-/** The navigation bar's background while the lights are down: the dark
- *  layer's black, at its opacity (LIGHTS_DIM). */
-private const val LIGHTS_NAV_BAR_SCRIM = 0xD9000000.toInt()
-/** The navigation bar's background otherwise: the same half-see-through
- *  dark grey Android gives it in dark mode. */
-private const val NAV_BAR_SCRIM = 0x801B1B1B.toInt()
 private const val LIGHTS_PEEK_UP_MS = 450
 private const val LIGHTS_PEEK_DOWN_MS = 600
 private val LIGHTS_PEEK_EASING = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
@@ -584,30 +578,35 @@ fun ChannelScreen(
 
     // Whether the navigation bar is dimmed with the lights; see below.
     val navBarDimmedState = remember { mutableStateOf(false) }
-    // Android's own status and navigation bars are drawn by the system, over
-    // the app, and by default follow the phone's light/dark setting: on a
-    // phone in light mode that meant dark, hard-to-read clock and icons at
-    // the top and a light grey three-button bar at the bottom, against this
-    // always-dark screen. Here they're always dark to match (light icons),
-    // and back to the app's usual styling when this screen goes.
+    // Android's own navigation bar is drawn by the system, over the app, and
+    // by default follows the phone's light/dark setting: on a phone in light
+    // mode that meant a light grey three-button bar against this always-dark
+    // screen. Here it's see-through, so the screen's own background shows
+    // behind its buttons, which are light to match; back to the app's usual
+    // styling when this screen goes. The status bar at the top keeps the
+    // usual styling: in light mode its dark clock and icons sit quietly on
+    // the dark screen, which is less distracting.
     //
-    // The dark layer can't reach the navigation bar either, so while the
-    // lights are fully down it gets the layer's black at its opacity, with
-    // dark buttons, so it's dimmed too. Back still works the same; only how
-    // the bars look changes (set by the windowed layout below; fullscreen
-    // hides the bars). Re-applied after every configuration change, a
-    // rotation included: androidx's enableEdgeToEdge puts the app's default
-    // styling back on each one (MainActivity's first call leaves a listener
-    // for that), so going fullscreen and back brought the light bars back.
+    // While the lights are fully down the buttons turn dark, so they're
+    // dimmed along with the screen behind them (the dark layer reaches under
+    // the bar, but not the buttons, which the system draws). Back still
+    // works the same; only how they look changes (set by the windowed layout
+    // below; fullscreen hides the bars). Re-applied after every
+    // configuration change, a rotation included: androidx's enableEdgeToEdge
+    // puts the app's default styling back on each one (MainActivity's first
+    // call leaves a listener for that), so going fullscreen and back brought
+    // the light bar back.
     val componentActivity = activity as? ComponentActivity
     LaunchedEffect(componentActivity, configuration) {
         snapshotFlow { navBarDimmedState.value }.collect { navBarDimmed ->
             componentActivity?.enableEdgeToEdge(
-                statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                statusBarStyle = SystemBarStyle.auto(
+                    android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT
+                ),
                 navigationBarStyle = if (navBarDimmed) {
-                    SystemBarStyle.light(LIGHTS_NAV_BAR_SCRIM, LIGHTS_NAV_BAR_SCRIM)
+                    SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
                 } else {
-                    SystemBarStyle.dark(NAV_BAR_SCRIM)
+                    SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
                 }
             )
         }
