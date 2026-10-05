@@ -604,13 +604,13 @@ fun ChatPanel(
             // wider while the keyboard is up (16dp): the text cursor's drag
             // handle draws a bit below the cursor line and gets clipped at
             // the keyboard's top edge with less. With the keyboard down
-            // there's nothing to clip, so the row sits lower (and the field
-            // has plenty of air of its own) and the chat gets the space.
+            // there's nothing to clip, so the row sits close to the bar
+            // below (the field has plenty of air of its own) and the chat
+            // gets the space.
             Modifier.fillMaxWidth().imePadding()
                 .padding(
                     start = 12.dp, end = 12.dp,
-                    top = 2.dp,
-                    bottom = if (WindowInsets.isImeVisible) 16.dp else 6.dp
+                    bottom = if (WindowInsets.isImeVisible) 16.dp else 2.dp
                 ),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1417,7 +1417,8 @@ private fun ChatRow(
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .then(if (usernameClickable) Modifier.clickable(onClick = onNameClick) else Modifier)
-                    .padding(vertical = 4.dp, horizontal = 2.dp)
+                    // Vertical only, so the name lines up with the message.
+                    .padding(vertical = 4.dp)
             )
         }
         // ClickableText cannot take inlineContent, and inline emotes are not

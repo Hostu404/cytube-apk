@@ -34,10 +34,6 @@ data class Settings(
     /** Off by default: leaving the app only floats the video in a window
      *  for people who turn this on in Settings. */
     val pipEnabled: Boolean = false,
-    /** Soft glow behind the windowed player, colored from the video itself.
-     *  On by default — unlike PiP this is pure decoration with nothing to
-     *  misbehave, so there's no reason to make people opt in. */
-    val ambientGlowEnabled: Boolean = true,
     /** Someone's messages in a row go under their name once, like Discord,
      *  instead of each with its own name and time. Phone only; off by
      *  default. */
@@ -61,7 +57,6 @@ class SettingsStore(private val context: Context) {
             compatMode = CompatMode.parse(p[COMPAT]),
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
-            ambientGlowEnabled = p[AMBIENT_GLOW] ?: true,
             groupChat = p[GROUP_CHAT] ?: false,
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE])
@@ -73,7 +68,6 @@ class SettingsStore(private val context: Context) {
     suspend fun setCompat(v: CompatMode) = context.dataStore.edit { it[COMPAT] = v.name }.let {}
     suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
     suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
-    suspend fun setAmbientGlow(v: Boolean) = context.dataStore.edit { it[AMBIENT_GLOW] = v }.let {}
     suspend fun setGroupChat(v: Boolean) = context.dataStore.edit { it[GROUP_CHAT] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
@@ -121,7 +115,6 @@ class SettingsStore(private val context: Context) {
         val COMPAT = stringPreferencesKey("compat_mode")
         val EMOTES = booleanPreferencesKey("show_emotes")
         val PIP = booleanPreferencesKey("pip_enabled")
-        val AMBIENT_GLOW = booleanPreferencesKey("ambient_glow_enabled")
         val GROUP_CHAT = booleanPreferencesKey("group_chat")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")

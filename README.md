@@ -47,8 +47,8 @@ use out of it:
 * For videos offered in several qualities, picks one your connection can handle, steps down if playback stalls and back up when it can
 * Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
 * Subtitles: the **CC** button turns on a video's subtitles and picks between them — a custom manifest's subtitle files, a Google Drive video's, YouTube captions, or ones inside the stream. They stay off until you turn them on, and stay on for the next video once you have
-* Fullscreen, mute toggle, and an ambient glow behind the video
-* Lights down (phone): the light bulb button dims everything around the video, tinted with the video's colour. Touch the screen to lift them a little for a moment; everything still works while dimmed
+* Fullscreen and mute toggle
+* Lights down (phone): the light bulb button dims everything around the video. Touch the screen to lift them a little for a moment; everything still works while dimmed
 
 ### Chat
 

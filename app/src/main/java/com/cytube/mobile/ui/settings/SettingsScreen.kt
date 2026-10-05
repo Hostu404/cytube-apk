@@ -45,9 +45,8 @@ fun SettingsScreen(onBack: () -> Unit) {
     val focusManager = LocalFocusManager.current
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
-    // their own dark palette — see MainActivity), Ambient glow (never
-    // rendered on TV — see ChannelScreen) and PiP (no home-screen window to
-    // float into).
+    // their own dark palette — see MainActivity), PiP (no home-screen
+    // window to float into) and grouped chat messages.
     val isTv = remember { isTvDevice(context) }
     var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
@@ -138,12 +137,6 @@ fun SettingsScreen(onBack: () -> Unit) {
                         "you leave the app. Off by default — turn it on to try it out.",
                     checked = settings.pipEnabled
                 ) { scope.launch { store.setPip(it) } }
-
-                SwitchRow(
-                    title = "Ambient glow",
-                    subtitle = "A soft glow behind the video, colored to match what's playing.",
-                    checked = settings.ambientGlowEnabled
-                ) { scope.launch { store.setAmbientGlow(it) } }
             }
 
             MaSectionLabel("Compatibility")
