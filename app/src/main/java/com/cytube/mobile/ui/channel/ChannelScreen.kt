@@ -65,9 +65,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
@@ -109,19 +107,8 @@ import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import com.cytube.mobile.ui.theme.ChannelTopBar
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 
 private enum class Panel { PLAYLIST, USERS, POLL }
-
-/** How far each new ambient-glow sample moves the glow toward itself, out of
- *  1.0 — see the onFrameSnapshot comment in ChannelScreen for why this
- *  exists. Low on purpose: a single sample should nudge the color, not set
- *  it, so a fast-cutting video's glow drifts with the overall footage
- *  instead of snapping to whatever one frame happened to look like. Kept
- *  gentle enough that, combined with the long near-continuous crossfade
- *  behind the windowed player, the color's motion stays subtle rather than a
- *  series of visible steps. */
-private const val AMBIENT_SAMPLE_BLEND = 0.22f
 
 /** How long the play/pause/fullscreen overlay controls stay on screen before
  *  fading out, both in fullscreen and windowed playback — reused by both
@@ -135,86 +122,10 @@ private const val AMBIENT_SAMPLE_BLEND = 0.22f
  *  started. */
 internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
 
-/** The windowed player's glow as it's drawn; see [rememberAmbientGlow]. */
-@Stable
-private class AmbientGlow(initial: Color) {
-    var color by mutableStateOf(initial)
-    var pulse by mutableFloatStateOf(1f)
-}
-
-/**
- * The glow behind the windowed player: [target] faded in over
- * GLOW_FADE_MS, times a slow brightness pulse (0.85 to 1 and back, 4s each
- * way) while [pulsing]. Moved on about [stepsPerSecond] times a second
- * rather than every screen frame: it's a soft gradient that changes slowly, so it
- * looks the same, but animated every frame it kept the whole screen
- * redrawing 60-120 times a second for as long as a video played. Still
- * while there's nothing to fade or pulse, and not running at all unless
- * [active]. Read [AmbientGlow.color] and [AmbientGlow.pulse] while
- * drawing, so each step redraws the glow alone.
- */
-@Composable
-private fun rememberAmbientGlow(
-    target: Color,
-    pulsing: Boolean,
-    active: Boolean,
-    /** Fewer while it only tints lights down's dark wash, where each step's
-     *  change is too faint to see. */
-    stepsPerSecond: Int = GLOW_STEPS_PER_SECOND
-): AmbientGlow {
-    // Starts at [target], as the windowed layout comes back from
-    // fullscreen with a color already known: shown at once, not faded in.
-    val glow = remember { AmbientGlow(target) }
-    val currentTarget by rememberUpdatedState(target)
-    val currentPulsing by rememberUpdatedState(pulsing)
-    val currentStepsPerSecond by rememberUpdatedState(stepsPerSecond)
-    LaunchedEffect(glow, active) {
-        if (!active) return@LaunchedEffect
-        var from = glow.color
-        var to = glow.color
-        var fadeStartMs = 0L
-        var fading = false
-        var pulseStartMs = 0L
-        var wasPulsing = false
-        while (true) {
-            val now = withFrameMillis { it }
-            if (currentTarget != to) {
-                from = glow.color
-                to = currentTarget
-                fadeStartMs = now
-                fading = true
-            }
-            if (fading) {
-                val t = ((now - fadeStartMs).toFloat() / GLOW_FADE_MS).coerceIn(0f, 1f)
-                glow.color = lerp(from, to, FastOutSlowInEasing.transform(t))
-                if (t >= 1f) fading = false
-            }
-            if (currentPulsing) {
-                if (!wasPulsing) pulseStartMs = now
-                // Up for one half, back down for the other.
-                val phase = ((now - pulseStartMs) % (2 * GLOW_PULSE_MS)).toFloat() / GLOW_PULSE_MS
-                val t = if (phase <= 1f) phase else 2f - phase
-                glow.pulse = 0.85f + 0.15f * FastOutSlowInEasing.transform(t)
-            } else {
-                glow.pulse = 1f
-            }
-            wasPulsing = currentPulsing
-            if (fading || currentPulsing) {
-                delay(1_000L / currentStepsPerSecond)
-            } else {
-                snapshotFlow { currentTarget != to || currentPulsing }.first { it }
-            }
-        }
-    }
-    return glow
-}
-
 /** How dark lights down makes everything around the video (black at this
- *  opacity), how strongly the video's colour tints it, how long the fades
- *  take (going down, coming up), and how long a tap around the video
- *  brings the lights up for. */
+ *  opacity), how long the fades take (going down, coming up), and how long
+ *  a tap around the video brings the lights up for. */
 private const val LIGHTS_DIM = 0.85f
-private const val LIGHTS_TINT = 0.16f
 private const val LIGHTS_DOWN_MS = 350
 private const val LIGHTS_UP_MS = 220
 /** A touch around the video: how much of the dark it lifts, and its fades
@@ -224,14 +135,6 @@ private const val LIGHTS_PEEK_UP_MS = 450
 private const val LIGHTS_PEEK_DOWN_MS = 600
 private val LIGHTS_PEEK_EASING = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
 private const val LIGHTS_PEEK_MS = 4_000L
-/** How often the dark wash follows the video's colour while the lights are
- *  down: its changes are tiny (a 16% tint under 85% black), so a few steps
- *  a second look the same as the glow's 20 and cost far less. */
-private const val LIGHTS_TINT_STEPS_PER_SECOND = 4
-
-private const val GLOW_FADE_MS = 2_800L
-private const val GLOW_PULSE_MS = 4_000L
-private const val GLOW_STEPS_PER_SECOND = 20
 
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
@@ -334,22 +237,6 @@ fun ChannelScreen(
     // already-playing instance to wherever it's called from.
     val pipModeState = rememberUpdatedState(isInPictureInPicture)
 
-    val ambientGlowEnabledState = rememberUpdatedState(state.ambientGlowEnabled)
-    // Lights down tints the dimmed screen with the video's colour, so its
-    // frames are sampled then too, glow setting or not.
-    val lightsDownState = rememberUpdatedState(lightsDown)
-
-    // Dominant color behind the windowed player (the glow drawn behind it
-    // in the windowed layout below) — a single stable holder for the whole life of this screen, not
-    // re-remembered per media id, since the callback captured inside
-    // playerContent (created exactly once, just below) needs to keep
-    // writing to the SAME state object for as long as this screen exists.
-    // Cleared back to null on every media change so a new item never
-    // briefly glows with the PREVIOUS item's leftover color while its own
-    // first frame is still on the way.
-    var ambientColor by remember { mutableStateOf<Color?>(null) }
-    LaunchedEffect(state.media?.id) { ambientColor = null }
-
     val playerContent = remember {
         movableContentOf {
             PlayerSurface(
@@ -365,37 +252,6 @@ fun ChannelScreen(
                 qualityIndex = state.nativeQualityIndex,
                 planStart = onPlanStart,
                 modifier = Modifier.fillMaxSize(),
-                // Each sample here is ONE instant of the video, and on
-                // fast-cutting content (an action scene, a music video) two
-                // consecutive samples 3s apart can land on wildly different
-                // frames — a dark shot, then an explosion, then a close-up.
-                // Feeding each raw sample straight to the crossfade made the
-                // glow visibly yank toward a new hue every few seconds,
-                // which is what actually reads as "distracting", not the
-                // crossfade itself. Blending each new sample partway toward
-                // the PREVIOUS glow color (rather than replacing it outright)
-                // turns that into a slow drift toward wherever the footage's
-                // overall tone is trending, so one outlier frame can't swing
-                // it on its own — it takes several samples in the same
-                // direction to actually move the glow. Skipped for the very
-                // first sample of a new item (ambientColor still null there,
-                // per the LaunchedEffect above) so a fresh item still snaps
-                // to its own color immediately rather than easing up from
-                // the previous item's leftover one. Only when the glow is on
-                // (or the lights are down, for their tint) and can be seen:
-                // never on TV, which has no windowed layout
-                // to show it in (and whose setting is hidden, so it stays at
-                // its default of on), and not in fullscreen or PiP, where
-                // it isn't drawn — sampling there was a frame grab every few
-                // seconds for nothing.
-                onFrameSnapshot = if ((ambientGlowEnabledState.value || lightsDownState.value) && !isTv &&
-                    !fullscreen && !pipModeState.value
-                ) {
-                    { bitmap ->
-                        val sample = averageColor(bitmap)
-                        ambientColor = ambientColor?.let { lerp(it, sample, AMBIENT_SAMPLE_BLEND) } ?: sample
-                    }
-                } else null,
                 onEnded = onPlaybackEnded,
                 onStall = onPlaybackStall
             )
@@ -882,35 +738,6 @@ fun ChannelScreen(
     var videoInRoot by remember { mutableStateOf(Rect.Zero) }
     var screenInRoot by remember { mutableStateOf(Offset.Zero) }
 
-    // Reserved as soon as this item is eligible at all (setting on,
-    // not Compatibility View or an embed) rather than waiting for a
-    // color — that way the margin never pops in as a sudden layout
-    // shift once the snapshot lands. Before a color exists (or when
-    // the setting is off) it's just 16dp of ordinary background,
-    // indistinguishable from normal spacing.
-    val ambientGlowActive = state.ambientGlowEnabled && !webMode &&
-        state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
-
-    // Crossfades to each new color over most of the gap between
-    // samples (see AMBIENT_RESAMPLE_INTERVAL_MS in PlayerSurface:
-    // samples land every 3s, the fade takes 2.8s), so the hue is
-    // nearly always gently in motion. Combined with the sample
-    // blending in onFrameSnapshot above (which keeps any one step
-    // small), the color drifts slowly instead of visibly "updating".
-    // On top of that, while playing with a color, a slow brightness
-    // pulse: the "hypnotic" part. See rememberAmbientGlow for how
-    // it's kept cheap. Also the colour lights down tints the dimmed
-    // screen with, so it runs then too; the pulse doesn't, as the glow
-    // itself is off while the lights are down.
-    val isGlowVisuallyActive = ambientGlowActive && state.playing &&
-        ambientColor != null && !lightsAreDown
-    val glow = rememberAmbientGlow(
-        target = ambientColor ?: Color.Transparent,
-        pulsing = isGlowVisuallyActive,
-        active = ambientGlowActive || (lightsDown && canDimAround),
-        stepsPerSecond = if (lightsAreDown) LIGHTS_TINT_STEPS_PER_SECOND else GLOW_STEPS_PER_SECOND
-    )
-
     CyTubeChannelTheme {
     Box(
         Modifier
@@ -1152,33 +979,6 @@ fun ChannelScreen(
             Box(
                 Modifier.fillMaxWidth()
                     .then(
-                        if (ambientGlowActive) Modifier.drawBehind {
-                            // Fades out as the lights go down: it would
-                            // light up the very area being darkened.
-                            val lit = 1f - dimAnimation.value / LIGHTS_DIM
-                            val color = glow.color.let { it.copy(alpha = it.alpha * lit) }
-                            if (color.alpha <= 0f) return@drawBehind
-                            val pulse = glow.pulse
-                            // Bottom-only: color hangs below the video and
-                            // fades out toward the outer edge, like light
-                            // spilling out from underneath rather than a
-                            // halo all the way around. ~0.93 is where the
-                            // video's own bottom edge lands for a typical
-                            // phone width, given the 16dp margin below it —
-                            // approximate, not pixel-exact, since the
-                            // opaque video covers everything above that
-                            // regardless of what the gradient does there.
-                            drawRect(
-                                brush = Brush.verticalGradient(
-                                    0f to Color.Transparent,
-                                    0.93f to color.copy(alpha = color.alpha * 0.55f * pulse),
-                                    1f to Color.Transparent
-                                )
-                            )
-                        } else Modifier
-                    )
-                    .then(if (ambientGlowActive) Modifier.padding(bottom = 16.dp) else Modifier)
-                    .then(
                         if (webMode) Modifier.weight(1f)
                         else Modifier.aspectRatio(16f / 9f)
                     )
@@ -1268,18 +1068,15 @@ fun ChannelScreen(
             }
         }
     }
-    // Lights down's dark layer, over everything but the video: black, with
-    // a faint wash of the video's own colour (as if the screen lit the
-    // room). Black rather than grey, so an OLED screen switches those pixels
+    // Lights down's dark layer, over everything but the video: plain
+    // black. Black rather than grey, so an OLED screen switches those pixels
     // off. The status and navigation bars' backgrounds are the app's, so
     // they dim too; their icons are the system's.
     Spacer(
         Modifier.fillMaxSize().drawBehind {
             val dim = dimAnimation.value
             if (dim <= 0f) return@drawBehind
-            val tint = glow.color
-            val wash = lerp(Color.Black, tint.copy(alpha = 1f), LIGHTS_TINT * tint.alpha)
-                .copy(alpha = dim)
+            val wash = Color.Black.copy(alpha = dim)
             val video = videoInRoot.translate(-screenInRoot)
             // Not laid out yet (a frame, coming back from fullscreen):
             // nothing rather than dimming the video with everything.
@@ -1578,7 +1375,7 @@ private fun Modifier.pullUp(by: androidx.compose.ui.unit.Dp): Modifier = layout 
 @Composable
 private fun NowPlayingBar(title: String, leader: String?) {
     Row(
-        // Closer to what's above (the video, or its glow) than to the chat
+        // Closer to what's above (the video) than to the chat
         // below, so the title reads as the video's caption; the channel
         // notice tucks in right under it (see MotdSection).
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 4.dp),
@@ -1737,9 +1534,9 @@ private fun VoteskipButton(voted: Boolean, tally: String?, onVote: () -> Unit) {
 /**
  * A standard NavigationBar reserves ~80dp for what is really just three
  * text-only buttons — most of that height is padding a label never needs.
- * This slim custom row keeps the same 48dp minimum touch target (Android's
- * own accessibility floor) while giving noticeably more of a phone screen
- * back to chat. Fire TV never calls this at all (see the isTv branch above),
+ * This slim custom row is 40dp tall (Material's compact touch size), giving
+ * noticeably more of a phone screen back to chat; each button's touch area
+ * still reaches Android's 48dp floor, spilling a little past the row. Fire TV never calls this at all (see the isTv branch above),
  * so it only ever affects the touch UI.
  */
 @Composable
@@ -1768,7 +1565,9 @@ private fun PanelBar(
     ) {
         Column {
             HorizontalDivider()
-            Row(Modifier.fillMaxWidth().height(48.dp)) {
+            // 40dp, Material's compact touch size: a little lower than the
+            // usual 48dp, to give the chat that room.
+            Row(Modifier.fillMaxWidth().height(40.dp)) {
                 PanelBarButton("Playlist", if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)) {
                     onOpen(Panel.PLAYLIST)
                 }

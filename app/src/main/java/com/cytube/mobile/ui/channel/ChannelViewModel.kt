@@ -138,9 +138,6 @@ data class ChannelUiState(
      *  MainActivity reads this (via PlaybackHost) to decide whether leaving
      *  the app should float the video in PiP. */
     val pipEnabled: Boolean = false,
-    /** Mirrors the Settings toggle for the ambient glow behind the windowed
-     *  player (see ChannelScreen's ambient-color capture). */
-    val ambientGlowEnabled: Boolean = true,
     /** See Settings.groupChat. */
     val groupChat: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
@@ -344,7 +341,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 effectiveMode = perChannel ?: settings.compatMode,
                 showEmotes = settings.showEmotes,
                 pipEnabled = settings.pipEnabled,
-                ambientGlowEnabled = settings.ambientGlowEnabled,
                 groupChat = settings.groupChat,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
@@ -362,14 +358,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     settings = it
                     update { s ->
                         if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled &&
-                            it.ambientGlowEnabled == s.ambientGlowEnabled &&
                             it.groupChat == s.groupChat &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
                             showEmotes = it.showEmotes,
                             pipEnabled = it.pipEnabled,
-                            ambientGlowEnabled = it.ambientGlowEnabled,
                             groupChat = it.groupChat,
                             syncEnabled = it.syncEnabled
                         )

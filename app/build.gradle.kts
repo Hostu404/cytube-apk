@@ -28,11 +28,11 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "qt.p2t"
+        versionCode = 22
+        versionName = "minerva"
         // Nightly builds (.github/workflows/nightly.yml) pass
         // -PnightlyBuild=<date>.<commit>, so About shows which night and
-        // which commit an APK came from, e.g. "qt.p2t-nightly.20261003.ab12cd3".
+        // which commit an APK came from, e.g. "minerva-nightly.20261003.ab12cd3".
         providers.gradleProperty("nightlyBuild").orNull?.let { versionName = "$versionName-nightly.$it" }
     }
 

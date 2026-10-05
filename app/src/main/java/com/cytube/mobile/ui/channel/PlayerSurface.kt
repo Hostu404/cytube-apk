@@ -59,7 +59,6 @@ import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 import androidx.webkit.WebViewFeature
-import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.player.DownloadWatch
@@ -178,15 +177,6 @@ fun PlayerSurface(
     onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
     modifier: Modifier = Modifier,
-    /** Fires right as each item's first frame renders, and then again on a
-     *  slow, fixed interval for as long as that item keeps playing — see
-     *  ExoSurface for why a tiny downsampled TextureView grab is cheap
-     *  enough to repeat every few seconds without it costing anything
-     *  worth worrying about, unlike sampling every frame would be. Used to
-     *  color the ambient glow behind the windowed player, which crossfades
-     *  between whatever colors arrive here rather than snapping; null for
-     *  EMBED/WEB, which have no ExoPlayer to snapshot. */
-    onFrameSnapshot: ((Bitmap) -> Unit)? = null,
     /** Fires once, the moment this item finishes playing on its own (not a
      *  seek, not a manual stop) — Media3-played types via ExoPlayer's own
      *  STATE_ENDED, EMBED via a sentinel console message each embed page
@@ -224,7 +214,7 @@ fun PlayerSurface(
             media == null -> Message("Nothing is playing")
             player == MediaTypes.Player.NATIVE || StreamResolvers.handles(player) ->
                 Media3Surface(
-                    media, player, showControls, onHandle, onFailed, onFrameSnapshot, onEnded,
+                    media, player, showControls, onHandle, onFailed, onEnded,
                     onStall, qualityIndex, planStart
                 )
             player == MediaTypes.Player.EMBED && embedSrc != null ->
@@ -733,7 +723,6 @@ private fun Media3Surface(
     showControls: Boolean,
     onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
-    onFrameSnapshot: ((Bitmap) -> Unit)?,
     onEnded: (() -> Unit)?,
     onStall: ((Long) -> Unit)?,
     qualityIndex: Int,
@@ -807,7 +796,6 @@ private fun Media3Surface(
             showControls = showControls,
             onHandle = exoOnHandle,
             onFailed = exoOnFailed,
-            onFrameSnapshot = onFrameSnapshot,
             onEnded = onEnded,
             onStall = onStall,
             qualityIndex = qualityIndex,
@@ -831,7 +819,6 @@ private fun ExoSurface(
     showControls: Boolean,
     onHandle: (PlayerHandle) -> Unit,
     onFailed: (String) -> Unit,
-    onFrameSnapshot: ((Bitmap) -> Unit)?,
     onEnded: (() -> Unit)?,
     onStall: ((Long) -> Unit)?,
     qualityIndex: Int,
@@ -845,7 +832,6 @@ private fun ExoSurface(
     val currentOnFailed by rememberUpdatedState(onFailed)
     val currentOnEnded by rememberUpdatedState(onEnded)
     val currentOnStall by rememberUpdatedState(onStall)
-    val currentOnFrameSnapshot by rememberUpdatedState(onFrameSnapshot)
     val currentPlanStart by rememberUpdatedState(planStart)
     val exo = remember(isTv) {
         val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(context)
@@ -981,18 +967,12 @@ private fun ExoSurface(
         handle.captionOutput = { cues -> playerViewRef[0]?.subtitleView?.setCues(cues) }
         onDispose { handle.captionOutput = null }
     }
-    var ambientBitmap by remember { mutableStateOf<Bitmap?>(null) }
     // Shown over the player while a quality switch reloads. Never
     // recycle()d, only let go: it can still be in the frame being drawn when
-    // it's replaced, and drawing a recycled bitmap crashes. (The ambient
-    // sample is only ever read, never drawn, so that one is recycled.)
+    // it's replaced, and drawing a recycled bitmap crashes.
     var transitionFreezeFrame by remember { mutableStateOf<Bitmap?>(null) }
     DisposableEffect(Unit) {
-        onDispose {
-            ambientBitmap?.recycle()
-            ambientBitmap = null
-            transitionFreezeFrame = null
-        }
+        onDispose { transitionFreezeFrame = null }
     }
 
     val scope = rememberCoroutineScope()
@@ -1066,29 +1046,10 @@ private fun ExoSurface(
                 }
             }
 
-            // The immediate snapshot: taken the moment a new item's first
-            // frame actually renders, so the glow doesn't sit on the
-            // PREVIOUS item's color for the first few seconds of a new one.
-            // Media3 also calls this on a media-source swap within the same
-            // ExoPlayer instance (a playlist advance), which is exactly when
-            // a fresh snapshot is wanted too. The
-            // periodic resample loop below (see the LaunchedEffect right
-            // after this listener) is what keeps the color moving with the
-            // video for the rest of that item's runtime, rather than this
-            // one-shot being the only update it ever gets.
+            // The new stream is showing: the quality switch's freeze frame
+            // can go.
             override fun onRenderedFirstFrame() {
                 transitionFreezeFrame = null
-                val snapshot = currentOnFrameSnapshot ?: return
-                val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: return
-                if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
-                    ambientBitmap = Bitmap.createBitmap(
-                        AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
-                    )
-                }
-                val target = ambientBitmap ?: return
-                runCatching { textureView.getBitmap(target) }
-                    .getOrNull()
-                    ?.let(snapshot)
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -1278,38 +1239,6 @@ private fun ExoSurface(
         }
     }
 
-    // Keeps the ambient glow actually tracking the video instead of freezing
-    // on whatever color the first frame happened to be — the gap the one-shot
-    // snapshot above left. Deliberately a slow poll rather than a frame
-    // callback: AMBIENT_RESAMPLE_INTERVAL_MS is long enough that this is a
-    // handful of tiny 16x16 TextureView grabs per minute, not a per-frame
-    // cost, and ChannelScreen already crossfades every new color in over a
-    // few seconds, so infrequent sampling still reads as smooth rather than
-    // a visible jump. Skipped while paused (nothing new to sample) and
-    // whenever onFrameSnapshot is null (glow off, or on TV where it's never
-    // shown).
-    LaunchedEffect(exo) {
-        while (true) {
-            delay(AMBIENT_RESAMPLE_INTERVAL_MS)
-            val snapshot = currentOnFrameSnapshot ?: continue
-            val isPlaying = runCatching { exo.isPlaying }.getOrDefault(false)
-            if (!isPlaying) continue
-            // Nothing on screen (and no video decoded) while in the
-            // background, so nothing worth sampling. This loop keeps running
-            // then — it's a coroutine already under way, not a recomposition.
-            if (AppVisibility.inBackground.value) continue
-            val textureView = playerViewRef[0]?.videoSurfaceView as? TextureView ?: continue
-            if (ambientBitmap == null || ambientBitmap?.isRecycled == true) {
-                ambientBitmap = Bitmap.createBitmap(
-                    AMBIENT_SAMPLE_SIZE, AMBIENT_SAMPLE_SIZE, Bitmap.Config.ARGB_8888
-                )
-            }
-            val target = ambientBitmap ?: continue
-            val bitmap = runCatching { textureView.getBitmap(target) }.getOrNull() ?: continue
-            snapshot(bitmap)
-        }
-    }
-
     DisposableEffect(handle) {
         onDispose {
             playerViewRef[0] = null
@@ -1392,8 +1321,8 @@ private fun ExoSurface(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 // Inflated from XML (player_view.xml) because a TextureView
-                // surface can only be chosen there; it's what frame capture
-                // (ambient glow, the quality-switch freeze frame) needs.
+                // surface can only be chosen there; it's what the
+                // quality-switch freeze frame's capture needs.
                 val view = LayoutInflater.from(ctx)
                     .inflate(R.layout.player_view, null, false) as PlayerView
                 view.apply {
@@ -1435,50 +1364,11 @@ private fun ExoSurface(
     }
 }
 
-/** Side length (px) of the TextureView snapshot used for the ambient glow —
- *  tiny on purpose, since it's only ever averaged into one color. */
-private const val AMBIENT_SAMPLE_SIZE = 16
-
-/** How often the ambient glow resamples the video while it's playing — see
- *  the LaunchedEffect in ExoSurface. Still infrequent (a poll, not a frame
- *  hook) but shorter than it once was: ChannelScreen's crossfade now runs
- *  nearly this whole interval on purpose, so the glow is close to always in
- *  motion rather than easing in and then sitting still — a shorter interval
- *  is what keeps that continuous feel from also meaning a longer crossfade
- *  per step, since each sample only nudges the color (see
- *  AMBIENT_SAMPLE_BLEND in ChannelScreen) rather than setting it outright. */
-private const val AMBIENT_RESAMPLE_INTERVAL_MS = 3_000L
-
 /** Process-wide, ever-increasing — see the doc comment on ExoSurface's
  *  mediaSession for why every MediaSession this app ever creates needs a
  *  genuinely unique id, not just one that's unique per ExoSurface call. */
 private val mediaSessionIdCounter = java.util.concurrent.atomic.AtomicInteger(0)
 private fun nextMediaSessionId(): Int = mediaSessionIdCounter.getAndIncrement()
-
-/**
- * Cheap, good-enough dominant-color extraction for the ambient glow: average
- * every pixel of the tiny [AMBIENT_SAMPLE_SIZE] snapshot rather than running
- * a real palette/quantization pass. Called on each item's first frame and
- * then on ExoSurface's slow [AMBIENT_RESAMPLE_INTERVAL_MS] poll while it
- * keeps playing — never per frame — so even a naive full-bitmap average
- * costs nothing measurable at either the snapshot's tiny size or this rate.
- */
-internal fun averageColor(bitmap: Bitmap): Color {
-    val w = bitmap.width
-    val h = bitmap.height
-    val n = w * h
-    if (w <= 0 || h <= 0 || n <= 0) return Color.Black
-    val pixels = IntArray(n)
-    bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-    var r = 0L; var g = 0L; var b = 0L
-    for (i in 0 until n) {
-        val p = pixels[i]
-        r += (p shr 16) and 0xFF
-        g += (p shr 8) and 0xFF
-        b += p and 0xFF
-    }
-    return Color(red = (r / n) / 255f, green = (g / n) / 255f, blue = (b / n) / 255f)
-}
 
 @Composable
 private fun Message(text: String) {
