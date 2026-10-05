@@ -48,6 +48,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -75,6 +80,7 @@ import androidx.compose.ui.unit.Density
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
@@ -94,6 +100,7 @@ import com.cytube.mobile.net.Emote
 import com.cytube.mobile.net.EmoteSet
 import com.cytube.mobile.net.ChatMessage
 import com.cytube.mobile.net.MediaTypes
+import com.cytube.mobile.net.NameColors
 import com.cytube.mobile.net.PlaylistItem
 import com.cytube.mobile.net.Poll
 import com.cytube.mobile.net.imageTagUrls
@@ -274,7 +281,11 @@ fun ChatPanel(
     onStartPm: ((String) -> Unit)? = null,
     /** Who the input is currently sending private messages to, if anyone. */
     pmTarget: String? = null,
-    onCancelPm: () -> Unit = {}
+    onCancelPm: () -> Unit = {},
+    /** Who's in the channel, for their rank: staff names take the channel's
+     *  own colours (see chatNameColor). */
+    users: ImmutableList<ChannelUser> = persistentListOf(),
+    nameColors: NameColors = NameColors.NONE
 ) {
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
@@ -282,6 +293,8 @@ fun ChatPanel(
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val isTv = remember { isTvDevice(context) }
+    val rankByName = remember(users) { users.associate { it.name.lowercase() to it.rank } }
+    val listBackground = MaterialTheme.colorScheme.background
     var inputFocused by remember { mutableStateOf(false) }
     // Phone: Back from the message box only leaves the box. The keyboard
     // takes the first Back itself; without this, the next one (box still
@@ -425,6 +438,28 @@ fun ChatPanel(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize()
+                // Messages scrolled up past the top edge fade out rather than
+                // ending in a hard cut, which left a sliver of one showing.
+                // Only while there's something above to scroll back to; the
+                // separate layer it needs exists only then.
+                .graphicsLayer {
+                    compositingStrategy = if (listState.canScrollBackward) {
+                        CompositingStrategy.Offscreen
+                    } else {
+                        CompositingStrategy.Auto
+                    }
+                }
+                .drawWithContent {
+                    drawContent()
+                    if (listState.canScrollBackward) {
+                        val fade = CHAT_TOP_FADE.toPx()
+                        drawRect(
+                            Brush.verticalGradient(0f to Color.Transparent, 1f to Color.Black, endY = fade),
+                            size = androidx.compose.ui.geometry.Size(size.width, fade),
+                            blendMode = BlendMode.DstIn
+                        )
+                    }
+                }
                 // Swallowing Up/Down here (rather than relying on every
                 // ChatRow's clickable bits somehow not being focusable) is
                 // what actually guarantees this: it stops D-pad focus from
@@ -444,16 +479,33 @@ fun ChatPanel(
                         Modifier
                     }
                 ),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
         ) {
             items(
-                items = messages,
-                key = { it.seq },
-                contentType = { if (it.isServerMessage) "server" else "user" }
-            ) { msg ->
+                count = messages.size,
+                key = { messages[it].seq },
+                contentType = { if (messages[it].isServerMessage) "server" else "user" }
+            ) { index ->
+                val msg = messages[index]
+                // A message straight after one of the same person's goes
+                // under it without their name again, like Discord; see
+                // continuesGroup. The gap between people is the wider one.
+                val continues = continuesGroup(messages.getOrNull(index - 1), msg)
+                val rank = rankByName[msg.username.lowercase()]
+                val nameColor = remember(msg.username, rank, nameColors, listBackground) {
+                    chatNameColor(msg.username, rank, nameColors, listBackground)
+                }
                 ChatRow(
                     msg = msg,
+                    nameColor = nameColor,
+                    continuesGroup = continues,
+                    modifier = Modifier.padding(
+                        top = when {
+                            index == 0 -> 0.dp
+                            continues -> 2.dp
+                            else -> 8.dp
+                        }
+                    ),
                     showEmotes = showEmotes,
                     emotes = emotes,
                     onUsernameClick = { name -> draft = draft.insertReply(name) },
@@ -1197,9 +1249,51 @@ private val SPOILER_SET_SAVER = Saver<Set<Int>, IntArray>(
  *  (and a Coil request per tile) the moment the sheet opens. */
 private const val EMOTE_PAGE_SIZE = 200
 
+/** How long after someone's message their next one still goes under it
+ *  without their name. Longer, and it starts afresh with name and time. */
+private const val CHAT_GROUP_MS = 5 * 60_000L
+
+/** How far down from the chat's top edge messages fade in. */
+private val CHAT_TOP_FADE = 16.dp
+
+/** [msg] goes under [prev] without a name: same person, same kind
+ *  (public, or a PM with the same person), soon after. */
+private fun continuesGroup(prev: ChatMessage?, msg: ChatMessage): Boolean =
+    prev != null && !prev.isServerMessage && !msg.isServerMessage &&
+        prev.username.equals(msg.username, ignoreCase = true) &&
+        prev.isPm == msg.isPm && prev.to == msg.to &&
+        msg.timestamp - prev.timestamp in 0..CHAT_GROUP_MS
+
+/** Soft colours that all read on the chat's dark grey, for names the
+ *  channel doesn't colour itself. */
+private val CHAT_NAME_PALETTE = listOf(
+    0xFF8AB4F8, 0xFFF28B82, 0xFFFDD663, 0xFF81C995,
+    0xFFFCAD70, 0xFFC58AF9, 0xFF78D9EC, 0xFFFF8BCB
+).map { Color(it) }
+
+/**
+ * A name's colour in chat. Staff (and guests) whose rank the channel gives a
+ * colour of its own in its CSS get that, as on its web page. Everyone else
+ * gets one of a few soft colours, always the same one for the same name, so
+ * who's talking is easy to follow; one shared colour for the whole channel
+ * (`.userlist_item`) would make everyone look alike again, so it's skipped.
+ * [rank] is null for someone no longer in the channel.
+ */
+private fun chatNameColor(name: String, rank: Double?, nameColors: NameColors, background: Color): Color {
+    val channel = rank?.let(nameColors::ownForRank)
+    if (channel != null) return readableOn(Color(channel), background)
+    val pick = Math.floorMod(name.lowercase().hashCode(), CHAT_NAME_PALETTE.size)
+    return readableOn(CHAT_NAME_PALETTE[pick], background)
+}
+
 @Composable
 private fun ChatRow(
     msg: ChatMessage,
+    /** The name's colour; see chatNameColor. */
+    nameColor: Color,
+    /** Straight after the same person's last message: no name or time. */
+    continuesGroup: Boolean,
+    modifier: Modifier = Modifier,
     showEmotes: Boolean,
     emotes: EmoteSet,
     onUsernameClick: (String) -> Unit,
@@ -1243,7 +1337,7 @@ private fun ChatRow(
             inlineContent = inline,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+            modifier = modifier.fillMaxWidth().padding(vertical = 2.dp)
         )
         return
     }
@@ -1266,64 +1360,72 @@ private fun ChatRow(
         else -> null
     }
     val rowModifier = if (highlight != null) {
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(highlight)
             .padding(horizontal = 8.dp, vertical = 4.dp)
     } else {
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
+    }
+
+    // The name and time on a line above the message; the same person's
+    // next messages go under it with neither, like Discord.
+    val nameStyle = MaterialTheme.typography.labelLarge
+    val timeStyle = MaterialTheme.typography.labelSmall
+    val timeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+    val pmColor = MaterialTheme.colorScheme.tertiary
+    val shownName = if (isOutgoingPm) "You → ${msg.to ?: "?"}" else msg.username
+    val header = remember(continuesGroup, shownName, nameColor, msg.timestamp, msg.isPm) {
+        if (continuesGroup) {
+            null
+        } else {
+            buildAnnotatedString {
+                withStyle(nameStyle.toSpanStyle().copy(color = if (msg.isPm) pmColor else nameColor)) {
+                    append(shownName)
+                }
+                append("  ")
+                withStyle(timeStyle.toSpanStyle().copy(color = timeColor)) {
+                    append(formatTime(msg.timestamp))
+                    if (msg.isPm) {
+                        append("  ")
+                        withStyle(SpanStyle(color = pmColor)) { append("PM") }
+                    }
+                }
+            }
+        }
+    }
+    val text = rendered.text
+    val onNameClick = {
+        // On a PM, tapping the name replies privately, not by dropping
+        // "name: " into PUBLIC chat where the answer would be posted for the
+        // whole channel to see.
+        if (msg.isPm && onPmReply != null) onPmReply(pmOtherParty)
+        else onUsernameClick(msg.username)
     }
 
     Column(rowModifier) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (header != null) {
+            // Only the name line is clickable, not the row. The padding comes
+            // after clickable so it grows the tap target: short names were
+            // easy to miss otherwise.
             Text(
-                if (isOutgoingPm) "You → ${msg.to ?: "?"}" else msg.username,
-                style = MaterialTheme.typography.labelLarge,
-                color = if (msg.isPm) MaterialTheme.colorScheme.tertiary
-                else MaterialTheme.colorScheme.primary,
-                // Only the name is clickable, not the row. The padding is
-                // applied AFTER clickable (not before) specifically so it
-                // grows the actual tap target instead of just adding
-                // invisible dead space around a target that stays small —
-                // short usernames were easy to miss otherwise.
+                header,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
-                    .then(
-                        if (usernameClickable) {
-                            Modifier.clickable {
-                                // On a PM, tapping the name replies privately,
-                                // not by dropping "name: " into PUBLIC chat
-                                // where the answer would be posted for the
-                                // whole channel to see.
-                                if (msg.isPm && onPmReply != null) onPmReply(pmOtherParty)
-                                else onUsernameClick(msg.username)
-                            }
-                        } else {
-                            Modifier
-                        }
-                    )
+                    .then(if (usernameClickable) Modifier.clickable(onClick = onNameClick) else Modifier)
                     .padding(vertical = 4.dp, horizontal = 2.dp)
             )
-            // A step quieter than the name, so names and messages lead.
-            Text(
-                formatTime(msg.timestamp),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-            )
-            if (msg.isPm) {
-                Text("PM", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.tertiary)
-            }
         }
         // ClickableText cannot take inlineContent, and inline emotes are not
         // negotiable, so the tap is hit-tested against the laid-out text
         // instead. Taps that don't land on a link fall through untouched.
         var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
         Text(
-            text = rendered.text,
+            text = text,
             inlineContent = inline,
             style = MaterialTheme.typography.bodyMedium,
             onTextLayout = { layout = it },
-            modifier = Modifier.pointerInput(rendered.text) {
+            modifier = Modifier.pointerInput(text, usernameClickable) {
                 // Emotes render small (28sp inline, still only 56sp even for
                 // a solo emote), and getOffsetForPosition only ever resolves
                 // to the exact character the finger landed on — a tap a few
@@ -1339,9 +1441,9 @@ private fun ChatRow(
                     val offset = l.getOffsetForPosition(pos)
                     // Emotes and links never overlap, but check emotes first
                     // since that's the more specific hit.
-                    val emote = ChatHtml.emoteAt(rendered.text, offset) ?: run {
-                        val spans = rendered.text.getStringAnnotations(
-                            ChatHtml.EMOTE_TAG, 0, rendered.text.length
+                    val emote = ChatHtml.emoteAt(text, offset) ?: run {
+                        val spans = text.getStringAnnotations(
+                            ChatHtml.EMOTE_TAG, 0, text.length
                         )
                         spans.firstOrNull { span ->
                             val box = l.getBoundingBox(span.start)
@@ -1355,8 +1457,8 @@ private fun ChatRow(
                     // emote in it works like anywhere else, and a tap on its
                     // plain text hides it again. Skipped outright when
                     // revealSpoilers is on (TV): nothing is hidden there.
-                    val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(rendered.text, offset) else null
-                    val link = ChatHtml.linkAt(rendered.text, offset)
+                    val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(text, offset) else null
+                    val link = ChatHtml.linkAt(text, offset)
                     when {
                         spoilerIndex != null && spoilerIndex !in revealedSpoilers ->
                             revealedSpoilers = revealedSpoilers + spoilerIndex

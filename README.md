@@ -48,17 +48,18 @@ use out of it:
 * Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
 * Subtitles: the **CC** button turns on a video's subtitles and picks between them — a custom manifest's subtitle files, a Google Drive video's, YouTube captions, or ones inside the stream. They stay off until you turn them on, and stay on for the next video once you have
 * Fullscreen, mute toggle, and an ambient glow behind the video
-* Lights down (phone): the moon button dims everything around the video, tinted with the video's colour. Touch the screen to lift them a little for a moment; everything still works while dimmed
+* Lights down (phone): the light bulb button dims everything around the video, tinted with the video's colour. Touch the screen to lift them a little for a moment; everything still works while dimmed
 
 ### Chat
 
 * Real-time chat with custom channel emotes
+* Each name has its own colour (staff in the channel's rank colours), and someone's messages in a row sit together under their name, as on Discord
 * Messages that mention your name are highlighted
 * Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
 * Tap an emote in chat to reuse it
 * Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
 * Site-wide announcements appear in chat once, not again in every channel
-* Niconico-style chat overlay across the video; tap the circle to turn it on
+* Niconico-style chat overlay across the video; tap the square to turn it on
 
 ### Channels
 
@@ -75,7 +76,7 @@ use out of it:
 
 Works with a TV remote's D-pad. From the video, press **Down**:
 
-* With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico circle to reach the **CC** button.
+* With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico square to reach the **CC** button.
 * With "stay in sync" **off**, Down opens a full-screen playlist with a search bar, for picking your own videos (chat isn't available in this mode).
 
 Press **Up** or **Back** to return to the video. Adding videos and private messages are phone-only.
