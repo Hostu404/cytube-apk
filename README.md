@@ -53,7 +53,7 @@ use out of it:
 ### Chat
 
 * Real-time chat with custom channel emotes
-* Each name has its own colour (staff in the channel's rank colours), and someone's messages in a row sit together under their name, as on Discord
+* Each name has its own colour (staff in the channel's rank colours), and someone's messages in a row sit together under their name, as on Discord (phone; turn it on in Settings)
 * Messages that mention your name are highlighted
 * Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
 * Tap an emote in chat to reuse it

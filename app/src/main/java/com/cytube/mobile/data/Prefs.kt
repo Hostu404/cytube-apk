@@ -38,6 +38,10 @@ data class Settings(
      *  On by default — unlike PiP this is pure decoration with nothing to
      *  misbehave, so there's no reason to make people opt in. */
     val ambientGlowEnabled: Boolean = true,
+    /** Someone's messages in a row go under their name once, like Discord,
+     *  instead of each with its own name and time. Phone only; off by
+     *  default. */
+    val groupChat: Boolean = false,
     /** Display name used to join chat as a guest, set on the Account
      *  screen. Blank means "not chosen": each connection then uses a fresh
      *  random GuestNNNN name, which isn't saved. */
@@ -58,6 +62,7 @@ class SettingsStore(private val context: Context) {
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
             ambientGlowEnabled = p[AMBIENT_GLOW] ?: true,
+            groupChat = p[GROUP_CHAT] ?: false,
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE])
         )
@@ -69,6 +74,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
     suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
     suspend fun setAmbientGlow(v: Boolean) = context.dataStore.edit { it[AMBIENT_GLOW] = v }.let {}
+    suspend fun setGroupChat(v: Boolean) = context.dataStore.edit { it[GROUP_CHAT] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
     suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { it[THEME_MODE] = v.name }.let {}
@@ -116,6 +122,7 @@ class SettingsStore(private val context: Context) {
         val EMOTES = booleanPreferencesKey("show_emotes")
         val PIP = booleanPreferencesKey("pip_enabled")
         val AMBIENT_GLOW = booleanPreferencesKey("ambient_glow_enabled")
+        val GROUP_CHAT = booleanPreferencesKey("group_chat")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val FAVOURITES = stringSetPreferencesKey("favourites")

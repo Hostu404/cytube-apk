@@ -285,7 +285,10 @@ fun ChatPanel(
     /** Who's in the channel, for their rank: staff names take the channel's
      *  own colours (see chatNameColor). */
     users: ImmutableList<ChannelUser> = persistentListOf(),
-    nameColors: NameColors = NameColors.NONE
+    nameColors: NameColors = NameColors.NONE,
+    /** Someone's messages in a row under their name once (Settings, phone
+     *  only); off, each has its own name and time. */
+    groupMessages: Boolean = false
 ) {
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
@@ -490,7 +493,8 @@ fun ChatPanel(
                 // A message straight after one of the same person's goes
                 // under it without their name again, like Discord; see
                 // continuesGroup. The gap between people is the wider one.
-                val continues = continuesGroup(messages.getOrNull(index - 1), msg)
+                // Off in Settings (and on TV), every message has its name.
+                val continues = groupMessages && continuesGroup(messages.getOrNull(index - 1), msg)
                 val rank = rankByName[msg.username.lowercase()]
                 val nameColor = remember(msg.username, rank, nameColors, listBackground) {
                     chatNameColor(msg.username, rank, nameColors, listBackground)
