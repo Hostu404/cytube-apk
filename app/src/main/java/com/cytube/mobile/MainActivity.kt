@@ -14,7 +14,11 @@ import android.os.Bundle
 import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -67,7 +71,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        lastNightMode = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
         // Only on a fresh start: when Android recreates the Activity (e.g.
         // after the process was killed in the background) it restores the
         // screen stack itself, and re-reading the same launch link would
@@ -99,6 +102,26 @@ class MainActivity : ComponentActivity() {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
                     ThemeMode.DARK, ThemeMode.COT -> true
+                }
+
+                // The navigation bar is see-through everywhere, so each
+                // screen's own background runs to the bottom edge behind its
+                // buttons, which are dark or light to match the screen's
+                // light/dark look (the Appearance setting). The channel
+                // screen, always dark, sets its own (ChannelScreen). The
+                // status bar keeps the usual styling. Re-applied after every
+                // configuration change, a rotation included: androidx's
+                // enableEdgeToEdge puts its default styling back on each one.
+                val backStackEntry by nav.currentBackStackEntryAsState()
+                val onChannel = backStackEntry?.destination?.route == "channel/{name}"
+                val configuration = LocalConfiguration.current
+                LaunchedEffect(isDark, onChannel, configuration) {
+                    if (onChannel) return@LaunchedEffect
+                    val clear = android.graphics.Color.TRANSPARENT
+                    enableEdgeToEdge(
+                        navigationBarStyle = if (isDark) SystemBarStyle.dark(clear)
+                        else SystemBarStyle.light(clear, clear)
+                    )
                 }
 
                 // Deep link support: a cytu.be/r/<channel> link (cold start or
@@ -236,25 +259,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Configuration changes listed in the manifest's configChanges arrive
-     * here instead of recreating the Activity (see the manifest comment).
-     * Compose picks up the new configuration by itself; the one thing it
-     * doesn't redo is enableEdgeToEdge()'s light/dark status-bar icon choice,
-     * which is decided once, so re-apply it when dark mode flips.
-     */
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        val nightMode = newConfig.uiMode and Configuration.UI_MODE_NIGHT_MASK
-        if (nightMode != lastNightMode) {
-            lastNightMode = nightMode
-            enableEdgeToEdge()
-        }
-    }
-
-    /** Night-mode bits as of the last time edge-to-edge styling was applied —
-     *  see onConfigurationChanged. */
-    private var lastNightMode = 0
 
     override fun onStart() {
         super.onStart()

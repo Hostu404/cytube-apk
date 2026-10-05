@@ -59,10 +59,6 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.Lightbulb as LightbulbOutlined
 import androidx.compose.material.icons.outlined.StarBorder
-import androidx.compose.material.icons.outlined.Group
-import androidx.compose.material.icons.outlined.Poll
-import androidx.compose.material.icons.outlined.VideoLibrary
-import androidx.compose.ui.graphics.vector.ImageVector
 import com.cytube.mobile.player.SubtitleOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -583,7 +579,7 @@ fun ChannelScreen(
     // mode that meant a light grey three-button bar against this always-dark
     // screen. Here it's see-through, so the screen's own background shows
     // behind its buttons, which are light to match; back to the app's usual
-    // styling when this screen goes. The status bar at the top keeps the
+    // styling when this screen goes (MainActivity). The status bar at the top keeps the
     // usual styling: in light mode its dark clock and icons sit quietly on
     // the dark screen, which is less distracting.
     //
@@ -610,9 +606,6 @@ fun ChannelScreen(
                 }
             )
         }
-    }
-    DisposableEffect(componentActivity) {
-        onDispose { componentActivity?.enableEdgeToEdge() }
     }
     // Auto-hide overlay controls while fullscreen.
     LaunchedEffect(controlsVisible, fullscreen) {
@@ -982,10 +975,11 @@ fun ChannelScreen(
                     }
                 },
                 actions = {
-                    // Compact buttons: Material's own small size (40dp) instead
-                    // of the usual 48dp touch box, so the icons sit closer
+                    // Compact buttons: 36dp wide instead of the usual 48dp
+                    // touch box (TopBarButton), so the icons sit closer
                     // together and leave the channel name more room, while
-                    // each is still easy to hit on its own.
+                    // each is still its own target, side by side with no
+                    // overlap.
                     CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides TOP_BAR_BUTTON_SIZE) {
                         // Leftmost, with the CC button: the two that only show
                         // up once the channel or the video says so, so their
@@ -1023,7 +1017,7 @@ fun ChannelScreen(
                         if (state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
                             state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
                         ) {
-                            IconButton(onClick = vm::toggleMute) {
+                            IconButton(onClick = vm::toggleMute, modifier = TopBarButton) {
                                 Icon(
                                     if (state.muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                     contentDescription = if (state.muted) "Unmute" else "Mute"
@@ -1039,7 +1033,7 @@ fun ChannelScreen(
                         // "filled" theme still rendered as an outline and the
                         // on/off states looked identical on device. A literal
                         // square Box can't have that problem.
-                        IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
+                        IconButton(onClick = { chatOverlayOn = !chatOverlayOn }, modifier = TopBarButton) {
                             val squareColor = LocalContentColor.current
                             Box(
                                 Modifier
@@ -1066,7 +1060,7 @@ fun ChannelScreen(
                         // pop in; not in Compatibility View, which has no
                         // video of its own to dim around.
                         if (!webMode) {
-                            IconButton(onClick = {
+                            IconButton(modifier = TopBarButton, onClick = {
                                 lightsDown = !lightsDown
                                 // The touch on this button also counted as
                                 // bringing the lights up for a few seconds
@@ -1082,13 +1076,13 @@ fun ChannelScreen(
                                 )
                             }
                         }
-                        IconButton(onClick = vm::toggleFavourite) {
+                        IconButton(onClick = vm::toggleFavourite, modifier = TopBarButton) {
                             Icon(
                                 if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
                                 contentDescription = "Favorite"
                             )
                         }
-                        IconButton(onClick = { showModeSheet = true }) {
+                        IconButton(onClick = { showModeSheet = true }, modifier = TopBarButton) {
                             Icon(Icons.Default.MoreVert, contentDescription = "Channel options")
                         }
                     }
@@ -1268,6 +1262,7 @@ fun ChannelScreen(
                 onCancelPm = onCancelPm,
                 users = state.users,
                 nameColors = state.nameColors,
+                groupMessages = state.groupChat,
                 modifier = Modifier.weight(1f)
             )
             }
@@ -1567,9 +1562,10 @@ private fun MotdSection(
  *  padding (see MotdSection), so it reads as part of the title. */
 private val NOTICE_PULL_UP = 4.dp
 
-/** Touch size of the top bar's action buttons: Material's compact size,
- *  down from the usual 48dp (see the TopAppBar actions). */
-private val TOP_BAR_BUTTON_SIZE = 40.dp
+/** Touch size of the top bar's action buttons, down from the usual 48dp
+ *  (see the TopAppBar actions): narrower than tall, to sit closer. */
+private val TOP_BAR_BUTTON_SIZE = 36.dp
+private val TopBarButton = Modifier.size(width = TOP_BAR_BUTTON_SIZE, height = 40.dp)
 
 /** Draws this [by] higher and gives that space back below it, unlike
  *  offset(), which moves the drawing but leaves a gap where it was. */
@@ -1624,7 +1620,7 @@ private fun SubtitleButton(options: SubtitleOptions, onSelect: (Int?, String) ->
                     else -> onSelect(0, options.key)
                 }
             },
-            modifier = Modifier.semantics {
+            modifier = TopBarButton.semantics {
                 contentDescription = when {
                     options.names.size > 1 -> "Subtitles"
                     options.showing -> "Turn off subtitles"
@@ -1712,7 +1708,7 @@ private fun VoteskipButton(voted: Boolean, tally: String?, onVote: () -> Unit) {
     IconButton(
         onClick = onVote,
         enabled = !voted,
-        modifier = Modifier.semantics {
+        modifier = TopBarButton.semantics {
             contentDescription = when {
                 voted && tally != null -> "Voted to skip, $tally"
                 voted -> "Voted to skip"
@@ -1773,13 +1769,10 @@ private fun PanelBar(
         Column {
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().height(48.dp)) {
-                PanelBarButton(
-                    "Playlist", Icons.Outlined.VideoLibrary,
-                    if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)
-                ) {
+                PanelBarButton("Playlist", if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)) {
                     onOpen(Panel.PLAYLIST)
                 }
-                PanelBarButton("Users", Icons.Outlined.Group, userCount, Modifier.weight(1f)) {
+                PanelBarButton("Users", userCount, Modifier.weight(1f)) {
                     onOpen(Panel.USERS)
                 }
                 // Only shown while there's a poll — running, or just closed
@@ -1788,7 +1781,6 @@ private fun PanelBar(
                 if (pollOpen) {
                     PanelBarButton(
                         if (pollClosed) "Poll results" else "Poll",
-                        Icons.Outlined.Poll,
                         count = null,
                         modifier = Modifier.weight(1f)
                     ) { onOpen(Panel.POLL) }
@@ -1798,34 +1790,31 @@ private fun PanelBar(
     }
 }
 
-/** A button along the bottom: an icon and its name, so it reads as
- *  something to tap rather than a caption, with its count a step fainter. */
+/** A tab label in the home page's label style: small, spaced-out capitals
+ *  in grey, with its count a step fainter. */
 @Composable
 private fun PanelBarButton(
     label: String,
-    icon: ImageVector,
     count: Int?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
-    val labelColor = colors.onSurface
-    val countColor = colors.onSurfaceVariant
+    val labelColor = colors.onSurfaceVariant
+    val countColor = colors.onSurfaceVariant.copy(alpha = 0.6f)
     TextButton(
         onClick = onClick,
         modifier = modifier.fillMaxHeight(),
         contentPadding = PaddingValues(horizontal = 4.dp)
     ) {
-        Icon(icon, contentDescription = null, tint = countColor, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
         Text(
             buildAnnotatedString {
-                withStyle(SpanStyle(color = labelColor)) { append(label) }
+                withStyle(SpanStyle(color = labelColor)) { append(label.uppercase()) }
                 if (count != null) {
                     withStyle(SpanStyle(color = countColor)) { append("  $count") }
                 }
             },
-            style = MaterialTheme.typography.labelLarge,
+            style = TextStyle(fontSize = 11.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Medium),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )

@@ -175,6 +175,14 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.showEmotes
             ) { scope.launch { store.setEmotes(it) } }
 
+            if (!isTv) {
+                SwitchRow(
+                    title = "Group messages",
+                    subtitle = "Groups each user's chat messages together under their name.",
+                    checked = settings.groupChat
+                ) { scope.launch { store.setGroupChat(it) } }
+            }
+
             MaSectionLabel("Support")
 
             // Plain rows that open the browser, not boxed buttons.

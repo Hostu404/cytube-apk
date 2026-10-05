@@ -144,7 +144,11 @@ fun HomeScreen(
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(bottom = 32.dp)
+            // The navigation bar is see-through (MainActivity), so the list
+            // can scroll under it, but ends clear of its buttons.
+            contentPadding = PaddingValues(
+                bottom = 32.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            )
         ) {
             item {
                 SearchField(
