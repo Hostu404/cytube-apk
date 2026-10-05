@@ -52,13 +52,17 @@ data class NameColors(
     /** .userlist_item: every name without a colour of its own. */
     val everyone: Int? = null
 ) {
-    fun forRank(rank: Double): Int? = when {
+    fun forRank(rank: Double): Int? = ownForRank(rank) ?: everyone
+
+    /** The colour for [rank]'s own class, without falling back to the one
+     *  for everyone. */
+    fun ownForRank(rank: Double): Int? = when {
         rank >= 255 -> siteAdmin
         rank >= 3 -> owner
         rank >= 2 -> moderator
         rank <= 0.0 -> guest
         else -> null
-    } ?: everyone
+    }
 
     companion object {
         val NONE = NameColors()

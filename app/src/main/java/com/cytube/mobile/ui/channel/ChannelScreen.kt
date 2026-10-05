@@ -6,7 +6,10 @@ import androidx.compose.runtime.CompositionLocalProvider
 import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.CubicBezierEasing
@@ -50,12 +53,16 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.outlined.ClosedCaption
-import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.outlined.DarkMode as DarkModeOutlined
+import androidx.compose.material.icons.outlined.Lightbulb as LightbulbOutlined
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.Group
+import androidx.compose.material.icons.outlined.Poll
+import androidx.compose.material.icons.outlined.VideoLibrary
+import androidx.compose.ui.graphics.vector.ImageVector
 import com.cytube.mobile.player.SubtitleOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -69,7 +76,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.filled.ExpandLess
@@ -218,6 +224,12 @@ private const val LIGHTS_UP_MS = 220
 /** A touch around the video: how much of the dark it lifts, and its fades
  *  up and back down, sine-shaped (gentler at both ends). */
 private const val LIGHTS_PEEK_LIFT = 0.5f
+/** The navigation bar's background while the lights are down: the dark
+ *  layer's black, at its opacity (LIGHTS_DIM). */
+private const val LIGHTS_NAV_BAR_SCRIM = 0xD9000000.toInt()
+/** The navigation bar's background otherwise: the same half-see-through
+ *  dark grey Android gives it in dark mode. */
+private const val NAV_BAR_SCRIM = 0x801B1B1B.toInt()
 private const val LIGHTS_PEEK_UP_MS = 450
 private const val LIGHTS_PEEK_DOWN_MS = 600
 private val LIGHTS_PEEK_EASING = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
@@ -570,6 +582,39 @@ fun ChannelScreen(
         }
     }
 
+    // Whether the navigation bar is dimmed with the lights; see below.
+    val navBarDimmedState = remember { mutableStateOf(false) }
+    // Android's own status and navigation bars are drawn by the system, over
+    // the app, and by default follow the phone's light/dark setting: on a
+    // phone in light mode that meant dark, hard-to-read clock and icons at
+    // the top and a light grey three-button bar at the bottom, against this
+    // always-dark screen. Here they're always dark to match (light icons),
+    // and back to the app's usual styling when this screen goes.
+    //
+    // The dark layer can't reach the navigation bar either, so while the
+    // lights are fully down it gets the layer's black at its opacity, with
+    // dark buttons, so it's dimmed too. Back still works the same; only how
+    // the bars look changes (set by the windowed layout below; fullscreen
+    // hides the bars). Re-applied after every configuration change, a
+    // rotation included: androidx's enableEdgeToEdge puts the app's default
+    // styling back on each one (MainActivity's first call leaves a listener
+    // for that), so going fullscreen and back brought the light bars back.
+    val componentActivity = activity as? ComponentActivity
+    LaunchedEffect(componentActivity, configuration) {
+        snapshotFlow { navBarDimmedState.value }.collect { navBarDimmed ->
+            componentActivity?.enableEdgeToEdge(
+                statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+                navigationBarStyle = if (navBarDimmed) {
+                    SystemBarStyle.light(LIGHTS_NAV_BAR_SCRIM, LIGHTS_NAV_BAR_SCRIM)
+                } else {
+                    SystemBarStyle.dark(NAV_BAR_SCRIM)
+                }
+            )
+        }
+    }
+    DisposableEffect(componentActivity) {
+        onDispose { componentActivity?.enableEdgeToEdge() }
+    }
     // Auto-hide overlay controls while fullscreen.
     LaunchedEffect(controlsVisible, fullscreen) {
         if (fullscreen && controlsVisible) {
@@ -642,12 +687,12 @@ fun ChannelScreen(
 
         // CyTubeChannelTheme wraps this the same way it wraps the windowed
         // Scaffold below — without it, TvChatView's ChatPanel and its Nico
-        // toggle circle inherit whatever the ambient app theme happens to be
+        // toggle square inherit whatever the ambient app theme happens to be
         // instead of the channel's own always-readable-on-dark palette, and
         // (worse) nothing here uses a Surface the way Scaffold does for the
         // windowed layout, so LocalContentColor never gets set at all and
         // falls back to its plain Compose default of black — black chat text
-        // and a black on/off circle on a near-black screen. TvChatView's own
+        // and a black on/off square on a near-black screen. TvChatView's own
         // Surface (below) is what actually fixes the content color; this is
         // what makes MaterialTheme.colorScheme resolve to the right palette
         // for it to use.
@@ -801,7 +846,7 @@ fun ChannelScreen(
 
     // Lights down stays down whatever playback does (pausing, a new video,
     // buffering, a dropped connection): only a touch around the video brings
-    // the lights partly up, for a few seconds (peeking), or the moon button turning
+    // the lights partly up, for a few seconds (peeking), or the bulb button turning
     // it off. The one exception is typing, which a touch starts: with the
     // keyboard open, the message box being written in stays lit.
     var peeking by remember { mutableStateOf(false) }
@@ -816,13 +861,15 @@ fun ChannelScreen(
     val currentLightsAreDown by rememberUpdatedState(lightsAreDown)
     // A touch around the video only lifts the dark part of the way
     // (LIGHTS_PEEK_LIFT), and that fade, and the one back down after it, is
-    // a little slower and smoother than the moon button's.
+    // a little slower and smoother than the bulb button's.
     var fadeFromTouch by remember { mutableStateOf(false) }
     val dimTarget = when {
         !lightsDown || !canDimAround || WindowInsets.isImeVisible -> 0f
         peeking -> LIGHTS_DIM * (1f - LIGHTS_PEEK_LIFT)
         else -> LIGHTS_DIM
     }
+    val navBarDimmedNow = dimTarget == LIGHTS_DIM
+    SideEffect { navBarDimmedState.value = navBarDimmedNow }
     // One short fade each way, then still: nothing animates while it sits.
     val dimAnimation = animateFloatAsState(
         targetValue = dimTarget,
@@ -831,7 +878,7 @@ fun ChannelScreen(
                 if (peeking) LIGHTS_PEEK_UP_MS else LIGHTS_PEEK_DOWN_MS,
                 easing = LIGHTS_PEEK_EASING
             )
-            // The moon button: down eases in and out; up starts at full
+            // The bulb button: down eases in and out; up starts at full
             // speed, so the tap is answered at once.
             dimTarget == LIGHTS_DIM -> tween(LIGHTS_DOWN_MS, easing = FastOutSlowInEasing)
             else -> tween(LIGHTS_UP_MS, easing = LinearOutSlowInEasing)
@@ -967,7 +1014,7 @@ fun ChannelScreen(
                             SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
                         }
                         // Dedicated mute toggle, immediately left of the Nico
-                        // circle. Backed by PlayerHandle.setVolume (already
+                        // square. Backed by PlayerHandle.setVolume (already
                         // implemented by every native/NewPipe/GDrive handle) via
                         // ChannelViewModel.toggleMute — purely an audio flag, so
                         // toggling it never pauses, seeks, or otherwise disrupts
@@ -985,21 +1032,24 @@ fun ChannelScreen(
                             }
                         }
                         // The sole on/off switch for the Niconico overlay — see
-                        // chatOverlayOn's declaration above. A small circle,
-                        // filled when on and an outline when off, like the
-                        // moon and star after it (earth, moon and stars).
-                        // Drawn by hand rather than with a Material icon, so
-                        // the two states can't end up looking the same.
+                        // chatOverlayOn's declaration above. Same idea as the
+                        // favourite star further along — filled when on,
+                        // outline when off — but drawn by hand rather than via a
+                        // Material icon: CropSquare turned out to be the crop
+                        // tool's corner-frame glyph, not a plain block, so its
+                        // "filled" theme still rendered as an outline and the
+                        // on/off states looked identical on device. A literal
+                        // square Box can't have that problem.
                         IconButton(onClick = { chatOverlayOn = !chatOverlayOn }) {
-                            val circleColor = LocalContentColor.current
+                            val squareColor = LocalContentColor.current
                             Box(
                                 Modifier
-                                    .size(12.dp)
+                                    .size(20.dp)
                                     .then(
                                         if (chatOverlayOn) {
-                                            Modifier.background(circleColor, CircleShape)
+                                            Modifier.background(squareColor)
                                         } else {
-                                            Modifier.border(1.5.dp, circleColor, CircleShape)
+                                            Modifier.border(2.dp, squareColor)
                                         }
                                     )
                                     .semantics {
@@ -1028,7 +1078,7 @@ fun ChannelScreen(
                                 peeking = false
                             }) {
                                 Icon(
-                                    if (lightsDown) Icons.Filled.DarkMode else Icons.Outlined.DarkModeOutlined,
+                                    if (lightsDown) Icons.Filled.Lightbulb else Icons.Outlined.LightbulbOutlined,
                                     contentDescription = if (lightsDown) "Lights up" else "Lights down"
                                 )
                             }
@@ -1217,6 +1267,8 @@ fun ChannelScreen(
                 onStartPm = if (state.localUser != null) onStartPm else null,
                 pmTarget = state.pmTarget,
                 onCancelPm = onCancelPm,
+                users = state.users,
+                nameColors = state.nameColors,
                 modifier = Modifier.weight(1f)
             )
             }
@@ -1553,7 +1605,7 @@ private fun NowPlayingBar(title: String, leader: String?) {
 /**
  * Subtitles, in the top bar left of the mute toggle, only when the item has
  * some. Filled when showing, outlined when not, like the star and the Nico
- * circle. With one track a tap switches it on and off; with several, a tap
+ * square. With one track a tap switches it on and off; with several, a tap
  * opens a menu to pick one (or Off). The choice carries on to later items.
  */
 @Composable
@@ -1722,16 +1774,22 @@ private fun PanelBar(
         Column {
             HorizontalDivider()
             Row(Modifier.fillMaxWidth().height(48.dp)) {
-                PanelBarButton("Playlist", if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)) {
+                PanelBarButton(
+                    "Playlist", Icons.Outlined.VideoLibrary,
+                    if (playlistCount > 0) playlistCount else null, Modifier.weight(1f)
+                ) {
                     onOpen(Panel.PLAYLIST)
                 }
-                PanelBarButton("Users", userCount, Modifier.weight(1f)) { onOpen(Panel.USERS) }
+                PanelBarButton("Users", Icons.Outlined.Group, userCount, Modifier.weight(1f)) {
+                    onOpen(Panel.USERS)
+                }
                 // Only shown while there's a poll — running, or just closed
                 // with its final results (until the next one or it's
                 // dismissed); the same grey as the other two.
                 if (pollOpen) {
                     PanelBarButton(
                         if (pollClosed) "Poll results" else "Poll",
+                        Icons.Outlined.Poll,
                         count = null,
                         modifier = Modifier.weight(1f)
                     ) { onOpen(Panel.POLL) }
@@ -1741,31 +1799,34 @@ private fun PanelBar(
     }
 }
 
-/** A tab label in the home page's label style: small, spaced-out capitals
- *  in grey, with its count a step fainter. */
+/** A button along the bottom: an icon and its name, so it reads as
+ *  something to tap rather than a caption, with its count a step fainter. */
 @Composable
 private fun PanelBarButton(
     label: String,
+    icon: ImageVector,
     count: Int?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
-    val labelColor = colors.onSurfaceVariant
-    val countColor = colors.onSurfaceVariant.copy(alpha = 0.6f)
+    val labelColor = colors.onSurface
+    val countColor = colors.onSurfaceVariant
     TextButton(
         onClick = onClick,
         modifier = modifier.fillMaxHeight(),
         contentPadding = PaddingValues(horizontal = 4.dp)
     ) {
+        Icon(icon, contentDescription = null, tint = countColor, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
         Text(
             buildAnnotatedString {
-                withStyle(SpanStyle(color = labelColor)) { append(label.uppercase()) }
+                withStyle(SpanStyle(color = labelColor)) { append(label) }
                 if (count != null) {
                     withStyle(SpanStyle(color = countColor)) { append("  $count") }
                 }
             },
-            style = TextStyle(fontSize = 11.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.Medium),
+            style = MaterialTheme.typography.labelLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -1876,7 +1937,7 @@ private fun backendNote(state: ChannelUiState): String {
  * plumbing added on top: filling the screen (a real view transition, not a
  * panel next to a still-visible video), treating Up as "back to fullscreen
  * video" from anywhere inside it via onPreviewKeyEvent, and a focusable,
- * D-pad-reachable stand-in for the phone's touch-only Nico circle button in
+ * D-pad-reachable stand-in for the phone's touch-only Nico square button in
  * its TopAppBar — same on/off visual, same behavior (toggles the shared
  * chatOverlayOn state hoisted in ChannelScreen), just reachable without a
  * touchscreen.
@@ -1927,7 +1988,7 @@ private fun TvChatView(
     // onBackground). A raw background() modifier only paints a color, it
     // doesn't touch LocalContentColor, which otherwise stays at Compose's
     // default of plain black — the cause of the chat text and the Nico
-    // circle both rendering dark-on-dark here.
+    // square both rendering dark-on-dark here.
     Surface(
         modifier = modifier,
         color = MaterialTheme.colorScheme.background,
@@ -1997,7 +2058,7 @@ private fun TvChatView(
                     onDown = { runCatching { chatInputFocusRequester.requestFocus() } }
                 )
             }
-            // Explicit, not LocalContentColor — this circle being legible in
+            // Explicit, not LocalContentColor — this square being legible in
             // both its on/off states is the whole point of it, so it doesn't
             // depend on ambient content color resolving correctly.
             val squareColor = MaterialTheme.colorScheme.onBackground
@@ -2054,15 +2115,14 @@ private fun TvChatView(
                         }
                     }
             ) {
-                // A circle, as on the phone.
                 Box(
                     Modifier
-                        .size(12.dp)
+                        .size(20.dp)
                         .then(
                             if (chatOverlayOn) {
-                                Modifier.background(squareColor, CircleShape)
+                                Modifier.background(squareColor)
                             } else {
-                                Modifier.border(1.5.dp, squareColor, CircleShape)
+                                Modifier.border(2.dp, squareColor)
                             }
                         )
                 )
@@ -2081,6 +2141,8 @@ private fun TvChatView(
             emotes = state.emotes,
             onSend = onSendChat,
             highlightName = state.localUser,
+            users = state.users,
+            nameColors = state.nameColors,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             // No D-pad interaction with individual messages on TV — the
             // list stays pinned to the latest message and is never a focus
