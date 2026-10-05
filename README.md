@@ -53,12 +53,10 @@ use out of it:
 ### Chat
 
 * Real-time chat with custom channel emotes
-* Each name has its own colour (staff in the channel's rank colours), and someone's messages in a row sit together under their name, as on Discord (phone; turn it on in Settings)
 * Messages that mention your name are highlighted
 * Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
 * Tap an emote in chat to reuse it
 * Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
-* Site-wide announcements appear in chat once, not again in every channel
 * Niconico-style chat overlay across the video; tap the square to turn it on
 
 ### Channels
