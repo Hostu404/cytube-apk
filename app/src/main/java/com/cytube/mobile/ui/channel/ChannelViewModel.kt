@@ -1817,7 +1817,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val ignore = lower !in s.ignored
         // Shown at once rather than when it's saved, so a quick second tap
         // sees the first and undoes it, instead of ignoring them again.
-        update { it.withIgnored(if (ignore) it.ignored.add(lower) else it.ignored.remove(lower)) }
+        update { it.withIgnored(if (ignore) it.ignored.adding(lower) else it.ignored.removing(lower)) }
         ignoreWritesPending++
         viewModelScope.launch {
             try {
