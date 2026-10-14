@@ -46,11 +46,14 @@ fun SettingsScreen(onBack: () -> Unit) {
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
     // their own dark palette — see MainActivity), PiP (no home-screen
-    // window to float into) and grouped chat messages.
+    // window to float into), grouped chat messages and the ignored users
+    // list.
     val isTv = remember { isTvDevice(context) }
     var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
     LaunchedEffect(Unit) { store.settings.collect { settings = it } }
+    var ignoredUsers by remember { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(Unit) { store.ignoredUsers.collect { ignoredUsers = it.sortedBy { n -> n.lowercase() } } }
 
     // The same quiet page as home (see Ma.kt): paper and ink on light, with
     // its grain; pure black on dark.
@@ -174,6 +177,32 @@ fun SettingsScreen(onBack: () -> Unit) {
                     subtitle = "Groups each user's chat messages together under their name.",
                     checked = settings.groupChat
                 ) { scope.launch { store.setGroupChat(it) } }
+            }
+
+            if (!isTv) {
+                MaSectionLabel("Ignored users")
+
+                // Ignoring happens from a channel's user list; this is where
+                // someone who's no longer in any channel can be let back in.
+                Text(
+                    if (ignoredUsers.isEmpty()) "Nobody yet."
+                    else "Their chat and private messages are hidden, in every channel. " +
+                        "Only you can tell.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, bottom = 8.dp)
+                )
+                ignoredUsers.forEach { name ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(start = Ma.MarginStart, end = Ma.MarginEndBeforeButton),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(name, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { scope.launch { store.setIgnored(name, false) } }) {
+                            Text("Unignore")
+                        }
+                    }
+                }
             }
 
             MaSectionLabel("Support")

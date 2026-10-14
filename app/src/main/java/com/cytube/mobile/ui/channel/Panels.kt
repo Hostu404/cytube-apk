@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Mood
@@ -80,7 +81,9 @@ import androidx.compose.ui.unit.Density
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
@@ -95,6 +98,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Size
+import com.cytube.mobile.data.isIgnoredName
 import com.cytube.mobile.net.ChannelUser
 import com.cytube.mobile.net.Emote
 import com.cytube.mobile.net.EmoteSet
@@ -1849,6 +1853,10 @@ fun UsersPanel(
     localName: String? = null,
     /** Start a private message to that user; null hides the option. */
     onStartPm: ((String) -> Unit)? = null,
+    /** Ignored names, lowercased (see isIgnoredName): shown crossed out. */
+    ignored: ImmutableSet<String> = persistentSetOf(),
+    /** Ignore that user, or stop ignoring them; null hides the option. */
+    onToggleIgnore: ((String) -> Unit)? = null,
     /** The channel's own name colours, from its CSS (see ChannelStyle). */
     nameColors: com.cytube.mobile.net.NameColors = com.cytube.mobile.net.NameColors.NONE
 ) {
@@ -1878,22 +1886,39 @@ fun UsersPanel(
                 val channelColor = remember(user.rank, nameColors, background) {
                     nameColors.forRank(user.rank)?.let { readableOn(Color(it), background) }
                 }
+                val isMe = user.name.equals(localName, ignoreCase = true)
+                // Never ourselves, even if our name is on the list from before.
+                val isIgnored = !isMe && isIgnoredName(user.name, ignored)
+                val nameColor = when {
+                    channelColor != null && user.afk -> channelColor.copy(alpha = 0.5f)
+                    channelColor != null -> channelColor
+                    user.afk -> MaterialTheme.colorScheme.onSurfaceVariant
+                    else -> MaterialTheme.colorScheme.onSurface
+                }
                 Text(
                     user.name,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = when {
-                        channelColor != null && user.afk -> channelColor.copy(alpha = 0.5f)
-                        channelColor != null -> channelColor
-                        user.afk -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.onSurface
-                    },
+                    // Crossed out, as the website shows someone ignored.
+                    style = if (isIgnored) {
+                        MaterialTheme.typography.bodyMedium.copy(textDecoration = TextDecoration.LineThrough)
+                    } else MaterialTheme.typography.bodyMedium,
+                    color = if (isIgnored) nameColor.copy(alpha = nameColor.alpha * 0.5f) else nameColor,
                     modifier = Modifier.weight(1f)
                 )
                 rankLabel(user.rank)?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (onStartPm != null && !user.name.equals(localName, ignoreCase = true)) {
+                if (onToggleIgnore != null && !isMe) {
+                    IconButton(onClick = { onToggleIgnore(user.name) }) {
+                        Icon(
+                            Icons.Default.Block,
+                            contentDescription = if (isIgnored) "Stop ignoring ${user.name}" else "Ignore ${user.name}",
+                            tint = if (isIgnored) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (onStartPm != null && !isMe) {
                     IconButton(onClick = { onStartPm(user.name) }) {
                         Icon(
                             Icons.Default.MailOutline,

@@ -18,7 +18,8 @@ Watch videos in sync with others, chat in real time, add to the playlist and use
 
 ## Screenshots
 
-<img width="719" height="965" alt="image" src="https://github.com/user-attachments/assets/684f609c-9abd-4a1f-8342-c8fb956f78ee" />
+<img width="1672" height="870" alt="image" src="https://github.com/user-attachments/assets/f840a2b7-d6c0-4ed5-9c22-4f6ff57851ed" />
+
 
 ---
 
@@ -53,12 +54,11 @@ use out of it:
 ### Chat
 
 * Real-time chat with custom channel emotes
-* Each name has its own colour (staff in the channel's rank colours), and someone's messages in a row sit together under their name, as on Discord (phone; turn it on in Settings)
 * Messages that mention your name are highlighted
 * Private messages (phone): tap a PM's name to reply, or the mail icon in the user list to start one
+* Ignore: the block symbol by a name in the user list hides that person's chat and private messages, including what they've already said. Only you can tell. Unignore them there, or under **Ignored users** in Settings (phone)
 * Tap an emote in chat to reuse it
 * Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
-* Site-wide announcements appear in chat once, not again in every channel
 * Niconico-style chat overlay across the video; tap the square to turn it on
 
 ### Channels

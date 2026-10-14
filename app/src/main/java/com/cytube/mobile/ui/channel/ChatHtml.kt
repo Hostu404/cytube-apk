@@ -271,7 +271,7 @@ object ChatHtml {
         if (html.indexOf('<') < 0 && html.indexOf('&') < 0) {
             val plain = buildAnnotatedString {
                 if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
-                appendLinkified(html)
+                appendLinkified(html.trim { it == ' ' || it == '\n' || it == '\r' || it == '\t' })
                 if (greentext) pop()
             }
             val result = Rendered(plain, emptyList())
@@ -300,11 +300,28 @@ object ChatHtml {
             val end = annotated.text.trimEnd().length
             if (end < annotated.length) annotated = annotated.subSequence(0, end)
         }
+        // Breaks and spaces at either end of a message never show on the
+        // site. A channel's filter often puts a <br> before a posted picture
+        // so it sits on its own line there; shown here as its link, that
+        // break was left as an empty line at the top of the message.
+        annotated = annotated.trimEnds()
         val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.fx.toMap())
         synchronized(renderCache) {
             renderCache.put(key, result)
         }
         return result
+    }
+
+    /** Without line breaks, spaces and tabs at the start and end; the
+     *  annotations (links, emotes) move with the text. A non-breaking space
+     *  is kept, as the site keeps it. */
+    private fun AnnotatedString.trimEnds(): AnnotatedString {
+        fun blank(c: Char) = c == ' ' || c == '\n' || c == '\r' || c == '\t'
+        var start = 0
+        var end = length
+        while (start < end && blank(text[start])) start++
+        while (end > start && blank(text[end - 1])) end--
+        return if (start == 0 && end == length) this else subSequence(start, end)
     }
 
     private fun Rendered.withLinkColor(linkColor: Color): Rendered {

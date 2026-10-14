@@ -10,6 +10,7 @@ import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
+import com.cytube.mobile.data.isIgnoredName
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.*
 import com.cytube.mobile.player.BandwidthEstimate
@@ -20,9 +21,13 @@ import com.cytube.mobile.player.PlayerHandle
 import com.cytube.mobile.player.StreamResolvers
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.isTvDevice
+import java.io.IOException
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.PersistentSet
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toPersistentList
+import kotlinx.collections.immutable.toPersistentSet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -33,6 +38,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
@@ -101,8 +108,50 @@ private object AnnouncementMemory {
 private fun pollVoteKey(channel: String, poll: Poll) = "$channel|${poll.timestamp}|${poll.title}"
 
 /** Private messages received that haven't been seen yet — see
- *  ChannelViewModel.markPmsRead. [from] is the most recent sender. */
-data class UnreadPm(val from: String, val count: Int)
+ *  ChannelViewModel.markPmsRead. Counted per sender, so reading or ignoring
+ *  one person's takes away exactly theirs. */
+@androidx.compose.runtime.Immutable
+data class UnreadPm(
+    /** Who sent them and how many each, oldest first, names as received. */
+    val senders: List<Pair<String, Int>>
+) {
+    /** The most recent sender. */
+    val from: String get() = senders.last().first
+    val count: Int get() = senders.sumOf { it.second }
+
+    /** One more from [name], who becomes the most recent sender. */
+    fun plus(name: String): UnreadPm {
+        val earlier = senders.firstOrNull { it.first.equals(name, ignoreCase = true) }?.second ?: 0
+        return UnreadPm(senders.filterNot { it.first.equals(name, ignoreCase = true) } + (name to earlier + 1))
+    }
+
+    /** Without the senders [drop] picks; null when nobody's left. */
+    fun without(drop: (String) -> Boolean): UnreadPm? {
+        val rest = senders.filterNot { drop(it.first) }
+        return if (rest.size == senders.size) this else rest.takeIf { it.isNotEmpty() }?.let(::UnreadPm)
+    }
+
+    companion object {
+        fun of(name: String, count: Int = 1) = UnreadPm(listOf(name to count))
+    }
+}
+
+/** True when messages from [username] are hidden: they're ignored, and it
+ *  isn't us. A name once ignored can later be our own (a guest name). */
+internal fun ChannelUiState.hidesMessagesFrom(username: String): Boolean =
+    isIgnoredName(username, ignored) && !username.equals(localUser, ignoreCase = true)
+
+/** This state with [ignored] (lowercased names) as the ignore list, and
+ *  everything from those people taken out: their messages and PMs, and
+ *  their unread PMs from the badge. Our own PMs to them stay, as on the
+ *  website. */
+internal fun ChannelUiState.withIgnored(ignored: PersistentSet<String>): ChannelUiState {
+    val next = copy(ignored = ignored)
+    return next.copy(
+        messages = messages.removingAll { next.hidesMessagesFrom(it.username) },
+        unreadPm = unreadPm?.without { next.hidesMessagesFrom(it) }
+    )
+}
 
 /** Progress/result of adding a video from the playlist panel's link box. */
 data class QueueStatus(val message: String, val isError: Boolean = false, val inProgress: Boolean = false)
@@ -129,6 +178,9 @@ data class ChannelUiState(
     val currentUid: Int = -1,
     val users: PersistentList<ChannelUser> = persistentListOf(),
     val userCount: Int = 0,
+    /** Names the user has ignored, lowercased (see isIgnoredName): their
+     *  messages and private messages are left out of [messages]. */
+    val ignored: PersistentSet<String> = persistentSetOf(),
     val messages: PersistentList<ChatMessage> = persistentListOf(),
     val emotes: EmoteSet = EmoteSet.EMPTY,
     /** User list name colours from the channel's CSS (see ChannelStyle). */
@@ -349,6 +401,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
             launch {
                 AppVisibility.inBackground.collect { onAppVisibilityChanged(it) }
+            }
+
+            // Ignoring someone (here or in Settings) also takes away what
+            // they've already said, PMs included.
+            launch {
+                settingsStore.ignoredUsers.collect { names ->
+                    // While a tap here is still saving, what's read back is a
+                    // step behind the screen (see toggleIgnore).
+                    if (ignoreWritesPending == 0) applyIgnored(names)
+                }
             }
 
             launch {
@@ -1738,12 +1800,47 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update {
             it.copy(
                 pmTarget = name,
-                unreadPm = it.unreadPm?.takeUnless { u -> u.from.equals(name, ignoreCase = true) }
+                unreadPm = it.unreadPm?.without { from -> from.equals(name, ignoreCase = true) }
             )
         }
     }
 
     fun cancelPm() = update { it.copy(pmTarget = null) }
+
+    /** Ignores [name], or stops ignoring them: on this device only, as on
+     *  the website. The list itself lives in SettingsStore, so the change
+     *  arrives back here through its flow (see join). */
+    fun toggleIgnore(name: String) {
+        val s = _state.value
+        if (name.isBlank() || name.equals(s.localUser, ignoreCase = true)) return
+        val lower = name.lowercase()
+        val ignore = lower !in s.ignored
+        // Shown at once rather than when it's saved, so a quick second tap
+        // sees the first and undoes it, instead of ignoring them again.
+        update { it.withIgnored(if (ignore) it.ignored.add(lower) else it.ignored.remove(lower)) }
+        ignoreWritesPending++
+        viewModelScope.launch {
+            try {
+                // One at a time, in the order they were tapped.
+                ignoreWrites.withLock { settingsStore.setIgnored(name, ignore) }
+            } catch (e: IOException) {
+                Log.w(TAG, "Couldn't save the ignore list", e)
+            } finally {
+                ignoreWritesPending--
+            }
+            // Settled: match what's really saved (it differs only if a save failed).
+            if (ignoreWritesPending == 0) applyIgnored(settingsStore.ignoredUsers.first())
+        }
+    }
+
+    /** Taps on Ignore still saving; main thread only. */
+    private var ignoreWritesPending = 0
+    private val ignoreWrites = Mutex()
+
+    private fun applyIgnored(names: Set<String>) {
+        val lower = names.map { it.lowercase() }.toPersistentSet()
+        update { s -> if (s.ignored == lower) s else s.withIgnored(lower) }
+    }
 
     fun markPmsRead() = update { if (it.unreadPm == null) it else it.copy(unreadPm = null) }
 
@@ -1751,12 +1848,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (!message.isPm) return s.unreadPm
         val me = s.localUser
         if (me != null && message.username.equals(me, ignoreCase = true)) return s.unreadPm   // our own, echoed
-        val previous = s.unreadPm
-        return if (previous != null && previous.from.equals(message.username, ignoreCase = true)) {
-            previous.copy(count = previous.count + 1)
-        } else {
-            UnreadPm(message.username, (previous?.count ?: 0) + 1)
-        }
+        return s.unreadPm?.plus(message.username) ?: UnreadPm.of(message.username)
     }
 
     fun submitPassword(pw: String) {
@@ -2035,6 +2127,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             val s = _state.value
             for (item in batch) {
                 if (item !is ChatInboxItem.Message) continue
+                if (s.hidesMessagesFrom(item.message.username)) continue
                 runCatching {
                     val rendered = ChatHtml.prewarm(
                         raw = item.message.html,
@@ -2089,6 +2182,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         // Shadow-muted messages are only meant for moderators; the
                         // server already filters delivery, but drop them defensively.
                         if (m.shadow && s.localRank < 2) continue
+                        // Someone ignored: their messages and PMs never show
+                        // (and so never fly or highlight). Checked after the
+                        // dedupe above, so a reconnect's replay of their old
+                        // messages stays hidden if they're unignored later.
+                        if (s.hidesMessagesFrom(m.username)) continue
                         accepted += m
                         if (m.isPm) s = s.copy(unreadPm = nextUnreadPm(s, m))
                     }

@@ -225,6 +225,7 @@ fun ChannelScreen(
     val onPlaybackStall = remember(vm) { vm::onPlaybackStall }
     val onQueueLink = remember(vm) { vm::queueLink }
     val onStartPm = remember(vm) { vm::startPm }
+    val onToggleIgnore = remember(vm) { vm::toggleIgnore }
     val onCancelPm = remember(vm) { vm::cancelPm }
 
     // The single player surface, hoisted so it survives moving between the
@@ -1147,6 +1148,9 @@ fun ChannelScreen(
                     onStartPm = if (state.localUser != null) {
                         { name -> onStartPm(name); openPanel = null }
                     } else null,
+                    // Works signed in or not: it's only on this device.
+                    ignored = state.ignored,
+                    onToggleIgnore = onToggleIgnore,
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
                 Panel.POLL -> PollPanel(

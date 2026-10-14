@@ -99,6 +99,20 @@ class SettingsStore(private val context: Context) {
 
     suspend fun clearRecents() = context.dataStore.edit { p -> p[RECENTS] = "" }.let {}
 
+    // ---- ignored users ----
+
+    /** People whose chat and private messages are hidden, as on the website:
+     *  only on this device, nobody else is told, and one list for every
+     *  channel. Kept as first written; CyTube names match ignoring case, so
+     *  compare with [isIgnoredName]. */
+    val ignoredUsers: Flow<Set<String>> =
+        context.dataStore.data.map { it[IGNORED] ?: emptySet() }
+
+    suspend fun setIgnored(name: String, ignored: Boolean) = context.dataStore.edit { p ->
+        val rest = (p[IGNORED] ?: emptySet()).filterNot { it.equals(name, ignoreCase = true) }.toSet()
+        p[IGNORED] = if (ignored && name.isNotBlank()) rest + name.trim() else rest
+    }.let {}
+
     fun channelCompat(channel: String): Flow<CompatMode?> =
         context.dataStore.data.map { p -> p[compatKey(channel)]?.let { CompatMode.parse(it) } }
 
@@ -118,9 +132,15 @@ class SettingsStore(private val context: Context) {
         val GROUP_CHAT = booleanPreferencesKey("group_chat")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")
 
         fun compatKey(channel: String) = stringPreferencesKey("compat:$channel")
     }
 }
+
+/** True when [name] is in [ignoredLower] (names already lowercased), the
+ *  way CyTube matches names: ignoring case. */
+fun isIgnoredName(name: String, ignoredLower: Set<String>): Boolean =
+    ignoredLower.isNotEmpty() && name.isNotBlank() && name.lowercase() in ignoredLower
