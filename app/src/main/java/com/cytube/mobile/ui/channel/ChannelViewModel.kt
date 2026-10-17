@@ -192,6 +192,8 @@ data class ChannelUiState(
     val pipEnabled: Boolean = false,
     /** See Settings.groupChat. */
     val groupChat: Boolean = false,
+    /** See Settings.nicoEmotesOnly. */
+    val nicoEmotesOnly: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
      *  media switch never silently un-mutes. */
@@ -394,6 +396,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 showEmotes = settings.showEmotes,
                 pipEnabled = settings.pipEnabled,
                 groupChat = settings.groupChat,
+                nicoEmotesOnly = settings.nicoEmotesOnly,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
@@ -421,12 +424,14 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     update { s ->
                         if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled &&
                             it.groupChat == s.groupChat &&
+                            it.nicoEmotesOnly == s.nicoEmotesOnly &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
                             showEmotes = it.showEmotes,
                             pipEnabled = it.pipEnabled,
                             groupChat = it.groupChat,
+                            nicoEmotesOnly = it.nicoEmotesOnly,
                             syncEnabled = it.syncEnabled
                         )
                     }

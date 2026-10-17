@@ -595,7 +595,8 @@ fun ChannelScreen(
                         messages = state.messages,
                         showEmotes = state.showEmotes,
                         emotes = state.emotes,
-                        state = nekoState
+                        state = nekoState,
+                        emotesOnly = state.nicoEmotesOnly
                     )
                 }
 
@@ -1112,7 +1113,8 @@ fun ChannelScreen(
                 messages = state.messages,
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
-                state = nekoState
+                state = nekoState,
+                emotesOnly = state.nicoEmotesOnly
             )
         }
     }
@@ -2326,7 +2328,8 @@ private fun FullscreenPlayer(
                 messages = state.messages,
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
-                state = nekoState
+                state = nekoState,
+                emotesOnly = state.nicoEmotesOnly
             )
         }
 

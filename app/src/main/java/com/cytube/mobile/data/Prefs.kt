@@ -38,6 +38,9 @@ data class Settings(
      *  instead of each with its own name and time. Phone only; off by
      *  default. */
     val groupChat: Boolean = false,
+    /** The Niconico overlay flies only each message's emotes (messages
+     *  without any don't fly). Off by default. */
+    val nicoEmotesOnly: Boolean = false,
     /** Display name used to join chat as a guest, set on the Account
      *  screen. Blank means "not chosen": each connection then uses a fresh
      *  random GuestNNNN name, which isn't saved. */
@@ -58,6 +61,7 @@ class SettingsStore(private val context: Context) {
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
             groupChat = p[GROUP_CHAT] ?: false,
+            nicoEmotesOnly = p[NICO_EMOTES_ONLY] ?: false,
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE])
         )
@@ -69,6 +73,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
     suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
     suspend fun setGroupChat(v: Boolean) = context.dataStore.edit { it[GROUP_CHAT] = v }.let {}
+    suspend fun setNicoEmotesOnly(v: Boolean) = context.dataStore.edit { it[NICO_EMOTES_ONLY] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
     suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { it[THEME_MODE] = v.name }.let {}
@@ -130,6 +135,7 @@ class SettingsStore(private val context: Context) {
         val EMOTES = booleanPreferencesKey("show_emotes")
         val PIP = booleanPreferencesKey("pip_enabled")
         val GROUP_CHAT = booleanPreferencesKey("group_chat")
+        val NICO_EMOTES_ONLY = booleanPreferencesKey("nico_emotes_only")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val IGNORED = stringSetPreferencesKey("ignored_users")

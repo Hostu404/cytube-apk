@@ -59,7 +59,7 @@ use out of it:
 * Ignore: the block symbol by a name in the user list hides that person's chat and private messages, including what they've already said. Only you can tell. Unignore them there, or under **Ignored users** in Settings (phone)
 * Tap an emote in chat to reuse it
 * Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
-* Niconico-style chat overlay across the video; tap the square to turn it on
+* Niconico-style chat overlay across the video; tap the square to turn it on. **Nico chat: emotes only** in Settings flies just the emotes
 
 ### Channels
 

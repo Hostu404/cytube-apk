@@ -788,6 +788,9 @@ fun NekoChatOverlay(
     showEmotes: Boolean,
     emotes: EmoteSet,
     state: NekoOverlayState,
+    /** Settings' "Nico chat: emotes only": each comment flies just its
+     *  emotes, and one with none doesn't fly. */
+    emotesOnly: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
@@ -814,7 +817,7 @@ fun NekoChatOverlay(
         LaunchedEffect(state) {
             if (state.hasCaughtUp) return@LaunchedEffect
             state.hasCaughtUp = true
-            val catchUp = messages.filter { flies(it, showEmotes, emotes) }.takeLast(NEKO_CATCHUP_COUNT)
+            val catchUp = messages.filter { flies(it, showEmotes, emotes, emotesOnly) }.takeLast(NEKO_CATCHUP_COUNT)
             for (msg in catchUp) {
                 state.pending.addLast(msg)
             }
@@ -835,7 +838,7 @@ fun NekoChatOverlay(
                 val m = messages[i]
                 if (m.seq <= state.lastSpawnedSeq) break
                 if (fresh.size >= NEKO_MAX_BURST) break
-                if (flies(m, showEmotes, emotes)) fresh.add(m)
+                if (flies(m, showEmotes, emotes, emotesOnly)) fresh.add(m)
             }
             fresh.reverse()
             for (msg in fresh) {
@@ -854,6 +857,7 @@ fun NekoChatOverlay(
         // through state so its width estimates follow emote changes.
         val currentShowEmotes by rememberUpdatedState(showEmotes)
         val currentEmotes by rememberUpdatedState(emotes)
+        val currentEmotesOnly by rememberUpdatedState(emotesOnly)
         LaunchedEffect(state, laneCount, screenWidthPx) {
             while (true) {
                 if (state.pending.isEmpty()) {
@@ -862,7 +866,7 @@ fun NekoChatOverlay(
                 }
                 val now = System.currentTimeMillis()
                 val msg = state.pending.first()
-                val estimatedWidthPx = estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, density)
+                val estimatedWidthPx = estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, density)
                 val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx)
                 val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
 
@@ -910,6 +914,7 @@ fun NekoChatOverlay(
                     screenWidthPx = screenWidthPx,
                     showEmotes = showEmotes,
                     emotes = emotes,
+                    emotesOnly = emotesOnly,
                     onFinished = { state.active.remove(comment) }
                 )
             }
@@ -975,17 +980,20 @@ private const val NEKO_MAX_BURST = 20
 /** Most messages waiting to fly at once — see NekoOverlayState.pending. */
 private const val NEKO_MAX_QUEUE = 30
 
-/** A comment as it flies: links left out, as nobody can tap one. */
-private fun nekoRendered(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet): ChatHtml.Rendered =
-    ChatHtml.withoutLinks(
+/** A comment as it flies: links left out, as nobody can tap one, and
+ *  only its emotes when [emotesOnly] (which needs emotes shown at all). */
+private fun nekoRendered(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet, emotesOnly: Boolean): ChatHtml.Rendered {
+    val rendered = ChatHtml.withoutLinks(
         ChatHtml.render(msg.html, msg.addClass == "greentext", Color.Unspecified, showEmotes, emotes)
     )
+    return if (emotesOnly && showEmotes) ChatHtml.emotesOnly(rendered) else rendered
+}
 
 /** Never PMs: this flies messages across the video for anyone looking at
  *  the screen (a TV, a screen share). Nor one that's only a link, which
  *  would fly past as nothing. */
-private fun flies(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet): Boolean =
-    !msg.isServerMessage && !msg.isPm && nekoRendered(msg, showEmotes, emotes).text.isNotBlank()
+private fun flies(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet, emotesOnly: Boolean): Boolean =
+    !msg.isServerMessage && !msg.isPm && nekoRendered(msg, showEmotes, emotes, emotesOnly).text.isNotBlank()
 
 /** White with a soft black glow instead of a background box. */
 private val NEKO_TEXT_STYLE = TextStyle(
@@ -1005,9 +1013,10 @@ private fun estimateCommentWidthPx(
     msg: ChatMessage,
     showEmotes: Boolean,
     emotes: EmoteSet,
+    emotesOnly: Boolean,
     density: Density
 ): Float {
-    val rendered = nekoRendered(msg, showEmotes, emotes)
+    val rendered = nekoRendered(msg, showEmotes, emotes, emotesOnly)
     val soloEmotePx = with(density) { SOLO_EMOTE_HEIGHT.sp.toPx() }
     val emotePx = with(density) { EMOTE_HEIGHT.sp.toPx() }
     val charWidthPx = with(density) { 13.dp.toPx() }
@@ -1100,9 +1109,10 @@ private fun FlyingCommentItem(
     screenWidthPx: Float,
     showEmotes: Boolean,
     emotes: EmoteSet,
+    emotesOnly: Boolean,
     onFinished: () -> Unit
 ) {
-    val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes) }
+    val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes, emotesOnly) }
     val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 

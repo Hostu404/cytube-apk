@@ -631,6 +631,21 @@ object ChatHtml {
         )
     }
 
+    /**
+     * Just [rendered]'s emotes, a space apart, with everything else left out
+     * (Niconico comments with "emotes only" on). Blank when it has none.
+     */
+    fun emotesOnly(rendered: Rendered): Rendered {
+        val text = rendered.text
+        val only = buildAnnotatedString {
+            text.getStringAnnotations(EMOTE_TAG, 0, text.length).sortedBy { it.start }.forEachIndexed { i, emote ->
+                if (i > 0) append(" ")
+                append(text.subSequence(emote.start, emote.end))
+            }
+        }
+        return rendered.copy(text = only, soloEmoteCount = soloEmoteCount(only, rendered.imageUrls))
+    }
+
     fun linkAt(text: AnnotatedString, offset: Int): String? =
         text.getStringAnnotations(LINK_TAG, offset, offset).firstOrNull()?.item
 

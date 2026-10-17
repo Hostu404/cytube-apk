@@ -171,6 +171,16 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.showEmotes
             ) { scope.launch { store.setEmotes(it) } }
 
+            // Needs emotes shown at all, so it's only offered while they are.
+            if (settings.showEmotes) {
+                SwitchRow(
+                    title = "Nico chat: emotes only",
+                    subtitle = "Comments flying over the video show just their emotes. " +
+                        "Messages without any don't fly.",
+                    checked = settings.nicoEmotesOnly
+                ) { scope.launch { store.setNicoEmotesOnly(it) } }
+            }
+
             if (!isTv) {
                 SwitchRow(
                     title = "Group messages",
