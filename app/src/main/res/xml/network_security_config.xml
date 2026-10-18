@@ -4,6 +4,22 @@
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
+            <!-- Let's Encrypt roots that older Android doesn't have, from
+                 letsencrypt.org/certificates. Phones only get new roots from
+                 Android 14 on, so without these, hosts on Let's Encrypt's
+                 newer chains fail the TLS handshake on Android 13 and older,
+                 and the player reports ERROR_CODE_IO_NETWORK_CONNECTION_FAILED.
+
+                 ISRG Root X2 (SHA-256 69:72:9B:8E:...:14:70): media.xaekai.net
+                 and media.radiantfeather.com send their chain only up to a
+                 certificate signed by it. -->
+            <certificates src="@raw/isrg_root_x2" />
+            <!-- Root YE (E1:4F:FC:AD:...:56:66) and Root YR (E5:7B:7E:6F:...:A8:6F),
+                 the roots of those chains and of cytu.be's own. Today they
+                 reach X2 or X1 through cross-signed certificates; these keep
+                 them working once servers stop sending those. -->
+            <certificates src="@raw/isrg_root_ye" />
+            <certificates src="@raw/isrg_root_yr" />
         </trust-anchors>
     </base-config>
 </network-security-config>
