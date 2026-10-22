@@ -12,7 +12,7 @@ Watch videos in sync with others, chat in real time, add to the playlist and use
 
 [**Download the latest APK →**](https://github.com/Hostu404/CyTube-APK/releases/latest)
 
-Or try the latest code here:
+issues? try the latest code here:
 
 [**Download the latest nightly build →**](https://github.com/Hostu404/cytube-apk/releases/tag/nightly) 
 
