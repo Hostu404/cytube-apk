@@ -23,21 +23,91 @@ import kotlin.math.sin
  *    an emote that merely happens to be called "/flip" does nothing on a
  *    channel without a rule for it.
  *  - User list name colours (.userlist_owner, .userlist_op, ...).
+ *  - The page's background picture, and one on the channel notice, drawn
+ *    behind the top of the channel screen (see ChannelHeader), and the
+ *    stylesheets it @imports, which may hold them instead.
  *
  * Everything else in the CSS is page layout for the website and is ignored.
  * Like the rest of net/, a channel's CSS is untrusted: parsing never throws
- * and only ever produces numbers and colours.
+ * and only ever produces numbers, colours and https addresses.
  */
 @Immutable
-class ChannelStyle(val effects: EmoteEffects, val nameColors: NameColors) {
+class ChannelStyle(
+    val effects: EmoteEffects,
+    val nameColors: NameColors,
+    /** The picture the CSS puts behind the whole page: a full-page
+     *  background layer it draws (a fixed, full-size element behind
+     *  everything else, like v4c's #cv4_bg), which covers the page's own
+     *  background, else the background of body, html, #wrap or #mainpage.
+     *  Null for none. */
+    val pageBackground: ChannelBackground? = null,
+    /** The picture the CSS puts behind the channel notice (#motd, #motdwrap
+     *  or #motdrow); null for none. */
+    val motdBackground: ChannelBackground? = null,
+    /** The stylesheets it @imports (https, not font or icon sets), which a
+     *  channel's background can be in instead. */
+    val imports: List<String> = emptyList()
+) {
     companion object {
         val EMPTY = ChannelStyle(EmoteEffects.NONE, NameColors.NONE)
 
         /** CSS longer than this is cut off before parsing. */
         private const val MAX_CSS_CHARS = 200_000
 
-        fun parse(css: String): ChannelStyle = runCatching { CssReader(css.take(MAX_CSS_CHARS)).read() }
+        /** [base] is the address relative ones in it are relative to: the
+         *  stylesheet's own, or the channel page's for the channel's CSS. */
+        fun parse(css: String, base: String? = null): ChannelStyle =
+            runCatching { CssReader(css.take(MAX_CSS_CHARS), base).read() }
             .getOrDefault(EMPTY)
+    }
+}
+
+/** A picture a channel shows behind its page: an https address, how opaque
+ *  its CSS draws it, whether it keeps pixel art's hard edges
+ *  (image-rendering: pixelated) rather than being smoothed when enlarged,
+ *  which part of it to keep when it's cropped to fit, from its
+ *  background-position: -1 the left (or top) edge, 0 the middle, 1 the
+ *  right (or bottom); null where the CSS doesn't say, for the app to pick
+ *  the part with the most going on. And whether it
+ *  repeats: drawn at its own size, tiled, as a pattern is, rather than
+ *  sized to fill (CSS's default, unless it says no-repeat or a size such
+ *  as cover). */
+@Immutable
+data class ChannelBackground(
+    val url: String,
+    val opacity: Float = 1f,
+    val pixelated: Boolean = false,
+    val alignX: Float? = null,
+    val alignY: Float? = null,
+    val repeat: Boolean = false
+) {
+    internal fun at(position: Pair<Float?, Float?>?): ChannelBackground =
+        position?.let { copy(alignX = it.first, alignY = it.second) } ?: this
+
+    /** As one line of text, for remembering it between visits ([decode]). */
+    fun encode(): String = listOf(
+        url, opacity.toString(), pixelated.toString(), alignX?.toString().orEmpty(),
+        alignY?.toString().orEmpty(), repeat.toString()
+    ).joinToString("\t")
+
+    companion object {
+        /** The background a rule's declarations draw, [url] being its picture. */
+        internal fun from(url: String, decls: Map<String, String>): ChannelBackground =
+            ChannelBackground(url, repeat = backgroundRepeats(decls) ?: true).at(backgroundPosition(decls))
+
+        /** What [encode] wrote, or null for anything else. */
+        fun decode(text: String): ChannelBackground? = runCatching {
+            val parts = text.split('\t')
+            if (parts.size != 6) return null
+            ChannelBackground(
+                url = webAddress(parts[0]) ?: return null,
+                opacity = parts[1].toFloat().coerceIn(MIN_BACKGROUND_OPACITY, 1f),
+                pixelated = parts[2].toBooleanStrict(),
+                alignX = parts[3].toFloatOrNull()?.coerceIn(-1f, 1f),
+                alignY = parts[4].toFloatOrNull()?.coerceIn(-1f, 1f),
+                repeat = parts[5].toBooleanStrict()
+            )
+        }.getOrNull()
     }
 }
 
@@ -514,10 +584,14 @@ private fun multiply(m: FloatArray, n: FloatArray): FloatArray {
 
 // ---- reading the CSS ----
 
-private class CssReader(css: String) {
+private class CssReader(css: String, private val base: String?) {
     private val text = stripComments(css)
     private val keyframes = HashMap<String, List<CssKeyframe>>()
     private val rules = ArrayList<Pair<List<String>, Map<String, String>>>()
+    /** Rules inside @media and @supports: read only for the backgrounds,
+     *  when the top-level rules set none. */
+    private val nestedRules = ArrayList<Pair<List<String>, Map<String, String>>>()
+    private val imports = ArrayList<String>()
 
     fun read(): ChannelStyle {
         collect()
@@ -568,40 +642,117 @@ private class CssReader(css: String) {
             guest = colors["guest"],
             everyone = colors["item"]
         )
-        return ChannelStyle(EmoteEffects(modifiers, baseEmotePx), nameColors)
+        // CSS variables (--bg: url(…)), from anywhere: :root's, mostly.
+        val vars = HashMap<String, String>()
+        for ((_, decls) in rules + nestedRules) {
+            for ((prop, value) in decls) if (prop.startsWith("--")) vars[prop] = value
+        }
+        val (page, motd) = backgrounds(rules, vars)
+        val (nestedPage, nestedMotd) = if (page == null || motd == null) backgrounds(nestedRules, vars) else null to null
+        return ChannelStyle(
+            EmoteEffects(modifiers, baseEmotePx), nameColors,
+            pageBackground = page ?: nestedPage,
+            motdBackground = motd ?: nestedMotd,
+            imports = imports.toList()
+        )
     }
 
-    /** Splits the stylesheet into rules and @keyframes blocks. */
-    private fun collect() {
-        var i = 0
-        while (i < text.length) {
+    /** The page's background and the notice's, from [list], its CSS
+     *  variables filled in from [vars]. */
+    private fun backgrounds(
+        list: List<Pair<List<String>, Map<String, String>>>,
+        vars: Map<String, String>
+    ): Pair<ChannelBackground?, ChannelBackground?> {
+        var page: String? = null
+        var pagePosition: Pair<Float?, Float?>? = null
+        var pageRepeats = true
+        var motd: String? = null
+        var motdPosition: Pair<Float?, Float?>? = null
+        var motdRepeats = true
+        // The first full-page background layer, and the selectors it was
+        // set for, to find its image-rendering (which can be in another rule).
+        var layer: ChannelBackground? = null
+        var layerSelectors: List<String> = emptyList()
+        // A background on a body with a class or the like (body.halloween),
+        // which the channel's script may or may not have switched on: the
+        // last resort for the page's.
+        var qualified: ChannelBackground? = null
+        val rendering = HashMap<String, String>()
+        for ((selectors, rawDecls) in list) {
+            val decls = withVars(rawDecls, vars)
+            decls["image-rendering"]?.let { r -> selectors.forEach { rendering[it.lowercase()] = r.lowercase() } }
+            if (layer == null) {
+                backgroundLayer(decls, base)?.let { url ->
+                    val opacity = decls["opacity"]?.let(::amount)?.coerceIn(MIN_BACKGROUND_OPACITY, 1f) ?: 1f
+                    layer = ChannelBackground.from(url, decls).copy(opacity = opacity)
+                    layerSelectors = selectors.map { it.lowercase() }
+                }
+            }
+            for (selector in selectors) {
+                // In order, so a later rule wins, as on the page. (Specificity
+                // isn't weighed: these selectors all name one element.)
+                val lower = selector.lowercase()
+                if (qualified == null && lower !in PAGE_SELECTORS && QUALIFIED_PAGE.matches(lower)) {
+                    backgroundUrl(decls, null, base)?.let { qualified = ChannelBackground.from(it, decls) }
+                }
+                if (lower in PAGE_SELECTORS) {
+                    page = backgroundUrl(decls, page, base)
+                    backgroundPosition(decls)?.let { pagePosition = it }
+                    backgroundRepeats(decls)?.let { pageRepeats = it }
+                }
+                if (lower in MOTD_SELECTORS) {
+                    motd = backgroundUrl(decls, motd, base)
+                    backgroundPosition(decls)?.let { motdPosition = it }
+                    backgroundRepeats(decls)?.let { motdRepeats = it }
+                }
+            }
+        }
+        // A layer is drawn over the page's own background, so it's the one seen.
+        val pageBackground = layer?.let { l -> l.copy(pixelated = layerSelectors.any { rendering[it] in PIXELATED }) }
+            ?: page?.let { ChannelBackground(it, repeat = pageRepeats).at(pagePosition) }
+            ?: qualified
+        return pageBackground to motd?.let { ChannelBackground(it, repeat = motdRepeats).at(motdPosition) }
+    }
+
+    /**
+     * Splits the stylesheet (from [from] to [to]) into rules and @keyframes
+     * blocks, noting its @imports. The rules inside an @media or @supports
+     * block go to [nestedRules] instead (at the top level only).
+     */
+    private fun collect(from: Int = 0, to: Int = text.length, nested: Boolean = false) {
+        val into = if (nested) nestedRules else rules
+        var i = from
+        while (i < to) {
             if (text[i].isWhitespace()) { i++; continue }
             if (text[i] == '@') {
                 // An at-rule ends at whichever of ; or { comes first; found
                 // by walking forward, so a run of them stays linear.
                 var j = i
-                while (j < text.length && text[j] != ';' && text[j] != '{') j++
-                if (j >= text.length || text[j] == ';') {
+                while (j < to && text[j] != ';' && text[j] != '{') j++
+                if (j >= to || text[j] == ';') {
+                    if (!nested) importUrl(text.substring(i, j), base)?.let { if (imports.size < MAX_IMPORTS) imports.add(it) }
                     i = j + 1
                     continue
                 }
                 val brace = j
-                val end = matchingBrace(brace)
+                val end = matchingBrace(brace).coerceAtMost(to)
                 val prelude = text.substring(i, brace).trim()
-                if (prelude.startsWith("@keyframes") || prelude.startsWith("@-webkit-keyframes")) {
+                if (!nested && (prelude.startsWith("@keyframes") || prelude.startsWith("@-webkit-keyframes"))) {
                     val name = prelude.substringAfter(' ').trim()
                     if (name.isNotEmpty()) keyframes[name] = readKeyframes(text.substring(brace + 1, end))
+                } else if (!nested && (prelude.startsWith("@media") || prelude.startsWith("@supports"))) {
+                    collect(brace + 1, end, nested = true)
                 }
                 i = end + 1
                 continue
             }
             val brace = text.indexOf('{', i)
-            if (brace < 0) break
-            val close = text.indexOf('}', brace).let { if (it < 0) text.length else it }
+            if (brace < 0 || brace >= to) break
+            val close = text.indexOf('}', brace).let { if (it < 0 || it > to) to else it }
             val selectors = text.substring(i, brace).split(',')
                 .filter { it.length <= MAX_SELECTOR_CHARS }
                 .map(::normalizeSelector).filter { it.isNotEmpty() }
-            rules.add(selectors to declarations(text.substring(brace + 1, close)))
+            into.add(selectors to declarations(text.substring(brace + 1, close)))
             i = close + 1
         }
     }
@@ -750,6 +901,202 @@ private val MOD_NEXT = Regex("^$TITLE\\+$EMOTE$")
 private val MOD_NEXT_NEXT = Regex("^$TITLE\\+$EMOTE\\+$EMOTE$")
 private val NAME_CLASS = Regex("^\\.userlist_(siteadmin|owner|op|guest|item)$")
 
+/** Selectors that set the page's background on CyTube's channel page:
+ *  body > #wrap > #mainpage. */
+private val PAGE_SELECTORS = setOf(
+    "body", "html", "html body", "html>body", "#wrap", "body #wrap", "body>#wrap", "#mainpage"
+)
+
+/** Selectors for the channel notice: #motdrow > … > #motdwrap > #motd. */
+private val MOTD_SELECTORS = setOf(
+    "#motd", "div#motd", "#motdwrap", "div#motdwrap", "#motdwrap #motd", "#motdrow"
+)
+
+/**
+ * The picture a rule draws as a full-page background layer, or null: an
+ * element fixed in place, covering the whole window, behind everything else
+ * (a negative or zero z-index, or one that lets touches through), with a
+ * background picture. Channels draw their backgrounds this way to fade or
+ * animate them over the page's own; v4c's #cv4_bg is one.
+ */
+private fun backgroundLayer(decls: Map<String, String>, base: String?): String? {
+    if (decls["position"]?.lowercase() != "fixed") return null
+    if (decls["display"]?.lowercase() == "none") return null
+    val behind = (decls["z-index"]?.trim()?.toIntOrNull()?.let { it <= 0 } ?: false) ||
+        decls["pointer-events"]?.lowercase() == "none"
+    if (!behind || !coversWindow(decls)) return null
+    return backgroundUrl(decls, null, base)
+}
+
+private fun coversWindow(decls: Map<String, String>): Boolean {
+    fun full(prop: String) = decls[prop]?.trim()?.lowercase() in FULL_SIZE
+    fun zero(prop: String) = decls[prop]?.trim()?.lowercase().let { it == "0" || it == "0px" }
+    val sized = (full("width") || full("min-width")) && (full("height") || full("min-height"))
+    val pinned = zero("inset") || (zero("top") && zero("right") && zero("bottom") && zero("left"))
+    return sized || pinned
+}
+
+private val FULL_SIZE = setOf("100%", "100vw", "100vh")
+private val PIXELATED = setOf("pixelated", "crisp-edges", "-moz-crisp-edges", "optimizespeed")
+/** A layer fainter than this would hardly show; it's drawn at least this. */
+private const val MIN_BACKGROUND_OPACITY = 0.05f
+
+/** At most this many @imported stylesheets are fetched. */
+private const val MAX_IMPORTS = 4
+private val IMPORT = Regex("""^@import\s+(?:url\(\s*)?['"]?([^'")\s;]+)""", RegexOption.IGNORE_CASE)
+/** Font and icon sets: imported by many channels, never with a background. */
+private val NOT_BACKGROUNDS = listOf("fonts.googleapis.com", "fonts.bunny.net", "fontawesome", "typekit.net", "cdnjs.cloudflare.com/ajax/libs/font")
+
+/** The stylesheet an @import statement names, when it's one to look in. */
+private fun importUrl(statement: String, base: String?): String? {
+    val url = IMPORT.find(statement.trim())?.groupValues?.get(1)?.let { webAddress(it, base) } ?: return null
+    return url.takeIf(::worthReading)
+}
+
+/** Whether a stylesheet at [url] may hold a background: not a font or icon set. */
+internal fun worthReading(url: String): Boolean = NOT_BACKGROUNDS.none { url.contains(it, ignoreCase = true) }
+
+/** body.halloween, body:not(.chatOnly), html.dark body: a body (or html)
+ *  with a class or the like. */
+private val QUALIFIED_PAGE = Regex("""^(?:html[^\s>]*[\s>])?body[^\s>+~]*$|^html[.:#\[][^\s>+~]*$""")
+
+private val CSS_VAR = Regex("""var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*(?:\([^()]*\))?[^()]*))?\)""")
+
+/** [decls] with var(--name) filled in from [vars] (or the fallback given
+ *  in it), a few levels deep. */
+private fun withVars(decls: Map<String, String>, vars: Map<String, String>): Map<String, String> {
+    if (decls.values.none { it.contains("var(") }) return decls
+    return decls.mapValues { (_, value) ->
+        var v = value
+        repeat(4) {
+            if (!v.contains("var(")) return@mapValues v
+            v = CSS_VAR.replace(v) { m -> vars[m.groupValues[1].lowercase()] ?: m.groupValues[2] }
+        }
+        v
+    }
+}
+
+/** The layer of a (possibly layered) background value that holds its
+ *  picture: the last one with a url(), the bottom layer, which is the
+ *  picture itself, the ones above being overlays (scanlines, a tint). */
+private fun pictureLayer(value: String): String? = value.split(TOP_LEVEL_COMMA).lastOrNull { CSS_URL.containsMatchIn(it) }
+
+/**
+ * Which part of the picture a rule keeps in view: its background-position,
+ * or the position in its background shorthand, as (x, y) from -1 (left,
+ * top) to 1 (right, bottom), null for an axis it doesn't give. Null when it
+ * gives none.
+ */
+internal fun backgroundPosition(decls: Map<String, String>): Pair<Float?, Float?>? {
+    var position: Pair<Float?, Float?>? = null
+    for ((prop, value) in decls) {
+        if (prop == "background-position" || prop == "background") positionOf(value)?.let { position = it }
+    }
+    return position
+}
+
+/** "right center", "50% 0%", "top", "url(…) right top / cover no-repeat"… */
+private fun positionOf(value: String): Pair<Float?, Float?>? {
+    // The picture's layer's, without its picture or colours, and not its
+    // size (after the slash).
+    val words = (pictureLayer(value) ?: value.split(TOP_LEVEL_COMMA).last())
+        .replace(CSS_FUNCTION, " ")
+        .substringBefore('/')
+        .lowercase()
+        .split(WHITESPACE)
+    var x: Float? = null
+    var y: Float? = null
+    val inOrder = ArrayList<Float>()
+    for (w in words) {
+        when {
+            w == "left" -> x = -1f
+            w == "right" -> x = 1f
+            w == "top" -> y = -1f
+            w == "bottom" -> y = 1f
+            w == "center" -> inOrder.add(0f)
+            w.endsWith("%") -> w.dropLast(1).toFloatOrNull()?.let { inOrder.add((it / 50f - 1f).coerceIn(-1f, 1f)) }
+            // A length: an offset from the left or top edge.
+            NUMBER.matches(w) -> inOrder.add(-1f)
+        }
+    }
+    if (x == null && y == null && inOrder.isEmpty()) return null
+    for (v in inOrder) {
+        if (x == null) x = v else if (y == null) y = v
+    }
+    return x to y
+}
+
+/**
+ * Whether a rule's background repeats (tiles), or null when it doesn't say:
+ * not with no-repeat, nor with a size that fills the box (cover, contain,
+ * a percentage); the background shorthand on its own puts it back to
+ * repeating, CSS's default.
+ */
+internal fun backgroundRepeats(decls: Map<String, String>): Boolean? {
+    var repeats: Boolean? = null
+    for ((prop, value) in decls) {
+        val v = value.lowercase()
+        when (prop) {
+            "background-repeat" -> repeats = !v.split(TOP_LEVEL_COMMA).last().trim().startsWith("no-repeat")
+            "background-size" -> if (fillsBox(v.split(TOP_LEVEL_COMMA).last())) repeats = false
+            "background" -> {
+                val first = (pictureLayer(v) ?: v.split(TOP_LEVEL_COMMA).last()).replace(CSS_FUNCTION, " ")
+                repeats = when {
+                    "no-repeat" in first.split(WHITESPACE) -> false
+                    first.contains('/') && fillsBox(first.substringAfter('/')) -> false
+                    else -> true
+                }
+            }
+        }
+    }
+    return repeats
+}
+
+private fun fillsBox(size: String) = size.contains("cover") || size.contains("contain") || size.contains('%')
+
+private val CSS_FUNCTION = Regex("[a-zA-Z-]+\\([^)]*\\)")
+
+private val CSS_URL = Regex("""url\(\s*(['"]?)(.*?)\1\s*\)""", RegexOption.IGNORE_CASE)
+private const val MAX_URL_CHARS = 2_000
+
+/**
+ * What a rule's background declarations leave [current] as: the picture
+ * its last background or background-image names, or null where that one
+ * names none (a plain colour or a gradient, which the background shorthand
+ * replaces the picture with). [current] when the rule has neither.
+ */
+internal fun backgroundUrl(decls: Map<String, String>, current: String?, base: String? = null): String? {
+    var url = current
+    for ((prop, value) in decls) {
+        if (prop == "background" || prop == "background-image") {
+            url = pictureLayer(value)?.let { CSS_URL.find(it)?.groupValues?.get(2) }?.let { webAddress(it, base) }
+        }
+    }
+    return url
+}
+
+/**
+ * [raw] as an address the app can load, or null. Only web addresses: http
+ * is asked for over https, as browsers do for pictures on an https page (and
+ * cleartext is off, see network_security_config), and a protocol-relative
+ * one gets https. A relative one (img/bg.png, /bg.png) is taken from [base],
+ * where it has one; data: and the like are left out.
+ */
+internal fun webAddress(raw: String, base: String? = null): String? {
+    val s = raw.trim()
+    if (s.isEmpty() || s.length > MAX_URL_CHARS || s.any { it.isWhitespace() || it == '"' || it == '\'' }) return null
+    return when {
+        s.startsWith("https://", ignoreCase = true) -> s
+        s.startsWith("http://", ignoreCase = true) -> "https://" + s.substring("http://".length)
+        s.startsWith("//") -> "https:$s"
+        base == null || URL_SCHEME.containsMatchIn(s) -> null
+        else -> runCatching { java.net.URI(base).resolve(s).toString() }.getOrNull()?.let { webAddress(it) }
+    }
+}
+
+/** data:, javascript: and the like: an address with a scheme of its own. */
+private val URL_SCHEME = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
 // Built once here rather than on every use: some run for every selector in
 // the stylesheet, and a channel's can have thousands.
 private val COMBINATOR_SPACE = Regex("\\s*([+>~])\\s*")
@@ -763,7 +1110,7 @@ private fun normalizeSelector(s: String): String = s.trim()
     .replace(COMBINATOR_SPACE, "$1")
     .replace(WHITESPACE, " ")
 
-private fun declarations(body: String): Map<String, String> {
+internal fun declarations(body: String): Map<String, String> {
     val out = LinkedHashMap<String, String>()
     for (decl in body.split(';')) {
         val colon = decl.indexOf(':')

@@ -288,15 +288,19 @@ class CyTubeClient(
             CyTubeEvent.EmoteRenamed(it.optString("old", ""), Emote.from(it))
         }
         obj(s, "removeEmote") { CyTubeEvent.EmoteRemoved(it.optString("name", "")) }
-        // The channel's own stylesheet and script. Only the CSS is used (see
-        // ChannelStyle); the script is never run.
-        obj(s, "channelCSSJS") { CyTubeEvent.ChannelCss(it.optString("css", "")) }
+        // The channel's own stylesheet and script. The CSS is read (see
+        // ChannelStyle); the script is never run, only searched for a
+        // background picture (see ChannelHeader).
+        obj(s, "channelCSSJS") { CyTubeEvent.ChannelCss(it.optString("css", ""), it.optString("js", "")) }
         obj(s, "setPermissions") { CyTubeEvent.PermissionsChanged(Permissions(it)) }
         // The server withdrew our skip vote (we went AFK: user.js setAFK).
         s.on("clearVoteskipVote") { emit(CyTubeEvent.VoteskipVoteCleared) }
         // Sent on join and whenever a moderator changes the channel settings
         // (src/channel/opts.js). The server's own default is on.
         obj(s, "channelOpts") { CyTubeEvent.VoteskipAllowed(it.optBoolean("allow_voteskip", true)) }
+        // A second listener on the same event: the stylesheet the channel
+        // links as its External CSS, where its background may be.
+        obj(s, "channelOpts") { CyTubeEvent.ExternalCss(it.optString("externalcss", "")) }
         obj(s, "voteskip") {
             CyTubeEvent.VoteskipCount(it.optInt("count", 0), it.optInt("need", 0))
         }

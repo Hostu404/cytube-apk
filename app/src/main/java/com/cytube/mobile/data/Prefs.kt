@@ -126,6 +126,18 @@ class SettingsStore(private val context: Context) {
             if (v == null) p.remove(compatKey(channel)) else p[compatKey(channel)] = v.name
         }.let {}
 
+    /** The picture last shown behind this channel's top bar (see
+     *  ChannelHeader), as ChannelBackground.encode() text: shown the moment
+     *  the channel opens, before the channel has sent anything. Null when
+     *  there's none yet. */
+    fun channelBackdrop(channel: String): Flow<String?> =
+        context.dataStore.data.map { p -> p[backdropKey(channel)] }
+
+    suspend fun setChannelBackdrop(channel: String, v: String?) =
+        context.dataStore.edit { p ->
+            if (v == null) p.remove(backdropKey(channel)) else p[backdropKey(channel)] = v
+        }.let {}
+
     private companion object {
         const val MAX_RECENTS = 4
 
@@ -143,6 +155,7 @@ class SettingsStore(private val context: Context) {
         val RECENTS = stringPreferencesKey("recents")
 
         fun compatKey(channel: String) = stringPreferencesKey("compat:$channel")
+        fun backdropKey(channel: String) = stringPreferencesKey("backdrop:$channel")
     }
 }
 

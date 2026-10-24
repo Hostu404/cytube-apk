@@ -65,6 +65,26 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.platform.LocalDensity
+import coil.compose.rememberAsyncImagePainter
+import coil.compose.AsyncImagePainter
+import coil.decode.BitmapFactoryDecoder
+import coil.request.ImageRequest
+import androidx.compose.animation.core.snap
+import coil.decode.DataSource
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import kotlin.math.ceil
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.draw.clipToBounds
+import android.graphics.drawable.BitmapDrawable
+import coil.size.Precision
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -102,6 +122,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.net.ChannelBackground
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
@@ -178,6 +199,9 @@ fun ChannelScreen(
 
     var fullscreen by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
+    // The channel's picture now showing behind the top of the phone layout
+    // (see ChannelBackdrop), once it has loaded; null while there's none.
+    var backdropShown by remember { mutableStateOf<String?>(null) }
 
     // The one on/off switch for the Niconico overlay, shared by both the
     // fullscreen and windowed player below — neither owns it, so toggling
@@ -740,10 +764,17 @@ fun ChannelScreen(
     var videoInRoot by remember { mutableStateOf(Rect.Zero) }
     var screenInRoot by remember { mutableStateOf(Offset.Zero) }
 
+    // The channel's picture is up behind the top of the screen (see
+    // ChannelBackdrop): the top bar and the Scaffold let it show through.
+    val showingBackdrop = !webMode && backdropShown != null && backdropShown == state.backdrop?.url
+
     CyTubeChannelTheme {
     Box(
         Modifier
             .fillMaxSize()
+            // The page colour here rather than only on the Scaffold, which
+            // goes see-through over the channel's picture.
+            .background(MaterialTheme.colorScheme.background)
             .onGloballyPositioned { screenInRoot = it.positionInRoot() }
             // Touching the screen anywhere around the video brings the
             // lights partly up for a few seconds, and does whatever it would anyway
@@ -759,18 +790,31 @@ fun ChannelScreen(
                 }
             }
     ) {
+    if (!webMode) {
+        ChannelBackdrop(
+            backdrop = state.backdrop,
+            // The strip above the video, whether or not anything plays;
+            // the video, its title, the channel notice and the chat stay as
+            // they are.
+            heightPx = (videoInRoot.top - screenInRoot.y).roundToInt(),
+            onShown = { backdropShown = it },
+            onBroken = vm::backdropBroken
+        )
+    }
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = if (showingBackdrop) Color.Transparent else MaterialTheme.colorScheme.background,
+        contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = {
             TopAppBar(
                 windowInsets = barInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
                 // The room's original top-bar grey, over the Slate page. The
                 // action icons are grey so the channel name leads; the ones
                 // that can be "on" (the favorite star) show it by their shape.
+                // See-through over the channel's picture, when it's up.
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = ChannelTopBar,
-                    scrolledContainerColor = ChannelTopBar,
+                    containerColor = if (showingBackdrop) Color.Transparent else ChannelTopBar,
+                    scrolledContainerColor = if (showingBackdrop) Color.Transparent else ChannelTopBar,
                     actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
                 ),
                 title = {
@@ -1290,6 +1334,177 @@ private fun ConnectionLine(state: ChannelUiState) {
     }
     Text(text, style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
 }
+
+/**
+ * The channel's picture (its background, else its notice's: see
+ * ChannelHeader) behind the top of the phone layout: the strip from the top
+ * of the screen down to [heightPx], the top of the video, behind the status
+ * bar and the channel name and buttons.
+ *
+ * Framed without stretching: a picture is cropped to fill, keeping the
+ * part its CSS's background-position names (a banner's right end, say), or
+ * where the CSS doesn't say, the part with the most going on (see
+ * PictureDetail: the rock rather than the empty sky above it); a small one
+ * that repeats (a pattern) is tiled at its own size instead of being blown
+ * up, as on the website, where a CSS pixel is about a dp. Drawn as faint as
+ * the channel draws it (a background layer at 40% stays at 40%), keeping
+ * pixel art's hard edges where the channel does, and shaded a little so the
+ * text over it reads. A still picture: an animated one would only cost
+ * battery behind everything. Nothing is drawn until it has loaded, so a
+ * channel without one, or one whose picture fails, looks as before;
+ * [onShown] says which picture is up (null for none), and [onBroken] which
+ * one won't load at all (gone, or not a picture), for the next to be tried.
+ */
+@Composable
+private fun ChannelBackdrop(
+    backdrop: ChannelBackground?,
+    heightPx: Int,
+    onShown: (String?) -> Unit,
+    onBroken: (String) -> Unit
+) {
+    if (backdrop == null) {
+        LaunchedEffect(Unit) { onShown(null) }
+        return
+    }
+    val context = LocalContext.current
+    val localDensity = LocalDensity.current
+    val shade = MaterialTheme.colorScheme.background
+    // Decoded no wider than the screen, which is as wide as the strip: a
+    // huge photo is scaled down (quicker to decode), a pattern is kept at
+    // its own size. Loading starts at once, not after the first layout.
+    val screenWidthPx = with(localDensity) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
+    val request = remember(backdrop.url, screenWidthPx) {
+        ImageRequest.Builder(context)
+            .data(backdrop.url)
+            .decoderFactory(BitmapFactoryDecoder.Factory())
+            .size(coil.size.Size(coil.size.Dimension(screenWidthPx), coil.size.Dimension.Undefined))
+            // Never enlarged in decoding: drawing enlarges it, keeping pixel
+            // art's edges where asked.
+            .precision(Precision.INEXACT)
+            // Its pixels are read, to see where its detail is.
+            .allowHardware(false)
+            .build()
+    }
+    val painter = rememberAsyncImagePainter(request)
+    // Not a dropped connection (IOException) or a server having a bad
+    // moment (5xx), which say nothing about the picture: a 404, or something
+    // that isn't a picture.
+    val failure = (painter.state as? AsyncImagePainter.State.Error)?.result?.throwable
+    LaunchedEffect(failure) {
+        val passing = failure is java.io.IOException ||
+            (failure is coil.network.HttpException && failure.response.code >= 500)
+        if (failure != null && !passing) onBroken(backdrop.url)
+    }
+    val image = (painter.state as? AsyncImagePainter.State.Success)?.result?.drawable
+        .let { it as? BitmapDrawable }?.bitmap
+    val bitmap = remember(image) { image?.asImageBitmap() }
+    // Where its detail is, worked out once, before it's shown, so the crop
+    // doesn't jump; framed is true once that's done (or has failed).
+    var detail by remember(image) { mutableStateOf<PictureDetail?>(null) }
+    var framed by remember(image) { mutableStateOf(false) }
+    LaunchedEffect(image) {
+        if (image == null) return@LaunchedEffect
+        detail = withContext(Dispatchers.Default) { PictureDetail.of(image) }
+        framed = true
+    }
+    val ready = bitmap != null && framed
+    LaunchedEffect(ready) { onShown(if (ready) backdrop.url else null) }
+    // From the cache (any visit after the first), it's simply there; only a
+    // first download fades in, rather than popping.
+    val downloaded = (painter.state as? AsyncImagePainter.State.Success)?.result?.dataSource == DataSource.NETWORK
+    val appear by animateFloatAsState(
+        if (ready) 1f else 0f,
+        if (downloaded) tween(BACKDROP_APPEAR_MS) else snap(),
+        label = "backdrop"
+    )
+    Spacer(
+        Modifier
+            .fillMaxWidth()
+            .height(with(localDensity) { heightPx.coerceAtLeast(0).toDp() })
+            .clipToBounds()
+            .drawBehind {
+                if (size.height <= 0f) return@drawBehind
+                val picture = bitmap?.takeIf { ready } ?: return@drawBehind
+                val alpha = backdrop.opacity * appear
+                val quality = if (backdrop.pixelated) FilterQuality.None else DrawScope.DefaultFilterQuality
+                // Its size as the website draws it: a CSS pixel is about a dp.
+                val tileW = picture.width * density
+                val tileH = picture.height * density
+                val tiles = ceil(size.width / tileW) * ceil(size.height / tileH)
+                if (backdrop.repeat && (tileW < size.width || tileH < size.height) && tiles <= MAX_BACKDROP_TILES) {
+                    drawTiled(picture, tileW, tileH, alpha, quality)
+                } else {
+                    drawCropped(picture, backdrop.alignX, backdrop.alignY, detail, alpha, quality)
+                }
+                drawRect(shade.copy(alpha = BACKDROP_SHADE * alpha))
+            }
+    )
+}
+
+/** [image] scaled to fill this area without stretching, cropped to the part
+ *  [alignX]/[alignY] name (-1 the left or top edge, 1 the right or bottom),
+ *  or on an axis they leave null, the part [detail] says is busiest (the
+ *  middle, without it or when nothing stands out). */
+private fun DrawScope.drawCropped(
+    image: ImageBitmap,
+    alignX: Float?,
+    alignY: Float?,
+    detail: PictureDetail?,
+    alpha: Float,
+    quality: FilterQuality
+) {
+    val scale = maxOf(size.width / image.width, size.height / image.height)
+    val srcW = (size.width / scale).roundToInt().coerceIn(1, image.width)
+    val srcH = (size.height / scale).roundToInt().coerceIn(1, image.height)
+    val srcX = cropStart(image.width, srcW, alignX, detail?.cols)
+    val srcY = cropStart(image.height, srcH, alignY, detail?.rows)
+    drawImage(
+        image,
+        srcOffset = IntOffset(srcX, srcY),
+        srcSize = IntSize(srcW, srcH),
+        dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt()),
+        alpha = alpha,
+        filterQuality = quality
+    )
+}
+
+/** Where along a side [length] long a crop [kept] long starts: at [align]
+ *  (-1 to 1) when given, else over the busiest part of [energy], else in
+ *  the middle. */
+private fun cropStart(length: Int, kept: Int, align: Float?, energy: FloatArray?): Int {
+    val spare = length - kept
+    if (spare <= 0) return 0
+    val start = when {
+        align != null -> spare * (align + 1f) / 2f
+        else -> energy?.let { bestWindowStart(it, kept.toFloat() / length) }?.let { it * length } ?: (spare / 2f)
+    }
+    return start.roundToInt().coerceIn(0, spare)
+}
+
+/** [image] repeated across this area from its top left, each [tileW] by [tileH]. */
+private fun DrawScope.drawTiled(image: ImageBitmap, tileW: Float, tileH: Float, alpha: Float, quality: FilterQuality) {
+    val tile = IntSize(ceil(tileW).toInt(), ceil(tileH).toInt())
+    var y = 0f
+    while (y < size.height) {
+        var x = 0f
+        while (x < size.width) {
+            drawImage(image, dstOffset = IntOffset(x.toInt(), y.toInt()), dstSize = tile, alpha = alpha, filterQuality = quality)
+            x += tileW
+        }
+        y += tileH
+    }
+}
+
+/** How much the page colour shades the channel's picture, so text over it
+ *  reads; times the picture's own opacity (a faint one needs less). */
+private const val BACKDROP_SHADE = 0.45f
+
+/** How long the channel's picture takes to fade in after a first download. */
+private const val BACKDROP_APPEAR_MS = 200
+
+/** A pattern needing more tiles than this (a thin gradient strip, say) is
+ *  drawn stretched across instead, as it would look repeated anyway. */
+private const val MAX_BACKDROP_TILES = 256
 
 /**
  * Channel MOTD, collapsed to a single tappable line. The MOTD is HTML from the

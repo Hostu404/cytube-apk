@@ -202,6 +202,9 @@ data class ChannelUiState(
     val localUser: String? = null,
     val localRank: Double = 0.0,
     val motd: String = "",
+    /** The picture behind the top of the channel screen: the channel's
+     *  background, else its notice's (see ChannelHeader); null for none. */
+    val backdrop: ChannelBackground? = null,
     val effectiveMode: CompatMode = CompatMode.AUTOMATIC,
     val player: MediaTypes.Player = MediaTypes.Player.NATIVE,
     /** True while media is actually playing; drives keep-screen-on. */
@@ -354,6 +357,124 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var reconnectGaveUp = false
     /** Reading the channel's latest CSS — see the ChannelCss branch. */
     private var channelCssJob: Job? = null
+    /** What the backdrop is worked out from (see refreshBackdrop): the
+     *  channel's own stylesheet as read, its script (only ever read) and the
+     *  stylesheets that adds to the page, and the address of the stylesheet
+     *  it links as External CSS (blank for none). */
+    private var ownStyle: ChannelStyle = ChannelStyle.EMPTY
+    private var channelScript: String = ""
+    private var scriptStylesheets: List<String> = emptyList()
+    private var externalCssUrl: String = ""
+    /** The stylesheets it @imports or links, as read, by address: fetched
+     *  once each, so the CSS being sent again doesn't fetch them again. One
+     *  that failed is kept as EMPTY. */
+    private val linkedStyles = HashMap<String, ChannelStyle>()
+    private var linkedStylesJob: Job? = null
+    /** Whether the channel's CSS and its notice have come yet: until both
+     *  have (and any linked stylesheet has been read), finding no picture
+     *  doesn't take away the one remembered from last time. */
+    private var cssReceived = false
+    private var motdReceived = false
+    /** The backdrop as last remembered for this channel (encoded). */
+    private var rememberedBackdrop: String? = null
+    /** Pictures that turned out not to load (gone, or not a picture): the
+     *  next one there is is shown instead. See backdropBroken. */
+    private val brokenBackdrops = HashSet<String>()
+    private var backdropJob: Job? = null
+
+    /** The channel page's address: what relative addresses in its own CSS
+     *  and notice are relative to. */
+    private fun pageAddress(): String = "${Graph.BASE_URL}/r/${_state.value.channel}"
+
+    /** The stylesheets to read beyond the channel's own, in the order
+     *  ChannelHeader looks in them: the ones it imports, the ones its script
+     *  adds, its External CSS, then the ones those import in turn. */
+    private fun linkedAddresses(): List<String> {
+        val first = (ownStyle.imports + scriptStylesheets + listOfNotNull(webAddress(externalCssUrl))).distinct()
+        val second = first.flatMap { linkedStyles[it]?.imports.orEmpty() }
+        return (first + second).distinct().take(MAX_LINKED_STYLESHEETS)
+    }
+
+    /**
+     * Works the backdrop out again from what the channel has sent so far,
+     * off the main thread (a channel's script and notice can be long). A
+     * picture found is shown at once; finding none only takes the picture
+     * away once everything is in (the CSS, the notice and any linked
+     * stylesheet), so the one remembered from last time (see start) doesn't
+     * blink off and back on while the channel is still arriving. The answer
+     * is remembered for next time.
+     */
+    private fun refreshBackdrop() {
+        val styles = listOf(ownStyle) + linkedAddresses().mapNotNull { linkedStyles[it] }
+        val script = channelScript
+        val motd = _state.value.motd
+        val page = pageAddress()
+        val broken = brokenBackdrops.toSet()
+        val settled = cssReceived && motdReceived && linkedStylesJob?.isActive != true
+        backdropJob?.cancel()
+        backdropJob = viewModelScope.launch {
+            val found = withContext(Dispatchers.Default) {
+                ChannelHeader.candidates(styles, script, motd, page).firstOrNull { it.url !in broken }
+            }
+            if (found == null && !settled) return@launch
+            update { it.copy(backdrop = found) }
+            val encoded = found?.encode()
+            val channel = _state.value.channel
+            if (encoded != rememberedBackdrop && channel.isNotEmpty()) {
+                rememberedBackdrop = encoded
+                // Its own job: the next refresh cancelling this one mustn't
+                // cut the write short.
+                viewModelScope.launch { settingsStore.setChannelBackdrop(channel, encoded) }
+            }
+        }
+    }
+
+    /** The picture at [url] won't load (it's gone, or isn't a picture): the
+     *  next one there is is shown instead, and remembered instead. */
+    fun backdropBroken(url: String) {
+        if (brokenBackdrops.add(url)) refreshBackdrop()
+    }
+
+    /** Fetches and reads any linked stylesheet not read yet (not on TV,
+     *  which doesn't show the backdrop), then works the backdrop out again. */
+    private fun readLinkedStyles() {
+        val missing = linkedAddresses().filter { it !in linkedStyles }
+        // Started before working the backdrop out, so that sees there's more
+        // to come and the remembered picture stays meanwhile.
+        if (!isTv && missing.isNotEmpty() && linkedStylesJob?.isActive != true) {
+            linkedStylesJob = viewModelScope.launch {
+                for (url in missing) {
+                    val css = fetchStylesheet(url)
+                    // Relative addresses in it are relative to it.
+                    linkedStyles[url] = if (css == null) ChannelStyle.EMPTY
+                    else withContext(Dispatchers.Default) { ChannelStyle.parse(css, url) }
+                }
+                linkedStylesJob = null
+                // More may have been asked for meanwhile, or imported by these.
+                readLinkedStyles()
+            }
+        }
+        refreshBackdrop()
+    }
+
+    /** A stylesheet's text, or null: https only (see webAddress), its first
+     *  [MAX_STYLESHEET_BYTES] at most. One read this session is reused
+     *  (StylesheetCache), so going back into a channel doesn't fetch it again. */
+    private suspend fun fetchStylesheet(url: String): String? = StylesheetCache.get(url) ?: withContext(Dispatchers.IO) {
+        runCatching {
+            val request = Request.Builder().url(url)
+                .header("User-Agent", Graph.DEFAULT_USER_AGENT)
+                .build()
+            Graph.http.newCall(request).execute().use { response ->
+                val body = response.body
+                if (!response.isSuccessful || body == null) return@use null
+                val source = body.source()
+                source.request(MAX_STYLESHEET_BYTES)
+                source.buffer.readUtf8(minOf(source.buffer.size, MAX_STYLESHEET_BYTES))
+            }
+        }.getOrNull()?.also { StylesheetCache.put(url, it) }
+    }
+
     /** The last announcement shown — see the Announcement branch. */
     private var lastAnnouncementKey: String? = null
     private var lastServerTimeSeconds: Double = 0.0
@@ -387,6 +508,15 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         joined = true
         _state.value = _state.value.copy(channel = channel)
         restoreLeadMemory()
+        // The picture this channel had last time, straight away: the
+        // channel's own CSS only comes once it's joined.
+        viewModelScope.launch {
+            val remembered = settingsStore.channelBackdrop(channel).first()
+            rememberedBackdrop = remembered
+            val backdrop = remembered?.let(ChannelBackground::decode) ?: return@launch
+            // Unless the channel has already said otherwise.
+            update { if (it.backdrop == null && !(cssReceived && motdReceived)) it.copy(backdrop = backdrop) else it }
+        }
 
         viewModelScope.launch {
             settings = settingsStore.settings.first()
@@ -815,16 +945,32 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 is CyTubeEvent.ChannelCss -> {
                     channelCssJob?.cancel()
                     channelCssJob = viewModelScope.launch {
-                        val style = withContext(Dispatchers.Default) {
-                            com.cytube.mobile.net.ChannelStyle.parse(event.css)
+                        val page = pageAddress()
+                        val (style, sheets) = withContext(Dispatchers.Default) {
+                            com.cytube.mobile.net.ChannelStyle.parse(event.css, page) to
+                                ChannelHeader.scriptStylesheets(event.js)
                         }
+                        ownStyle = style
+                        channelScript = event.js
+                        scriptStylesheets = sheets
+                        cssReceived = true
                         update { s ->
                             s.copy(emotes = s.emotes.withEffects(style.effects), nameColors = style.nameColors)
                         }
+                        readLinkedStyles()
                     }
                 }
 
-                is CyTubeEvent.MotdChanged -> update { it.copy(motd = event.html) }
+                is CyTubeEvent.ExternalCss -> {
+                    externalCssUrl = event.url.trim()
+                    readLinkedStyles()
+                }
+
+                is CyTubeEvent.MotdChanged -> {
+                    update { it.copy(motd = event.html) }
+                    motdReceived = true
+                    refreshBackdrop()
+                }
 
                 is CyTubeEvent.PollOpened -> {
                     update { it.copy(poll = event.poll, myPollVote = null) }
@@ -2391,6 +2537,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile var leadMemoryRestored = false
         const val MAX_CHAT_MESSAGES = 300
         const val MAX_GUEST_RETRIES = 3
+        /** A linked stylesheet is read only this far (ChannelStyle reads
+         *  less still). */
+        const val MAX_STYLESHEET_BYTES = 400_000L
+        /** At most this many stylesheets beyond the channel's own are read. */
+        const val MAX_LINKED_STYLESHEETS = 8
         const val TAG = "CyTubeChannel"
         /** SyncEngine's corrections and the player's seeks and buffering. */
         const val SYNC_TAG = "CyTubeSync"
@@ -2445,5 +2596,26 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  time to establish a stable buffer on the new quality before evaluating
          *  whether another step down is needed. */
         const val QUALITY_CHANGE_COOLDOWN_MS = 20_000L
+    }
+}
+
+/**
+ * Stylesheets channels link to, as fetched this session, by address: going
+ * back into a channel (or into another using the same theme) doesn't fetch
+ * them again. Kept for half an hour, and only the latest [KEEP] of them.
+ */
+private object StylesheetCache {
+    private const val KEEP_MS = 30 * 60 * 1000L
+    private const val KEEP = 16
+    private val sheets = LinkedHashMap<String, Pair<Long, String>>()
+
+    @Synchronized
+    fun get(url: String): String? = sheets[url]?.takeIf { SystemClock.elapsedRealtime() - it.first < KEEP_MS }?.second
+
+    @Synchronized
+    fun put(url: String, css: String) {
+        sheets.remove(url)
+        sheets[url] = SystemClock.elapsedRealtime() to css
+        while (sheets.size > KEEP) sheets.remove(sheets.keys.first())
     }
 }

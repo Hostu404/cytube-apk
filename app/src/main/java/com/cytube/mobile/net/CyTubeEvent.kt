@@ -56,11 +56,16 @@ sealed interface CyTubeEvent {
     data class EmoteUpdated(val emote: Emote) : CyTubeEvent
     data class EmoteRenamed(val oldName: String, val emote: Emote) : CyTubeEvent
     data class EmoteRemoved(val name: String) : CyTubeEvent
-    /** The channel's own CSS (sent on joining and when it's edited); read
-     *  for emote modifiers and name colours — see ChannelStyle. */
-    data class ChannelCss(val css: String) : CyTubeEvent
+    /** The channel's own CSS and script (sent on joining and when they're
+     *  edited). The CSS is read for emote modifiers, name colours and its
+     *  background (see ChannelStyle); the script only for a background (see
+     *  ChannelHeader), never run. */
+    data class ChannelCss(val css: String, val js: String = "") : CyTubeEvent
+    /** channelOpts' externalcss: the address of a stylesheet the channel
+     *  links, or blank for none. Read for its background (ChannelHeader). */
+    data class ExternalCss(val url: String) : CyTubeEvent
     data class PermissionsChanged(val permissions: Permissions) : CyTubeEvent
-    /** channelOpts — only the one option the app acts on so far. */
+    /** channelOpts' allow_voteskip. */
     data class VoteskipAllowed(val allowed: Boolean) : CyTubeEvent
     /** voteskip — the running tally, sent only to ranks allowed to see it
      *  ("viewvoteskip", moderators by default). [need] is 0 when no vote is
