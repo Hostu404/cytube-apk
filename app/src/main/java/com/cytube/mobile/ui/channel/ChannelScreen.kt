@@ -1368,7 +1368,6 @@ private fun ChannelBackdrop(
     }
     val context = LocalContext.current
     val localDensity = LocalDensity.current
-    val shade = MaterialTheme.colorScheme.background
     // Decoded no wider than the screen, which is as wide as the strip: a
     // huge photo is scaled down (quicker to decode), a pattern is kept at
     // its own size. Loading starts at once, not after the first layout.
@@ -1436,7 +1435,7 @@ private fun ChannelBackdrop(
                 } else {
                     drawCropped(picture, backdrop.alignX, backdrop.alignY, detail, alpha, quality)
                 }
-                drawRect(shade.copy(alpha = BACKDROP_SHADE * alpha))
+                drawRect(Color.Black.copy(alpha = BACKDROP_SHADE * alpha))
             }
     )
 }
@@ -1495,8 +1494,8 @@ private fun DrawScope.drawTiled(image: ImageBitmap, tileW: Float, tileH: Float, 
     }
 }
 
-/** How much the page colour shades the channel's picture, so text over it
- *  reads; times the picture's own opacity (a faint one needs less). */
+/** How much black shades the channel's picture, so text over it reads;
+ *  times the picture's own opacity (a faint one needs less). */
 private const val BACKDROP_SHADE = 0.45f
 
 /** How long the channel's picture takes to fade in after a first download. */
