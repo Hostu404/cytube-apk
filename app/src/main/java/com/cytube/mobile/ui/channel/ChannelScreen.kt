@@ -460,9 +460,10 @@ fun ChannelScreen(
     // mode that meant a light grey three-button bar against this always-dark
     // screen. Here it's see-through, so the screen's own background shows
     // behind its buttons, which are light to match; back to the app's usual
-    // styling when this screen goes (MainActivity). The status bar at the top keeps the
-    // usual styling: in light mode its dark clock and icons sit quietly on
-    // the dark screen, which is less distracting.
+    // styling when this screen goes (MainActivity). The status bar at the top
+    // has a dark clock and icons whatever the phone's setting: they sit
+    // quietly on the dark screen, which is less distracting. The sheets that
+    // open over this screen match (ChannelSheetProperties).
     //
     // While the lights are fully down the buttons turn dark, so they're
     // dimmed along with the screen behind them (the dark layer reaches under
@@ -477,7 +478,7 @@ fun ChannelScreen(
     LaunchedEffect(componentActivity, configuration) {
         snapshotFlow { navBarDimmedState.value }.collect { navBarDimmed ->
             componentActivity?.enableEdgeToEdge(
-                statusBarStyle = SystemBarStyle.auto(
+                statusBarStyle = SystemBarStyle.light(
                     android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT
                 ),
                 navigationBarStyle = if (navBarDimmed) {
@@ -1169,7 +1170,7 @@ fun ChannelScreen(
     // ---- overlays ----
 
     openPanel?.let { panel ->
-        ModalBottomSheet(onDismissRequest = { openPanel = null }) {
+        ModalBottomSheet(onDismissRequest = { openPanel = null }, properties = ChannelSheetProperties) {
             when (panel) {
                 Panel.PLAYLIST -> PlaylistPanel(
                     items = state.playlist,
@@ -1864,6 +1865,19 @@ private fun DisconnectedNotice(reason: String, onRetry: () -> Unit, onBack: () -
     }
 }
 
+/**
+ * The system bars around a sheet on the channel screen (the playlist, users
+ * and poll panel, the emote picker, the compatibility sheet), as on the
+ * screen itself: a dark clock and icons, light navigation buttons. A sheet
+ * is a window of its own, which otherwise picks its own: the clock turned
+ * white whenever one opened.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+internal val ChannelSheetProperties = ModalBottomSheetProperties(
+    isAppearanceLightStatusBars = true,
+    isAppearanceLightNavigationBars = false
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompatModeSheet(
@@ -1872,7 +1886,7 @@ private fun CompatModeSheet(
     onSelect: (CompatMode) -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss, properties = ChannelSheetProperties) {
         Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
             Text("Compatibility", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))

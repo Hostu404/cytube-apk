@@ -1190,7 +1190,7 @@ private fun EmotePicker(
     val context = LocalContext.current
     val tilePx = with(LocalDensity.current) { 48.dp.roundToPx() }.coerceAtLeast(1)
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss, properties = ChannelSheetProperties) {
         Column(Modifier.fillMaxHeight(0.7f)) {
             Text(
                 if (shown.size == emotes.size) "Channel emotes (${emotes.size})"
