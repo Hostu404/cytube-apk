@@ -574,7 +574,7 @@ object ChatHtml {
         }
         // A box's background colour (a .well in the notice) fills the box on
         // the page; behind its text here, it would highlight every line.
-        if (tag in BLOCK_TAGS && look?.background != null) look = look?.copy(background = null)
+        if (tag in BLOCK_TAGS && look?.background != null) look = look.copy(background = null)
         return look
     }
 
