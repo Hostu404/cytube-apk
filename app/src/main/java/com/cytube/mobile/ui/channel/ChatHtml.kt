@@ -10,10 +10,20 @@ import com.cytube.mobile.net.EmoteEffects
 import com.cytube.mobile.net.EmoteModifier
 import com.cytube.mobile.net.EmoteSet
 import com.cytube.mobile.net.resolveMediaUrl
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.unit.em
+import com.cytube.mobile.net.TextLook
+import com.cytube.mobile.net.cssColor
+import com.cytube.mobile.net.inlineTextLook
+import com.cytube.mobile.net.overArgb
+import com.cytube.mobile.net.readableArgb
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -46,6 +56,10 @@ object ChatHtml {
      *  with its 0-based index among this message's spoilers, in document
      *  order — see [render]'s revealedSpoilers and ChatRow's tap handling. */
     const val SPOILER_TAG = "SPOILER"
+
+    /** Tags text whose colour changes over time (a channel's rainbow): its
+     *  index in [Rendered.textFx]. See animatedChatText. */
+    const val TEXT_FX_TAG = "TEXTFX"
 
     private val GREENTEXT = Color(0xFF789922)
     private val SPOILER = Color(0xFF444444)
@@ -87,6 +101,9 @@ object ChatHtml {
     ) {
         /** Emotes drawn with a channel modifier, by inline content id. */
         val fx = HashMap<String, EmoteFx>()
+
+        /** Text whose colour changes over time, in TEXT_FX_TAG order. */
+        val textFx = ArrayList<TextLook>()
 
         /** A modifier emote ("/reverse") waiting for the emote it acts on:
          *  like the CSS `+` it's written with, the next emote after it,
@@ -130,7 +147,10 @@ object ChatHtml {
         val soloEmoteCount: Int = 0,
         /** Emotes drawn with a channel modifier, keyed by their inline
          *  content id in [imageUrls] — see [EmoteFx]. */
-        val fx: Map<String, EmoteFx> = emptyMap()
+        val fx: Map<String, EmoteFx> = emptyMap(),
+        /** Text whose colour changes over time (a channel's rainbow), by
+         *  the index its TEXT_FX_TAG carries. */
+        val textFx: List<TextLook> = emptyList()
     )
 
     /**
@@ -151,7 +171,8 @@ object ChatHtml {
         val greentext: Boolean,
         val showImages: Boolean,
         /** EmoteSet.id, or 0 when emotes don't come into it (neither shown
-         *  nor dropped), so an emote update doesn't re-parse plain text. */
+         *  nor dropped, nor the channel's text styles drawn), so an emote
+         *  update doesn't re-parse plain text. */
         val emotesId: Long,
         val dropImages: Boolean,
         val revealSpoilers: Boolean,
@@ -231,7 +252,7 @@ object ChatHtml {
             raw = raw,
             greentext = greentext,
             showImages = showImages,
-            emotesId = if (showImages || dropImages) emotes.id else 0L,
+            emotesId = if (showImages || dropImages || emotes.effects.styledText) emotes.id else 0L,
             dropImages = dropImages,
             revealSpoilers = revealSpoilers,
             revealedSpoilers = revealedSpoilers
@@ -270,7 +291,7 @@ object ChatHtml {
         // arrives as a <span>, so plain text here can never contain one.
         if (html.indexOf('<') < 0 && html.indexOf('&') < 0) {
             val plain = buildAnnotatedString {
-                if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
+                if (greentext) pushStyle(greentextStyle(emotes.effects))
                 appendLinkified(html.trim { it == ' ' || it == '\n' || it == '\r' || it == '\t' })
                 if (greentext) pop()
             }
@@ -289,7 +310,7 @@ object ChatHtml {
         )
 
         var annotated = buildAnnotatedString {
-            if (greentext) pushStyle(SpanStyle(color = GREENTEXT))
+            if (greentext) pushStyle(greentextStyle(emotes.effects))
             walk(body, this, ctx)
             flushStack(this, ctx)
             if (greentext) pop()
@@ -305,7 +326,7 @@ object ChatHtml {
         // so it sits on its own line there; shown here as its link, that
         // break was left as an empty line at the top of the message.
         annotated = annotated.trimEnds()
-        val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.fx.toMap())
+        val result = Rendered(annotated, images, soloEmoteCount(annotated, images), ctx.fx.toMap(), ctx.textFx.toList())
         synchronized(renderCache) {
             renderCache.put(key, result)
         }
@@ -373,154 +394,258 @@ object ChatHtml {
                     if (ctx.inHiddenSpoiler) builder.append(text)
                     else builder.appendLinkified(text)
                 }
-                is Element -> when (child.tagName().lowercase()) {
-                    "br" -> builder.append("\n")
+                is Element -> {
+                    // The channel's look for it (a filter's class, or the style
+                    // and colour written on it), around whatever the tag does.
+                    // Never inside a hidden spoiler: a colour would show it.
+                    val pushed = if (ctx.inHiddenSpoiler || !ctx.effects.styledText) 0
+                    else lookOf(child, ctx)?.let { pushLook(it, builder, ctx) } ?: 0
+                    when (child.tagName().lowercase()) {
+                        "br" -> builder.append("\n")
 
-                    // Never rendered, and never worth recursing into: their
-                    // text content isn't meant to be read (script) or is
-                    // formatting the site page itself has no business showing
-                    // us verbatim (style).
-                    "script", "style" -> Unit
+                        // Never rendered, and never worth recursing into: their
+                        // text content isn't meant to be read (script) or is
+                        // formatting the site page itself has no business showing
+                        // us verbatim (style).
+                        "script", "style" -> Unit
 
-                    "img" -> {
-                        // resolveMediaUrl covers plain chat/MOTD <img> tags
-                        // that never went through the Emote model at all
-                        // (e.g. admin-authored MOTD HTML) — emote-sourced
-                        // ones are already absolute by the time they get
-                        // here (see Emote.from), so this is a no-op for those.
-                        val src = resolveMediaUrl(child.attr("src"))
-                        val alt = child.attr("alt").ifBlank { child.attr("title") }
-                        val isEmote = child.hasClass("channel-emote")
-                        val modifier = if (isEmote) ctx.effects.modifiers[child.attr("title")] else null
-                        val drawsEffects = ctx.showImages && !ctx.dropImages && !ctx.inHiddenSpoiler
-                        when {
-                            ctx.dropImages -> Unit
-                            // A modifier emote: hidden (if the channel hides
-                            // it) and remembered for the emote after it.
-                            // Hidden ones don't count towards the emote cap.
-                            modifier != null && drawsEffects -> {
-                                flushStack(builder, ctx)
-                                ctx.pendingModifier = modifier
-                                ctx.pendingModifierCode = alt
-                                if (modifier.hidden) {
-                                    ctx.swallowLeadingSpace = true
-                                } else if (src.isNotBlank() && ctx.budget.take()) {
-                                    appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
+                        "img" -> {
+                            // resolveMediaUrl covers plain chat/MOTD <img> tags
+                            // that never went through the Emote model at all
+                            // (e.g. admin-authored MOTD HTML) — emote-sourced
+                            // ones are already absolute by the time they get
+                            // here (see Emote.from), so this is a no-op for those.
+                            val src = resolveMediaUrl(child.attr("src"))
+                            val alt = child.attr("alt").ifBlank { child.attr("title") }
+                            val isEmote = child.hasClass("channel-emote")
+                            val modifier = if (isEmote) ctx.effects.modifiers[child.attr("title")] else null
+                            val drawsEffects = ctx.showImages && !ctx.dropImages && !ctx.inHiddenSpoiler
+                            when {
+                                ctx.dropImages -> Unit
+                                // A modifier emote: hidden (if the channel hides
+                                // it) and remembered for the emote after it.
+                                // Hidden ones don't count towards the emote cap.
+                                modifier != null && drawsEffects -> {
+                                    flushStack(builder, ctx)
+                                    ctx.pendingModifier = modifier
+                                    ctx.pendingModifierCode = alt
+                                    if (modifier.hidden) {
+                                        ctx.swallowLeadingSpace = true
+                                    } else if (src.isNotBlank() && ctx.budget.take()) {
+                                        appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
+                                    }
                                 }
-                            }
-                            isEmote && drawsEffects && ctx.pendingModifier != null && src.isNotBlank() -> {
-                                val mod = ctx.pendingModifier!!
-                                val code = alt.ifBlank { "[emote]" }
-                                val base = ctx.stackBase
-                                when {
-                                    !ctx.budget.take() -> {
-                                        flushStack(builder, ctx)
-                                        ctx.pendingModifier = null
+                                isEmote && drawsEffects && ctx.pendingModifier != null && src.isNotBlank() -> {
+                                    val mod = ctx.pendingModifier!!
+                                    val code = alt.ifBlank { "[emote]" }
+                                    val base = ctx.stackBase
+                                    when {
+                                        !ctx.budget.take() -> {
+                                            flushStack(builder, ctx)
+                                            ctx.pendingModifier = null
+                                            ctx.droppedEmote = true
+                                            ctx.swallowLeadingSpace = true
+                                        }
+                                        mod.stacks && base == null -> {
+                                            ctx.stackBase = src
+                                            ctx.stackBaseCode = code
+                                        }
+                                        mod.stacks && base != null -> {
+                                            appendFx(
+                                                builder, ctx, mod, listOf(base, src),
+                                                "${ctx.pendingModifierCode} ${ctx.stackBaseCode} $code"
+                                            )
+                                            ctx.stackBase = null
+                                            ctx.pendingModifier = null
+                                        }
+                                        else -> {
+                                            appendFx(builder, ctx, mod, listOf(src), "${ctx.pendingModifierCode} $code")
+                                            ctx.pendingModifier = null
+                                        }
+                                    }
+                                }
+                                src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
+                                // A picture from the channel's own image folder,
+                                // where its emotes live: its scripts' (a rolled
+                                // Pokémon, say), shown as a picture like before.
+                                !isEmote && ctx.showImages && !ctx.inHiddenSpoiler &&
+                                    ctx.emotes.inChannelImageFolder(src) -> {
+                                    flushStack(builder, ctx)
+                                    if (ctx.budget.take()) {
+                                        ctx.images.add(src)
+                                        builder.pushStringAnnotation(PICTURE_TAG, src)
+                                        builder.appendInlineContent(src, alt.ifBlank { "[image]" })
+                                        builder.pop()
+                                    } else {
                                         ctx.droppedEmote = true
                                         ctx.swallowLeadingSpace = true
                                     }
-                                    mod.stacks && base == null -> {
-                                        ctx.stackBase = src
-                                        ctx.stackBaseCode = code
-                                    }
-                                    mod.stacks && base != null -> {
-                                        appendFx(
-                                            builder, ctx, mod, listOf(base, src),
-                                            "${ctx.pendingModifierCode} ${ctx.stackBaseCode} $code"
-                                        )
-                                        ctx.stackBase = null
-                                        ctx.pendingModifier = null
-                                    }
-                                    else -> {
-                                        appendFx(builder, ctx, mod, listOf(src), "${ctx.pendingModifierCode} $code")
-                                        ctx.pendingModifier = null
+                                }
+                                // Any other picture (a channel's chat filter
+                                // turning a posted image link into an <img>) is
+                                // shown as the link, never loaded.
+                                !isEmote -> {
+                                    flushStack(builder, ctx)
+                                    // As posted: src has http made https.
+                                    val link = child.attr("src").trim()
+                                        .takeIf { it.startsWith("http:", ignoreCase = true) } ?: src
+                                    when {
+                                        // Inline bytes, not a link anyone could open.
+                                        link.startsWith("data:", ignoreCase = true) -> builder.append(alt.ifBlank { "[image]" })
+                                        ctx.inHiddenSpoiler -> builder.append(link)
+                                        // Its <a> already makes it a link.
+                                        child.parents().any { it.normalName() == "a" } -> builder.append(link)
+                                        else -> {
+                                            builder.pushStringAnnotation(LINK_TAG, link)
+                                            builder.pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
+                                            builder.append(link)
+                                            builder.pop(); builder.pop()
+                                        }
                                     }
                                 }
-                            }
-                            src.isBlank() -> if (alt.isNotBlank()) builder.append(alt)
-                            // A picture from the channel's own image folder,
-                            // where its emotes live: its scripts' (a rolled
-                            // Pokémon, say), shown as a picture like before.
-                            !isEmote && ctx.showImages && !ctx.inHiddenSpoiler &&
-                                ctx.emotes.inChannelImageFolder(src) -> {
-                                flushStack(builder, ctx)
-                                if (ctx.budget.take()) {
-                                    ctx.images.add(src)
-                                    builder.pushStringAnnotation(PICTURE_TAG, src)
-                                    builder.appendInlineContent(src, alt.ifBlank { "[image]" })
-                                    builder.pop()
-                                } else {
+                                // Cap applies to every image with a src,
+                                // whether or not it's drawn as a picture. (With
+                                // images off, emote codes aren't turned into
+                                // images in the first place and stay as text.)
+                                // Once the budget is spent, the rest are left
+                                // out entirely (no alt-text placeholder either).
+                                !ctx.budget.take() -> {
                                     ctx.droppedEmote = true
                                     ctx.swallowLeadingSpace = true
                                 }
+                                ctx.showImages && ctx.inHiddenSpoiler -> builder.append(alt.ifBlank { "[emote]" })
+                                ctx.showImages -> appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
+                                else -> builder.append(alt.ifBlank { "[emote]" })
                             }
-                            // Any other picture (a channel's chat filter
-                            // turning a posted image link into an <img>) is
-                            // shown as the link, never loaded.
-                            !isEmote -> {
-                                flushStack(builder, ctx)
-                                // As posted: src has http made https.
-                                val link = child.attr("src").trim()
-                                    .takeIf { it.startsWith("http:", ignoreCase = true) } ?: src
-                                when {
-                                    // Inline bytes, not a link anyone could open.
-                                    link.startsWith("data:", ignoreCase = true) -> builder.append(alt.ifBlank { "[image]" })
-                                    ctx.inHiddenSpoiler -> builder.append(link)
-                                    // Its <a> already makes it a link.
-                                    child.parents().any { it.normalName() == "a" } -> builder.append(link)
-                                    else -> {
-                                        builder.pushStringAnnotation(LINK_TAG, link)
-                                        builder.pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
-                                        builder.append(link)
-                                        builder.pop(); builder.pop()
-                                    }
-                                }
-                            }
-                            // Cap applies to every image with a src,
-                            // whether or not it's drawn as a picture. (With
-                            // images off, emote codes aren't turned into
-                            // images in the first place and stay as text.)
-                            // Once the budget is spent, the rest are left
-                            // out entirely (no alt-text placeholder either).
-                            !ctx.budget.take() -> {
-                                ctx.droppedEmote = true
-                                ctx.swallowLeadingSpace = true
-                            }
-                            ctx.showImages && ctx.inHiddenSpoiler -> builder.append(alt.ifBlank { "[emote]" })
-                            ctx.showImages -> appendEmote(builder, ctx, src, alt.ifBlank { "[emote]" })
-                            else -> builder.append(alt.ifBlank { "[emote]" })
                         }
-                    }
 
-                    "a" -> if (ctx.inHiddenSpoiler) walk(child, builder, ctx) else {
-                        flushStack(builder, ctx)
-                        builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
-                        builder.pushStyle(
-                            SpanStyle(textDecoration = TextDecoration.Underline)
-                        )
-                        walk(child, builder, ctx)
-                        builder.pop(); builder.pop()
-                    }
-
-                    "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, ctx)
-                    "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, ctx)
-                    "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, ctx)
-                    "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, ctx)
-                    "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, ctx)
-
-                    "span", "div", "p" -> {
-                        val cls = child.className()
-                        when {
-                            cls.contains("greentext") -> styled(SpanStyle(color = GREENTEXT), child, builder, ctx)
-                            cls.contains("spoiler") -> spoiler(child, builder, ctx)
-                            else -> walk(child, builder, ctx)
+                        "a" -> if (ctx.inHiddenSpoiler) walk(child, builder, ctx) else {
+                            flushStack(builder, ctx)
+                            builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
+                            builder.pushStyle(
+                                SpanStyle(textDecoration = TextDecoration.Underline)
+                            )
+                            walk(child, builder, ctx)
+                            builder.pop(); builder.pop()
                         }
-                    }
 
-                    else -> walk(child, builder, ctx)
+                        "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, ctx)
+                        "em", "i" -> styled(SpanStyle(fontStyle = FontStyle.Italic), child, builder, ctx)
+                        "s", "strike", "del" -> styled(SpanStyle(textDecoration = TextDecoration.LineThrough), child, builder, ctx)
+                        "u" -> styled(SpanStyle(textDecoration = TextDecoration.Underline), child, builder, ctx)
+                        "code" -> styled(SpanStyle(fontFamily = FontFamily.Monospace), child, builder, ctx)
+
+                        "span", "div", "p" -> {
+                            val cls = child.className()
+                            when {
+                                // The channel's own greentext is its look (above).
+                                cls.contains("greentext") && greentextLook(ctx.effects) == null ->
+                                    styled(SpanStyle(color = GREENTEXT), child, builder, ctx)
+                                cls.contains("spoiler") -> spoiler(child, builder, ctx)
+                                else -> walk(child, builder, ctx)
+                            }
+                        }
+
+                        else -> walk(child, builder, ctx)
+                    }
+                    repeat(pushed) { builder.pop() }
                 }
             }
         }
+    }
+
+    /** How the channel draws [el]'s text: the looks of its classes (a later
+     *  one over an earlier), then any style or colour written on it. */
+    private fun lookOf(el: Element, ctx: RenderCtx): TextLook? {
+        var look: TextLook? = null
+        val looks = ctx.effects.textLooks
+        val classes = el.className()
+        if (looks.isNotEmpty() && classes.isNotEmpty()) {
+            for (name in classes.split(' ')) {
+                val l = looks[name] ?: continue
+                look = look?.let { l.over(it) } ?: l
+            }
+        }
+        val style = el.attr("style")
+        if (style.isNotBlank()) inlineTextLook(style)?.let { l -> look = look?.let { l.over(it) } ?: l }
+        val tag = el.tagName().lowercase()
+        if (tag == "font") {
+            cssColor(el.attr("color"))?.let { c -> look = TextLook(color = c).let { l -> look?.let { l.over(it) } ?: l } }
+        }
+        // A box's background colour (a .well in the notice) fills the box on
+        // the page; behind its text here, it would highlight every line.
+        if (tag in BLOCK_TAGS && look?.background != null) look = look?.copy(background = null)
+        return look
+    }
+
+    /** Elements the page draws as boxes rather than within a line. */
+    private val BLOCK_TAGS = setOf("div", "p", "center", "section", "details", "summary", "h1", "h2", "marquee", "blockquote", "ul", "ol", "li", "table")
+
+    /** Pushes [look]'s style (and, for a colour that changes over time, its
+     *  TEXT_FX_TAG); returns how many to pop. */
+    private fun pushLook(look: TextLook, builder: AnnotatedString.Builder, ctx: RenderCtx): Int {
+        var pushed = 0
+        if (look.animatesColor) {
+            builder.pushStringAnnotation(TEXT_FX_TAG, ctx.textFx.size.toString())
+            ctx.textFx.add(look)
+            pushed++
+        }
+        builder.pushStyle(spanStyleOf(look))
+        return pushed + 1
+    }
+
+    private fun greentextLook(effects: EmoteEffects): TextLook? =
+        if (effects.styledText) effects.textLooks["greentext"] else null
+
+    /** Greentext as the channel draws it, else CyTube's green. */
+    private fun greentextStyle(effects: EmoteEffects): SpanStyle {
+        val look = greentextLook(effects) ?: return SpanStyle(color = GREENTEXT)
+        return SpanStyle(color = GREENTEXT).merge(spanStyleOf(look))
+    }
+
+    /** What chat text is read against: the channel screen's page (Theme's
+     *  SlatePage), and its own text colour (SlateText). */
+    private const val PAGE = 0xFF1F2226.toInt()
+    private const val PAGE_TEXT = 0xFFD4D7DA.toInt()
+
+    /** What [look]'s text sits on: its highlight over the page, else the page. */
+    private fun backgroundOf(look: TextLook): Int = look.background?.let { overArgb(it, PAGE) or (0xFF shl 24) } ?: PAGE
+
+    /** [argb], one of [look]'s colours (or a moment of its animation), made
+     *  readable on what it sits on (see readableArgb). */
+    fun readableColor(look: TextLook, argb: Int): Int = readableArgb(argb, backgroundOf(look))
+
+    /** One of the channel's CSS px on screen. */
+    private val CSS_PX: Float = runCatching { android.content.res.Resources.getSystem().displayMetrics.density }
+        .getOrNull()?.takeIf { it > 0f } ?: 2.75f
+
+    /** [look] as a text style. */
+    private fun spanStyleOf(look: TextLook): SpanStyle {
+        val lines = listOfNotNull(
+            TextDecoration.Underline.takeIf { look.underline == true },
+            TextDecoration.LineThrough.takeIf { look.strike == true }
+        )
+        val decoration = when {
+            lines.isNotEmpty() -> TextDecoration.combine(lines)
+            look.underline == false || look.strike == false -> TextDecoration.None
+            else -> null
+        }
+        // Readable here: a colour (or highlight) picked for the website's
+        // background can all but vanish on the app's. With a highlight and
+        // no colour of its own, the chat's text has to read on it too.
+        val color = look.color?.let { readableColor(look, it) }
+            ?: if (look.background != null) readableColor(look, PAGE_TEXT) else null
+        val style = SpanStyle(
+            color = color?.let { Color(it) } ?: Color.Unspecified,
+            fontSize = look.scale?.em ?: TextUnit.Unspecified,
+            fontWeight = look.bold?.let { if (it) FontWeight.Bold else FontWeight.Normal },
+            fontStyle = look.italic?.let { if (it) FontStyle.Italic else FontStyle.Normal },
+            background = look.background?.let { Color(it) } ?: Color.Unspecified,
+            textDecoration = decoration,
+            shadow = look.shadow?.let { Shadow(Color(it.color), Offset(it.x * CSS_PX, it.y * CSS_PX), it.blur * CSS_PX) }
+        )
+        val gradient = look.gradient ?: return style
+        return style.merge(SpanStyle(brush = Brush.horizontalGradient(gradient.map { Color(readableArgb(it, PAGE)) })))
     }
 
     /** A plain emote. The id IS the url, so ChatRow can build the content
@@ -578,7 +703,8 @@ object ChatHtml {
         val index = ctx.spoilerIndex++
         val hidden = !ctx.revealSpoilers && index !in ctx.revealedSpoilers
         builder.pushStringAnnotation(SPOILER_TAG, index.toString())
-        builder.pushStyle(if (hidden) SpanStyle(background = SPOILER, color = SPOILER) else SpanStyle())
+        // No shadow either: a glow from around it would show the letters' shapes.
+        builder.pushStyle(if (hidden) SpanStyle(background = SPOILER, color = SPOILER, shadow = Shadow.None) else SpanStyle())
         val outer = ctx.inHiddenSpoiler
         ctx.inHiddenSpoiler = outer || hidden
         walk(child, builder, ctx)

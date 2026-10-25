@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isUnspecified
 import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.TransformOrigin
@@ -31,11 +32,15 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.unit.IntOffset
 import coil.compose.rememberAsyncImagePainter
 import coil.imageLoader
 import com.cytube.mobile.net.EmoteFrame
 import com.cytube.mobile.net.EmoteStyle
+import com.cytube.mobile.net.TextLook
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -165,6 +170,51 @@ private fun StyledEmote(
 
 /** The shortest time between redraws of an animated emote: 30 a second. */
 private const val MIN_TICK_MS = 33L
+
+/** The shortest time between recolourings of text whose colour changes: 15
+ *  a second, smooth enough for a colour cycle, and each is a fresh layout
+ *  of its line, unlike an emote's redraw. */
+private const val TEXT_TICK_MS = 66L
+
+/**
+ * [text] with its text whose colour changes over time (a channel's rainbow,
+ * see ChatHtml.TEXT_FX_TAG) coloured for now, from [fx], readable. It ticks
+ * at most 15 times a second while on screen and [animate] is on (a chat
+ * only animates its newest messages: a screenful of rainbows recolouring at
+ * once would cost the video its smoothness), only until every animation in
+ * it has finished, and holds still while emotes do (LocalEmotesStill). Not
+ * animating, it shows each one's first colour.
+ */
+@Composable
+internal fun animatedChatText(text: AnnotatedString, fx: List<TextLook>, animate: Boolean = true): AnnotatedString {
+    if (fx.isEmpty()) return text
+    val ranges = remember(text) { text.getStringAnnotations(ChatHtml.TEXT_FX_TAG, 0, text.length) }
+    val startedAt = rememberSaveable { System.currentTimeMillis() }
+    val now = remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val holdStill = LocalEmotesStill.current || !animate
+    LaunchedEffect(fx, holdStill) {
+        if (holdStill) return@LaunchedEffect
+        val endsAt = fx.map { it.animation?.endsAtMs }.let { ends -> if (null in ends) null else ends.filterNotNull().maxOrNull() }
+        while (true) {
+            withFrameMillis { }
+            val t = System.currentTimeMillis()
+            if (t - now.longValue < TEXT_TICK_MS) continue
+            now.longValue = t
+            if (endsAt != null && t - startedAt > endsAt) break
+        }
+    }
+    val elapsed = if (animate) now.longValue - startedAt else 0L
+    return remember(text, fx, elapsed) {
+        buildAnnotatedString {
+            append(text)
+            for (range in ranges) {
+                val look = range.item.toIntOrNull()?.let { fx.getOrNull(it) } ?: continue
+                val color = look.colorAt(elapsed) ?: continue
+                addStyle(SpanStyle(color = Color(ChatHtml.readableColor(look, color))), range.start, range.end)
+            }
+        }
+    }
+}
 
 /** Draws [painter] fitted and centred in this box, as ContentScale.Fit. */
 private fun DrawScope.drawFit(painter: Painter, colorFilter: ColorFilter?) {

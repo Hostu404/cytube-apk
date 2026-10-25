@@ -92,6 +92,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                         )
                     }
                 }
+
+                SwitchRow(
+                    title = "Channel backgrounds",
+                    subtitle = "Shows a channel's own background picture behind the top of its page.",
+                    checked = settings.channelBackgrounds
+                ) { scope.launch { store.setChannelBackgrounds(it) } }
             }
 
             MaSectionLabel("Playback")

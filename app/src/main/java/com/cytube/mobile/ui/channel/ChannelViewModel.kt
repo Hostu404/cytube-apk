@@ -192,6 +192,8 @@ data class ChannelUiState(
     val pipEnabled: Boolean = false,
     /** See Settings.groupChat. */
     val groupChat: Boolean = false,
+    /** See Settings.channelBackgrounds. */
+    val channelBackgrounds: Boolean = true,
     /** See Settings.nicoEmotesOnly. */
     val nicoEmotesOnly: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
@@ -357,6 +359,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private var reconnectGaveUp = false
     /** Reading the channel's latest CSS — see the ChannelCss branch. */
     private var channelCssJob: Job? = null
+    /** Switching chat to the channel's latest text styles — see
+     *  refreshTextStyles. */
+    private var textStylesJob: Job? = null
     /** What the backdrop is worked out from (see refreshBackdrop): the
      *  channel's own stylesheet as read, its script (only ever read) and the
      *  stylesheets that adds to the page, and the address of the stylesheet
@@ -435,8 +440,57 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (brokenBackdrops.add(url)) refreshBackdrop()
     }
 
+    /**
+     * How the channel draws chat text (see TextLook), from all its
+     * stylesheets: its own first (a rule there wins on its page), then the
+     * linked ones. Kept with its emote effects, so everything that draws chat
+     * gets them. Not on TV.
+     *
+     * New styles mean every message drawn again; done on the screen, all at
+     * once, that's a stutter just after joining, when a linked stylesheet
+     * arrives. So the newest messages are drawn with them first, off the main
+     * thread, and chat switches over once they're ready, finding them done.
+     * Nothing happens when the styles are the same as before.
+     */
+    private fun refreshTextStyles() {
+        val styles = listOf(ownStyle) + linkedAddresses().mapNotNull { linkedStyles[it] }
+        val styled = !isTv
+        // The channel's own last, so its looks are the ones kept.
+        val looks = if (!styled) emptyMap()
+        else styles.asReversed().fold(emptyMap<String, TextLook>()) { all, style -> all + style.effects.textLooks }
+        val effects = ownStyle.effects.withTextLooks(looks, styled)
+        fun sameAs(now: EmoteEffects) = now.modifiers === effects.modifiers && now.baseEmotePx == effects.baseEmotePx &&
+            now.styledText == effects.styledText && now.textLooks == effects.textLooks
+        // A switch still being got ready is for older styles.
+        textStylesJob?.cancel()
+        val shown = _state.value
+        if (sameAs(shown.emotes.effects)) return
+        textStylesJob = viewModelScope.launch {
+            val next = shown.emotes.withEffects(effects)
+            val recent = shown.messages.takeLast(RESTYLE_PREWARM_COUNT)
+            withContext(Dispatchers.Default) {
+                for (msg in recent) {
+                    runCatching {
+                        ChatHtml.prewarm(msg.html, msg.addClass == "greentext", shown.showEmotes, next, revealSpoilers = isTv)
+                    }
+                }
+            }
+            update { s ->
+                when {
+                    // As got ready: its messages are drawn already.
+                    s.emotes === shown.emotes -> s.copy(emotes = next)
+                    sameAs(s.emotes.effects) -> s
+                    // The emotes changed meanwhile: theirs, with these styles.
+                    else -> s.copy(emotes = s.emotes.withEffects(effects))
+                }
+            }
+        }
+    }
+
     /** Fetches and reads any linked stylesheet not read yet (not on TV,
-     *  which doesn't show the backdrop), then works the backdrop out again. */
+     *  which shows nothing that's in them; on a phone whatever Settings say,
+     *  as chat text is drawn with them), then works the backdrop and chat
+     *  text styles out again. */
     private fun readLinkedStyles() {
         val missing = linkedAddresses().filter { it !in linkedStyles }
         // Started before working the backdrop out, so that sees there's more
@@ -455,6 +509,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         refreshBackdrop()
+        refreshTextStyles()
     }
 
     /** A stylesheet's text, or null: https only (see webAddress), its first
@@ -526,6 +581,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 showEmotes = settings.showEmotes,
                 pipEnabled = settings.pipEnabled,
                 groupChat = settings.groupChat,
+                channelBackgrounds = settings.channelBackgrounds,
                 nicoEmotesOnly = settings.nicoEmotesOnly,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
@@ -554,6 +610,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     update { s ->
                         if (it.showEmotes == s.showEmotes && it.pipEnabled == s.pipEnabled &&
                             it.groupChat == s.groupChat &&
+                            it.channelBackgrounds == s.channelBackgrounds &&
                             it.nicoEmotesOnly == s.nicoEmotesOnly &&
                             it.syncEnabled == s.syncEnabled
                         ) s
@@ -561,6 +618,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             showEmotes = it.showEmotes,
                             pipEnabled = it.pipEnabled,
                             groupChat = it.groupChat,
+                            channelBackgrounds = it.channelBackgrounds,
                             nicoEmotesOnly = it.nicoEmotesOnly,
                             syncEnabled = it.syncEnabled
                         )
@@ -954,9 +1012,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         channelScript = event.js
                         scriptStylesheets = sheets
                         cssReceived = true
-                        update { s ->
-                            s.copy(emotes = s.emotes.withEffects(style.effects), nameColors = style.nameColors)
-                        }
+                        update { s -> s.copy(nameColors = style.nameColors) }
+                        // Its emote effects come with its chat text styles
+                        // (see refreshTextStyles), the linked stylesheets' too.
                         readLinkedStyles()
                     }
                 }
@@ -2537,6 +2595,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile var leadMemoryRestored = false
         const val MAX_CHAT_MESSAGES = 300
         const val MAX_GUEST_RETRIES = 3
+        /** When the channel's chat text styles change, this many of the
+         *  newest messages are drawn with them before chat switches over
+         *  (see refreshTextStyles): about two screenfuls. */
+        const val RESTYLE_PREWARM_COUNT = 60
         /** A linked stylesheet is read only this far (ChannelStyle reads
          *  less still). */
         const val MAX_STYLESHEET_BYTES = 400_000L

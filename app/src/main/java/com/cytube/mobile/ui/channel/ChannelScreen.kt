@@ -766,7 +766,9 @@ fun ChannelScreen(
 
     // The channel's picture is up behind the top of the screen (see
     // ChannelBackdrop): the top bar and the Scaffold let it show through.
-    val showingBackdrop = !webMode && backdropShown != null && backdropShown == state.backdrop?.url
+    // Never with backgrounds off in Settings.
+    val showingBackdrop = !webMode && state.channelBackgrounds &&
+        backdropShown != null && backdropShown == state.backdrop?.url
 
     CyTubeChannelTheme {
     Box(
@@ -790,7 +792,7 @@ fun ChannelScreen(
                 }
             }
     ) {
-    if (!webMode) {
+    if (!webMode && state.channelBackgrounds) {
         ChannelBackdrop(
             backdrop = state.backdrop,
             // The strip above the video, whether or not anything plays;
@@ -1205,6 +1207,8 @@ fun ChannelScreen(
                     onVote = vm::votePoll,
                     canVote = state.canVotePoll,
                     onDismiss = { vm.dismissPoll(); openPanel = null },
+                    emotes = state.emotes,
+                    showEmotes = state.showEmotes,
                     modifier = Modifier.fillMaxHeight(0.8f)
                 )
             }
@@ -1555,7 +1559,7 @@ private fun MotdSection(
             Spacer(Modifier.height(6.dp))
             var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
             Text(
-                rendered.text,
+                animatedChatText(rendered.text, rendered.textFx),
                 style = MaterialTheme.typography.bodySmall,
                 onTextLayout = { layout = it },
                 modifier = Modifier

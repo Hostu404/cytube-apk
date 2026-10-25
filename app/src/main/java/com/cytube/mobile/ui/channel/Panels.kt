@@ -76,7 +76,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Density
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -139,6 +138,10 @@ private const val EMOTE_HEIGHT = EmoteImages.INLINE_HEIGHT_SP
  * Telegram/Slack make for an emoji-only message.
  */
 private const val SOLO_EMOTE_HEIGHT = EmoteImages.SOLO_HEIGHT_SP
+
+/** Only the newest this many chat messages animate their text (see
+ *  animatedChatText); older ones keep their first colour. */
+private const val ANIMATED_TEXT_NEWEST = 6
 
 /** How far an emote's width-to-height ratio has to be off before its row is
  *  laid out again for it. */
@@ -507,6 +510,7 @@ fun ChatPanel(
                     msg = msg,
                     nameColor = nameColor,
                     continuesGroup = continues,
+                    animateText = index >= messages.size - ANIMATED_TEXT_NEWEST,
                     modifier = Modifier.padding(
                         top = when {
                             index == 0 -> 0.dp
@@ -1309,6 +1313,9 @@ private fun ChatRow(
     msg: ChatMessage,
     /** The name's colour; see chatNameColor. */
     nameColor: Color,
+    /** Whether its text whose colour changes (a channel's rainbow) changes
+     *  here; see animatedChatText. */
+    animateText: Boolean = true,
     /** Straight after the same person's last message: no name or time. */
     continuesGroup: Boolean,
     modifier: Modifier = Modifier,
@@ -1440,7 +1447,9 @@ private fun ChatRow(
         // instead. Taps that don't land on a link fall through untouched.
         var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
         Text(
-            text = text,
+            // Coloured for now where the channel's text changes colour; taps
+            // are still matched against [text], whose places are the same.
+            text = animatedChatText(text, rendered.textFx, animateText),
             inlineContent = inline,
             style = MaterialTheme.typography.bodyMedium,
             onTextLayout = { layout = it },
@@ -1731,7 +1740,11 @@ fun PollPanel(
     /** See ChannelUiState.canVotePoll. */
     canVote: Boolean = true,
     /** Clears a closed poll. */
-    onDismiss: () -> Unit = {}
+    onDismiss: () -> Unit = {},
+    /** The channel's emotes, shown in the poll as its page's script shows
+     *  them, when emotes are shown at all. */
+    emotes: EmoteSet = EmoteSet.EMPTY,
+    showEmotes: Boolean = true
 ) {
     if (poll == null) {
         EmptyPanel("No poll is running right now.", modifier)
@@ -1741,7 +1754,7 @@ fun PollPanel(
 
     Column(modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PollRichText(poll.title, MaterialTheme.typography.titleMedium, Modifier.weight(1f))
+            PollRichText(poll.title, MaterialTheme.typography.titleMedium, Modifier.weight(1f), emotes, showEmotes)
             if (poll.closed) {
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
@@ -1790,7 +1803,7 @@ fun PollPanel(
                     .padding(12.dp)
             ) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    PollRichText(option, MaterialTheme.typography.bodyMedium, Modifier.weight(1f))
+                    PollRichText(option, MaterialTheme.typography.bodyMedium, Modifier.weight(1f), emotes, showEmotes)
                     Text(
                         if (count < 0) "?" else count.toString(),
                         style = MaterialTheme.typography.labelMedium,
@@ -1809,38 +1822,48 @@ fun PollPanel(
     }
 }
 
-private val POLL_URL = Regex("https?://[^\\s<>\"']+")
-
 /**
  * A poll title or option: any `[img](url)` shown as the picture (only here;
- * the chat notice shows it as a link), and plain links made tappable (poll
- * text arrives as plain text, so nothing was clickable before). Tapping a
- * link opens it; tapping anywhere else on an option still votes.
+ * the chat notice shows it as a link), the channel's emotes shown as in chat
+ * (poll text is plain text, emote codes and all: the website's own script
+ * turns them into emotes), and plain links made tappable. Tapping a link
+ * opens it; tapping anywhere else on an option still votes.
  */
 @Composable
-private fun PollRichText(text: String, style: TextStyle, modifier: Modifier = Modifier) {
+private fun PollRichText(
+    text: String,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    emotes: EmoteSet = EmoteSet.EMPTY,
+    showEmotes: Boolean = true
+) {
     val context = LocalContext.current
     val linkColor = MaterialTheme.colorScheme.primary
     val images = remember(text) { imageTagUrls(text) }
     val remaining = remember(text) { removeImageTags(text) }
-    val annotated = remember(remaining, linkColor) {
+    val rendered = remember(remaining, showEmotes, emotes) {
+        ChatHtml.render(htmlEscaped(remaining), greentext = false, linkColor = Color.Unspecified, showImages = showEmotes, emotes = emotes)
+    }
+    val annotated = remember(rendered, linkColor) {
         buildAnnotatedString {
-            var last = 0
-            for (m in POLL_URL.findAll(remaining)) {
-                append(remaining.substring(last, m.range.first))
-                val url = m.value.trimEnd('.', ',', ')', ']', '!', '?', ';', ':')
-                withLink(
+            append(rendered.text)
+            for (link in rendered.text.getStringAnnotations(ChatHtml.LINK_TAG, 0, rendered.text.length)) {
+                addLink(
                     LinkAnnotation.Url(
-                        url,
+                        link.item,
                         TextLinkStyles(SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline))
-                    ) { openInBrowser(context, url) }
-                ) { append(url) }
-                append(m.value.substring(url.length))
-                last = m.range.last + 1
+                    ) { openInBrowser(context, link.item) },
+                    link.start,
+                    link.end
+                )
             }
-            append(remaining.substring(last))
         }
     }
+    val inline = inlineEmotes(
+        rendered.imageUrls,
+        if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT,
+        rendered.fx
+    )
     Column(modifier) {
         images.forEach { url ->
             AsyncImage(
@@ -1851,9 +1874,15 @@ private fun PollRichText(text: String, style: TextStyle, modifier: Modifier = Mo
             )
             Spacer(Modifier.height(6.dp))
         }
-        if (annotated.isNotEmpty()) Text(annotated, style = style)
+        if (annotated.isNotEmpty()) {
+            Text(animatedChatText(annotated, rendered.textFx), style = style, inlineContent = inline)
+        }
     }
 }
+
+/** [text] as HTML text: its markup characters escaped. */
+private fun htmlEscaped(text: String): String = text
+    .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
 @Composable
 fun UsersPanel(

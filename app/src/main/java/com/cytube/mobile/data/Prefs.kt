@@ -38,6 +38,9 @@ data class Settings(
      *  instead of each with its own name and time. Phone only; off by
      *  default. */
     val groupChat: Boolean = false,
+    /** A channel's own background picture behind the top of its screen
+     *  (see ChannelBackdrop). Phone only; on by default. */
+    val channelBackgrounds: Boolean = true,
     /** The Niconico overlay flies only each message's emotes (messages
      *  without any don't fly). Off by default. */
     val nicoEmotesOnly: Boolean = false,
@@ -61,6 +64,7 @@ class SettingsStore(private val context: Context) {
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
             groupChat = p[GROUP_CHAT] ?: false,
+            channelBackgrounds = p[CHANNEL_BACKGROUNDS] ?: true,
             nicoEmotesOnly = p[NICO_EMOTES_ONLY] ?: false,
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE])
@@ -73,6 +77,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
     suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
     suspend fun setGroupChat(v: Boolean) = context.dataStore.edit { it[GROUP_CHAT] = v }.let {}
+    suspend fun setChannelBackgrounds(v: Boolean) = context.dataStore.edit { it[CHANNEL_BACKGROUNDS] = v }.let {}
     suspend fun setNicoEmotesOnly(v: Boolean) = context.dataStore.edit { it[NICO_EMOTES_ONLY] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
@@ -147,6 +152,7 @@ class SettingsStore(private val context: Context) {
         val EMOTES = booleanPreferencesKey("show_emotes")
         val PIP = booleanPreferencesKey("pip_enabled")
         val GROUP_CHAT = booleanPreferencesKey("group_chat")
+        val CHANNEL_BACKGROUNDS = booleanPreferencesKey("channel_backgrounds")
         val NICO_EMOTES_ONLY = booleanPreferencesKey("nico_emotes_only")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")

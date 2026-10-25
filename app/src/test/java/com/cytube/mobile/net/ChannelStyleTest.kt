@@ -193,4 +193,68 @@ class ChannelStyleTest {
         assertTrue(empty.effects.modifiers.isEmpty())
         assertNull(empty.nameColors.forRank(1.0))
     }
+
+    @Test fun chatTextLooksByClass() {
+        val looks = ChannelStyle.parse(
+            """
+            .redtext {color: red}
+            #messagebuffer .bigtext {font-size: 21px; font-weight: bold; font-style: italic}
+            span.glow {text-shadow: 0 0 5px #0ff}
+            .grad {background: linear-gradient(to right, red, orange, yellow); -webkit-background-clip: text; color: transparent}
+            .mark {background-color: yellow; text-decoration: underline line-through}
+            .x {color: red} .x {color: blue}
+            .timestamp {color: red}
+            .userlist_owner {color: red}
+            .navbar .active {color: red}
+            .redtext:hover {color: lime}
+            """
+        ).effects.textLooks
+        assertEquals(0xFFFF0000.toInt(), looks.getValue("redtext").color)
+        val big = looks.getValue("bigtext")
+        assertEquals(1.5f, big.scale!!, 0.001f)
+        assertEquals(true, big.bold)
+        assertEquals(true, big.italic)
+        assertEquals(TextShadow(0xFF00FFFF.toInt(), 0f, 0f, 5f), looks.getValue("glow").shadow)
+        val grad = looks.getValue("grad")
+        assertEquals(listOf(0xFFFF0000.toInt(), 0xFFFFA500.toInt(), 0xFFFFFF00.toInt()), grad.gradient)
+        assertNull(grad.color)
+        val mark = looks.getValue("mark")
+        assertEquals(0xFFFFFF00.toInt(), mark.background)
+        assertEquals(true, mark.underline)
+        assertEquals(true, mark.strike)
+        assertEquals(0xFF0000FF.toInt(), looks.getValue("x").color)
+        assertTrue("timestamp" !in looks && "userlist_owner" !in looks && "active" !in looks)
+    }
+
+    @Test fun chatTextThatChangesColour() {
+        val looks = ChannelStyle.parse(
+            """
+            .rainbow {animation: rainbow 2s linear infinite}
+            @keyframes rainbow {0% {color: red} 50% {color: blue} 100% {color: red}}
+            .spin {color: red; animation: spin 4s linear infinite}
+            @keyframes spin {from {filter: hue-rotate(0deg)} to {filter: hue-rotate(360deg)}}
+            .wobble {animation: wobble 1s infinite}
+            @keyframes wobble {from {transform: rotate(0)} to {transform: rotate(10deg)}}
+            """
+        ).effects.textLooks
+        val rainbow = looks.getValue("rainbow")
+        assertEquals(0xFFFF0000.toInt(), rainbow.colorAt(0))
+        assertEquals(0xFF0000FF.toInt(), rainbow.colorAt(1000))
+        assertEquals(0xFF800080.toInt(), rainbow.colorAt(500))
+        val spin = looks.getValue("spin")
+        assertEquals(0xFFFF0000.toInt(), spin.colorAt(0))
+        assertTrue(spin.colorAt(2000) != 0xFFFF0000.toInt())
+        // Movement only: nothing a line of text can show.
+        assertTrue("wobble" !in looks)
+    }
+
+    @Test fun styleWrittenIntoAMessage() {
+        val look = inlineTextLook("color: #f00; font-weight: 700; font-size: 2em")!!
+        assertEquals(0xFFFF0000.toInt(), look.color)
+        assertEquals(true, look.bold)
+        assertEquals(2f, look.scale!!, 0.001f)
+        assertNull(inlineTextLook("display: block; margin: 0"))
+        assertEquals(0xFF00FF00.toInt(), cssColor("lime"))
+        assertNull(cssColor("transparent"))
+    }
 }
