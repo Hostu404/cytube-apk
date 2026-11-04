@@ -45,9 +45,9 @@ fun SettingsScreen(onBack: () -> Unit) {
     val focusManager = LocalFocusManager.current
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
-    // their own dark palette — see MainActivity), PiP (no home-screen
-    // window to float into), grouped chat messages and the ignored users
-    // list.
+    // their own dark palette — see MainActivity — and the cot cat is
+    // phone only), PiP (no home-screen window to float into), grouped chat
+    // messages and the ignored users list.
     val isTv = remember { isTvDevice(context) }
     var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
@@ -87,10 +87,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                                 ThemeMode.SYSTEM -> "System default"
                                 ThemeMode.LIGHT -> "Light"
                                 ThemeMode.DARK -> "Dark"
-                                ThemeMode.COT -> "cot"
                             }
                         )
                     }
+                }
+
+                // The cat in the home search bar (see CotCat), on whichever
+                // theme is picked above.
+                SwitchRow(title = "cot", checked = settings.cot) {
+                    scope.launch { store.setCot(it) }
                 }
 
                 SwitchRow(
@@ -260,7 +265,7 @@ private fun LinkRow(text: String, onClick: () -> Unit) {
 @Composable
 private fun SwitchRow(
     title: String,
-    subtitle: String,
+    subtitle: String? = null,
     checked: Boolean,
     onChange: (Boolean) -> Unit
 ) {
@@ -270,7 +275,7 @@ private fun SwitchRow(
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
+            if (subtitle != null) Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

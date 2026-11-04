@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
@@ -63,7 +64,7 @@ fun HomeScreen(
     onOpenChannel: (String) -> Unit,
     onOpenLogin: () -> Unit,
     onOpenSettings: () -> Unit,
-    /** The Cot theme: a cat sits in the search bar (see CotCat). */
+    /** Settings > Appearance > cot: a cat sits in the search bar (see CotCat). */
     showCat: Boolean = false,
     vm: HomeViewModel = viewModel()
 ) {
@@ -102,10 +103,7 @@ fun HomeScreen(
     CyTubePageTheme {
     val colors = MaterialTheme.colorScheme
     Scaffold(
-        // The cat watches fingers anywhere on the page (see CotCat).
-        modifier = Modifier.fillMaxSize()
-            .then(maPageBackground())
-            .then(if (catShown) Modifier.cotCatWatchesFingers(cat) else Modifier),
+        modifier = Modifier.fillMaxSize().then(maPageBackground()),
         // The page's own background (and grain) is drawn above, so the
         // Scaffold and top bar are see-through over it.
         containerColor = Color.Transparent,
@@ -288,12 +286,14 @@ private fun SearchField(
     onQueryChange: (String) -> Unit,
     onSubmit: () -> Unit,
     isTv: Boolean,
-    /** Set with the Cot theme: the cat that sits in the bar. */
+    /** Set when cot is on: the cat that sits in the bar. */
     cat: CotCatState? = null
 ) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val colors = MaterialTheme.colorScheme
+    // In the box: searching, which wakes the cat (see CotCat).
+    var searching by remember { mutableStateOf(false) }
     MaTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -329,14 +329,24 @@ private fun SearchField(
             if (cat != null) {
                 CotCat(
                     state = cat,
-                    modifier = Modifier.padding(start = 8.dp).size(width = 30.dp, height = 36.dp),
-                    wakeKey = query
+                    // A 38 x 32 pixel sprite: room for it at a whole
+                    // number of screen pixels per pixel, about 32-37dp tall.
+                    modifier = Modifier.padding(start = 8.dp).size(width = 44.dp, height = 38.dp),
+                    wakeKey = query,
+                    // Strolls only over an empty bar, and not while you're in it.
+                    roam = query.isEmpty() && !searching,
+                    // Searching wakes it, and it stays up while you are.
+                    keepAwake = searching
                 )
             }
         },
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 8.dp)
+            .onFocusChanged { searching = it.isFocused }
+            // A tap on the cat, wherever it's got to along the bar, is for it,
+            // not for the box.
+            .then(if (cat != null) Modifier.cotCatTaps(cat) else Modifier)
             .then(
                 if (isTv) {
                     // Focusing this field on TV pops the on-screen keyboard, and

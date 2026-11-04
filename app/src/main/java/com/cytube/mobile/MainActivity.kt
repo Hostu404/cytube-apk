@@ -101,7 +101,7 @@ class MainActivity : ComponentActivity() {
                 val isDark = when (settings.themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
                     ThemeMode.LIGHT -> false
-                    ThemeMode.DARK, ThemeMode.COT -> true
+                    ThemeMode.DARK -> true
                 }
 
                 // The navigation bar is see-through everywhere, so each
@@ -154,7 +154,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenChannel = { nav.navigate("channel/$it") },
                                 onOpenLogin = { nav.navigate("login") },
                                 onOpenSettings = { nav.navigate("settings") },
-                                showCat = settings.themeMode == ThemeMode.COT
+                                showCat = settings.cot
                             )
                         }
                         if (isTv) {

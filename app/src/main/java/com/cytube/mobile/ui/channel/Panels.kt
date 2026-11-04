@@ -93,6 +93,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
@@ -749,10 +750,9 @@ class NekoOverlayState {
     var lastSpawnedSeq = -1L
     var nextId = 0L
 
-    /** Active occupants per lane, used for constant-velocity collision detection.
-     *  Expired entries are pruned continuously as lanes are evaluated. */
-    val laneOccupants = HashMap<Int, MutableList<LaneOccupant>>()
-    var nextLaneIndex = 0
+    /** Which lane each comment flies in, and which waiting message goes
+     *  next: see [NekoLanes]. */
+    val lanes = NekoLanes()
     var hasCaughtUp = false
 
     /** Messages waiting for a lane to free up. At most NEKO_MAX_QUEUE:
@@ -853,15 +853,20 @@ fun NekoChatOverlay(
             if (messages.isNotEmpty()) state.lastSpawnedSeq = messages.last().seq
         }
 
-        // Drains the queue using continuous non-collision lane allocation.
-        // Multiple comments naturally trail each other in each lane with
-        // guaranteed safe margins, producing high throughput at a steady,
-        // comfortable reading pace without chaotic speed jumps or text walls.
-        // The loop below runs for as long as the overlay is up; read these
-        // through state so its width estimates follow emote changes.
+        // Drains the queue using continuous non-collision lane allocation
+        // (see NekoLanes): comments trail each other in each lane with safe
+        // margins, at a steady, comfortable reading pace, in lanes picked at
+        // random. The loop below runs for as long as the overlay is up; read
+        // these through state so its width estimates follow emote changes.
         val currentShowEmotes by rememberUpdatedState(showEmotes)
         val currentEmotes by rememberUpdatedState(emotes)
         val currentEmotesOnly by rememberUpdatedState(emotesOnly)
+        // Each waiting message's estimated width, by seq, worked out once:
+        // the loop looks at every waiting message each time round, not just
+        // the first. Started afresh when the emote settings change the
+        // estimates.
+        val widthCache = remember(showEmotes, emotes, emotesOnly) { HashMap<Long, Float>() }
+        val currentWidthCache by rememberUpdatedState(widthCache)
         LaunchedEffect(state, laneCount, screenWidthPx) {
             while (true) {
                 if (state.pending.isEmpty()) {
@@ -869,43 +874,44 @@ fun NekoChatOverlay(
                     continue
                 }
                 val now = System.currentTimeMillis()
-                val msg = state.pending.first()
-                val estimatedWidthPx = estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, density)
-                val durationMs = nekoDurationMs(screenWidthPx + estimatedWidthPx)
-                val speedPxPerMs = (screenWidthPx + estimatedWidthPx) / durationMs
+                val widths = currentWidthCache
+                val waiting = state.pending.map { msg ->
+                    val widthPx = widths.getOrPut(msg.seq) {
+                        estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, density)
+                    }
+                    LaneCandidate(widthPx, (screenWidthPx + widthPx) / nekoDurationMs(screenWidthPx + widthPx))
+                }
+                // Forget the ones that have flown or been dropped.
+                if (widths.size > waiting.size) widths.keys.retainAll(state.pending.mapTo(HashSet()) { it.seq })
 
-                val lane = findBestLane(
-                    now = now,
-                    candidateWidthPx = estimatedWidthPx,
-                    candidateSpeedPxPerMs = speedPxPerMs,
-                    laneCount = laneCount,
-                    gapPx = gapPx,
-                    screenWidthPx = screenWidthPx,
-                    state = state
-                )
-
-                if (lane != null) {
-                    state.pending.removeFirst()
-                    val clearAtMs = now + durationMs
-                    val list = state.laneOccupants.getOrPut(lane) { mutableListOf() }
-                    list.add(LaneOccupant(spawnAtMs = now, speedPxPerMs = speedPxPerMs, widthPx = estimatedWidthPx, clearAtMs = clearAtMs))
-                    state.active.add(
-                        FlyingComment(
-                            id = state.nextId++,
-                            msg = msg,
-                            lane = lane,
-                            widthPx = estimatedWidthPx,
-                            durationMs = durationMs,
-                            spawnAtMs = now
+                when (val pick = state.lanes.pick(now, waiting, laneCount, gapPx, screenWidthPx, NEKO_SPAWN_STAGGER_MS)) {
+                    is LanePick.Fly -> {
+                        val msg = state.pending.removeAt(pick.index)
+                        val comment = waiting[pick.index]
+                        val durationMs = nekoDurationMs(screenWidthPx + comment.widthPx)
+                        state.lanes.add(
+                            pick.lane,
+                            LaneOccupant(
+                                spawnAtMs = now,
+                                speedPxPerMs = comment.speedPxPerMs,
+                                widthPx = comment.widthPx,
+                                clearAtMs = now + durationMs
+                            )
                         )
-                    )
-                    // Gentle stagger so consecutive comments stream in with pleasant pacing
-                    delay(NEKO_SPAWN_STAGGER_MS)
-                } else {
-                    val waitMs = calculateNextSafeWaitMs(
-                        now, laneCount, gapPx, screenWidthPx, estimatedWidthPx, speedPxPerMs, state
-                    )
-                    withTimeoutOrNull(waitMs) { state.wakeSignal.receive() }
+                        state.active.add(
+                            FlyingComment(
+                                id = state.nextId++,
+                                msg = msg,
+                                lane = pick.lane,
+                                widthPx = comment.widthPx,
+                                durationMs = durationMs,
+                                spawnAtMs = now
+                            )
+                        )
+                        // Gentle stagger so consecutive comments stream in with pleasant pacing
+                        delay(NEKO_SPAWN_STAGGER_MS)
+                    }
+                    is LanePick.Wait -> withTimeoutOrNull(pick.ms) { state.wakeSignal.receive() }
                 }
             }
         }
@@ -1034,78 +1040,6 @@ private fun estimateCommentWidthPx(
     }
 }
 
-/** Finds the best available lane using constant-velocity non-collision physics
- *  and anti-clustering load balancing. */
-private fun findBestLane(
-    now: Long,
-    candidateWidthPx: Float,
-    candidateSpeedPxPerMs: Float,
-    laneCount: Int,
-    gapPx: Float,
-    screenWidthPx: Float,
-    state: NekoOverlayState
-): Int? {
-    for (lane in 0 until laneCount) {
-        val occupants = state.laneOccupants[lane] ?: continue
-        occupants.removeAll { now >= it.clearAtMs }
-        if (occupants.isEmpty()) {
-            state.laneOccupants.remove(lane)
-        }
-    }
-
-    val safeEmptyLanes = ArrayList<Int>()
-    val safeOccupiedLanes = ArrayList<Pair<Int, Float>>()
-
-    for (lane in 0 until laneCount) {
-        val occupants = state.laneOccupants[lane]
-        if (occupants.isNullOrEmpty()) {
-            safeEmptyLanes.add(lane)
-            continue
-        }
-
-        val last = occupants.last()
-        if (laneWaitMs(last, now, candidateWidthPx, candidateSpeedPxPerMs, gapPx, screenWidthPx) > 0L) continue
-        safeOccupiedLanes.add(lane to (now - last.spawnAtMs) * last.speedPxPerMs)
-    }
-
-    if (safeEmptyLanes.isNotEmpty()) {
-        val chosen = safeEmptyLanes.minByOrNull { (it - state.nextLaneIndex + laneCount) % laneCount } ?: safeEmptyLanes.first()
-        state.nextLaneIndex = (chosen + 1) % laneCount
-        return chosen
-    }
-
-    if (safeOccupiedLanes.isNotEmpty()) {
-        val chosen = safeOccupiedLanes.maxByOrNull { it.second }!!.first
-        state.nextLaneIndex = (chosen + 1) % laneCount
-        return chosen
-    }
-
-    return null
-}
-
-/** How long until some lane will take this comment (see laneWaitMs), so the
- *  drain loop sleeps that long instead of re-checking every frame. Capped:
- *  a new message arriving meanwhile wakes it anyway. */
-private fun calculateNextSafeWaitMs(
-    now: Long,
-    laneCount: Int,
-    gapPx: Float,
-    screenWidthPx: Float,
-    candidateWidthPx: Float,
-    candidateSpeedPxPerMs: Float,
-    state: NekoOverlayState
-): Long {
-    var minWaitMs = Long.MAX_VALUE
-    for (lane in 0 until laneCount) {
-        val last = state.laneOccupants[lane]?.lastOrNull() ?: return 16L
-        minWaitMs = minOf(
-            minWaitMs,
-            laneWaitMs(last, now, candidateWidthPx, candidateSpeedPxPerMs, gapPx, screenWidthPx)
-        )
-    }
-    return minWaitMs.coerceIn(16L, 1_000L)
-}
-
 @Composable
 private fun FlyingCommentItem(
     comment: FlyingComment,
@@ -1117,7 +1051,8 @@ private fun FlyingCommentItem(
     onFinished: () -> Unit
 ) {
     val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes, emotesOnly) }
-    val emoteHeight = if (rendered.soloEmoteCount > 0) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
+    val solo = rendered.soloEmoteCount > 0
+    val emoteHeight = if (solo) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
     // Its real width once laid out (the lane was picked on an estimate).
@@ -1153,12 +1088,19 @@ private fun FlyingCommentItem(
         // The text's own width: the laid-out size is capped at the
         // overlay's width, and a long comment runs past it.
         onTextLayout = { layout -> measuredWidthPx = layout.multiParagraph.maxIntrinsicWidth },
-        modifier = Modifier.graphicsLayer {
-            // Read here, while drawing: each frame only moves the layer.
-            val width = maxOf(measuredWidthPx, comment.widthPx)
-            translationX = screenWidthPx - progress * (screenWidthPx + width)
-            translationY = (laneHeightPx * comment.lane).toFloat()
-        }
+        modifier = Modifier
+            // Text always goes over emotes. A message that's only emotes is
+            // taller than its lane and reaches into the next one, so every
+            // comment with text is drawn above those, whichever lane each is
+            // in and whichever set off first. (An emote in a message with
+            // text is only a little taller than the text.)
+            .zIndex(if (solo) 0f else 1f)
+            .graphicsLayer {
+                // Read here, while drawing: each frame only moves the layer.
+                val width = maxOf(measuredWidthPx, comment.widthPx)
+                translationX = screenWidthPx - progress * (screenWidthPx + width)
+                translationY = (laneHeightPx * comment.lane).toFloat()
+            }
     )
 }
 

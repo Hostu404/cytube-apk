@@ -31,9 +31,10 @@ android {
         versionCode = 23
         versionName = "apustaja"
         // Nightly builds (.github/workflows/nightly.yml) pass
-        // -PnightlyBuild=<date>.<commit>, so About shows which night and
-        // which commit an APK came from, e.g. "apustaja-nightly.20261003.ab12cd3".
-        providers.gradleProperty("nightlyBuild").orNull?.let { versionName = "$versionName-nightly.$it" }
+        // -PnightlyBuild=<the night>, so the home screen shows which night an
+        // APK is from, e.g. "apustaja nightly 4 Nov". (Its commit is in the
+        // nightly release's notes.)
+        providers.gradleProperty("nightlyBuild").orNull?.let { versionName = "$versionName nightly $it" }
     }
 
     signingConfigs {

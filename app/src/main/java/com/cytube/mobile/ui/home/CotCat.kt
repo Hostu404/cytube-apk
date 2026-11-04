@@ -1,449 +1,498 @@
 package com.cytube.mobile.ui.home
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.keyframes
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.scale
-import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.imageResource
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import com.cytube.mobile.R
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.PI
+import java.time.LocalTime
 import kotlin.math.abs
-import kotlin.math.atan2
-import kotlin.math.exp
+import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sin
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 /**
  * The cat's state. Kept by the home screen rather than by [CotCat] itself:
  * the search bar sits in the channel list, which drops it while it's
  * scrolled out of view, and the cat shouldn't start its day over each time
- * it scrolls back. It also carries where a finger is on the screen, from
- * [cotCatWatchesFingers].
+ * it scrolls back.
  */
 @Stable
 class CotCatState {
-    /** 0 = sitting, 1 = asleep; in between, the two poses crossfade. Each
-     *  visit to the home page finds it at a random point in its day: some
-     *  of the time already asleep. */
-    internal val sleep = Animatable(if (Random.nextFloat() < START_ASLEEP_CHANCE) 1f else 0f)
+    /** The hour of the day (0-23) for its body clock, [Mood]. A test can
+     *  set the time here. */
+    internal var hour: () -> Int = { LocalTime.now().hour }
+
+    /** Each visit to the home page finds it at a random point in its day:
+     *  some of the time already asleep, more so at night. */
+    internal var asleep by mutableStateOf(Random.nextFloat() < mood().startAsleep)
+
+    /** Waking up: a stretch and a yawn. */
+    internal var waking by mutableStateOf(false)
+
+    /** A paw up for a quick scratch, when it's tapped awake (only then). */
+    internal var scratching by mutableStateOf(false)
+
+    /** Stopped partway through a stroll, thinking better of it. */
+    internal var pondering by mutableStateOf(false)
+
+    /** [LEFT] or [RIGHT] while it's walking, else 0. */
+    internal var walking by mutableIntStateOf(0)
+
+    /** How far it is to the left of its spot, in the sprite's own pixels. */
+    internal var away by mutableFloatStateOf(0f)
+
+    /** Taps on it so far (see [cotCatTaps]): each sets it scratching, or
+     *  wakes it if it's asleep. */
+    internal var taps by mutableIntStateOf(0)
+
+    /** How far left of its spot it can go, in sprite pixels: to just past
+     *  the search icon. And how much of that it'll stop and sit down in: the
+     *  empty half of its row, clear of the search hint. Both worked out from
+     *  where its spot is (see [CotCat]). */
+    internal var room = 0f
+    internal var restRoom = 0f
+
+    /** Where it was last drawn, in its spot's coordinates (left of the spot
+     *  while it's out walking), and where its spot and the bar are: for
+     *  telling whether a tap is on it. */
+    internal var drawn = Rect.Zero
+    internal var spot: LayoutCoordinates? = null
+    internal var bar: LayoutCoordinates? = null
+
     internal var started = false
     internal var lastWakeKey: Any? = null
-
-    /** A finger on the screen, in root coordinates; null when nothing is
-     *  touching. */
-    internal var finger by mutableStateOf<Offset?>(null)
-    internal var screen: LayoutCoordinates? = null
-    internal var self: LayoutCoordinates? = null
-
-    /** Head turn towards the finger, in degrees, and how far that has
-     *  taken over from the idle head tilt (0..1). Both ease in and out. */
-    internal var gaze by mutableFloatStateOf(0f)
-    internal var follow by mutableFloatStateOf(0f)
+    internal var lastTaps = 0
 }
 
 @Composable
 fun rememberCotCatState(): CotCatState = remember { CotCatState() }
 
 /**
- * Lets the cat see fingers anywhere in this element (the whole home
- * screen). It only watches: nothing is consumed, so scrolling and taps work
- * exactly as before.
+ * A tap on the cat, wherever it's got to along the bar (out on a stroll it's
+ * outside its own spot), sets it scratching, or wakes it if it's asleep, and
+ * the bar doesn't take it as a tap of its own: the keyboard stays down. A tap
+ * anywhere else, or a scroll that starts on the cat, goes to the bar as usual.
+ * Goes on the bar it sits in.
  */
-fun Modifier.cotCatWatchesFingers(state: CotCatState): Modifier = this
-    .onGloballyPositioned { state.screen = it }
+fun Modifier.cotCatTaps(state: CotCatState): Modifier = this
+    .onPlaced { state.bar = it }
     .pointerInput(state) {
-        awaitPointerEventScope {
+        val slop = TAP_SLOP.toPx()
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            if (!state.isUnder(down.position, slop)) return@awaitEachGesture
             while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val down = event.changes.firstOrNull { it.pressed }
-                val screen = state.screen
-                state.finger = if (down != null && screen != null && screen.isAttached) {
-                    screen.localToRoot(down.position)
-                } else {
-                    null
+                val change = awaitPointerEvent(PointerEventPass.Initial).changes
+                    .firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+                // Moved off it: a scroll, not a tap.
+                if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) return@awaitEachGesture
+                if (!change.pressed) {
+                    change.consume()
+                    state.taps++
+                    return@awaitEachGesture
                 }
             }
         }
     }
 
+/** Whether [position], on the bar, is on the cat, give or take [slop] pixels. */
+private fun CotCatState.isUnder(position: Offset, slop: Float): Boolean {
+    val spot = spot?.takeIf { it.isAttached } ?: return false
+    val bar = bar?.takeIf { it.isAttached } ?: return false
+    return drawn.inflate(slop).contains(spot.localPositionOf(bar, position))
+}
+
 /**
- * The cat that lives in the home search bar with the Cot theme. A
- * silhouette drawn in a 100 x 120 box and scaled to fit. Sitting, it swishes
- * its tail, breathes, now and then flicks an ear and tilts its head, and
- * while a finger is on the screen it slowly turns its head to watch it.
- * Every so often it curls up and sleeps for a while. Purely decorative.
+ * The cat that lives in the home search bar when cot is on (Settings >
+ * Appearance, light or dark): a pixel-art tuxedo cat, from the sprite sheet
+ * res/drawable-nodpi/tuxedo_cat.png (38 x 32 pixel frames, eight to a row,
+ * the cat's feet on each frame's bottom edge). It's drawn with each of its
+ * pixels as a whole number of screen pixels, as many as fit, and not
+ * smoothed, so it stays crisp; feet on the bottom edge, centred in its spot,
+ * with a soft shadow under them.
  *
- * Changing [wakeKey] (the search text) wakes it up and restarts its timer,
- * so it doesn't nod off while you're typing, and it stays awake while it's
- * watching a finger.
+ * Sitting, it blinks and flicks an ear, (with [roam]) often goes for a stroll
+ * along its row, back and forth and home again, now and then thinking better
+ * of a leg of it partway and turning back, and every so often it dozes off
+ * for a while, waking with a stretch and a yawn. All by its body clock: sleepy
+ * at night, lively in the evening (see [Mood]). Only when it's tapped (see
+ * [cotCatTaps]) does it have a scratch; tapped while it's asleep, it wakes,
+ * with its stretch and yawn. Purely decorative.
+ *
+ * Changing [wakeKey] (the search text) wakes it up, sends it back to its
+ * spot if it's out on a stroll, and restarts its timer, so it doesn't nod
+ * off while you're typing.
  */
 @Composable
 fun CotCat(
     state: CotCatState,
     modifier: Modifier = Modifier,
     wakeKey: Any? = null,
-    color: Color = MaterialTheme.colorScheme.onSurface
+    /** Whether it may go for a stroll: not over search text, say. It walks
+     *  left of its spot, along the row it's in, outside its own bounds. */
+    roam: Boolean = true,
+    /** While true (the search box in use, say), it's up: woken if it's
+     *  asleep, and no naps. */
+    keepAwake: Boolean = false
 ) {
-    val motion = rememberInfiniteTransition(label = "cotCat")
-    val tail by motion.animateFloat(
-        initialValue = -8f,
-        targetValue = 10f,
-        animationSpec = infiniteRepeatable(
-            tween(1800, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "tail"
-    )
-    val breath by motion.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.02f,
-        animationSpec = infiniteRepeatable(
-            tween(1600, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "breath"
-    )
-    // A quick double flick near the end of each 5.2s cycle.
-    val ear by motion.animateFloat(
-        initialValue = 0f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            keyframes {
-                durationMillis = 5200
-                0f at 4600
-                -14f at 4700
-                0f at 4850
-                -14f at 4950
-                0f at 5100
-            }
-        ),
-        label = "ear"
-    )
-    // A slow, curious head tilt once every 9s.
-    val tilt by motion.animateFloat(
-        initialValue = 0f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            keyframes {
-                durationMillis = 9000
-                0f at 3000 using FastOutSlowInEasing
-                8f at 3600
-                8f at 5200 using FastOutSlowInEasing
-                0f at 5800
-            }
-        ),
-        label = "tilt"
-    )
-    // Drives the Zs rising while it sleeps.
-    val zzz by motion.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(2400, easing = LinearEasing)),
-        label = "zzz"
-    )
-
-    val sleep = state.sleep
-    LaunchedEffect(state, wakeKey) {
+    val canRoam by rememberUpdatedState(roam)
+    val mayNap by rememberUpdatedState(!keepAwake)
+    LaunchedEffect(state, wakeKey, state.taps, keepAwake) {
         // This runs on arriving at the page, on the search bar scrolling
-        // back into view, and on the search text changing. Only the last
-        // wakes it.
+        // back into view, on the search text changing, on a tap, and on the
+        // search box being taken up or left.
+        val tapped = state.started && state.taps != state.lastTaps
         val typed = state.started && wakeKey != state.lastWakeKey
         state.started = true
         state.lastWakeKey = wakeKey
+        state.lastTaps = state.taps
         var awakeFor = Random.nextLong(AWAKE_MIN_MS, AWAKE_MAX_MS)
         when {
-            typed -> if (sleep.value > 0f) sleep.animateTo(0f, tween(400))
-            sleep.value > 0f -> {
+            // Asleep, it wakes with a stretch and a yawn; awake (or already
+            // waking), it has a scratch. Either where it is.
+            tapped -> if (state.asleep) state.wakeUp() else state.scratch()
+            typed || keepAwake -> state.wakeUp()
+            state.asleep -> {
                 // Found asleep: wakes some time into the rest of its nap.
-                if (sleep.value < 1f) sleep.animateTo(1f, tween(700))
-                delay(Random.nextLong(FIRST_CHANGE_MIN_MS, ASLEEP_MAX_MS))
-                sleep.animateTo(0f, tween(400))
+                delay(Random.nextLong(FIRST_CHANGE_MIN_MS, state.mood().napMaxMs))
+                state.wakeUp()
             }
             // Found awake: somewhere into its time awake.
             else -> awakeFor = Random.nextLong(FIRST_CHANGE_MIN_MS, AWAKE_MAX_MS)
         }
+        // Out on a stroll when that happened: back to its spot.
+        state.walkTo(0f)
         while (true) {
-            state.stayAwake(awakeFor)
-            if (Random.nextFloat() < SLEEP_CHANCE) {
-                sleep.animateTo(1f, tween(700))
-                delay(Random.nextLong(ASLEEP_MIN_MS, ASLEEP_MAX_MS))
-                sleep.animateTo(0f, tween(400))
+            state.stayAwake(awakeFor) { canRoam }
+            val mood = state.mood()
+            if (mayNap && Random.nextFloat() < mood.napChance) {
+                state.asleep = true
+                delay(Random.nextLong(mood.napMinMs, mood.napMaxMs))
+                state.wakeUp()
             }
             awakeFor = Random.nextLong(AWAKE_MIN_MS, AWAKE_MAX_MS)
         }
     }
 
-    // Eases the head towards the finger, and back once it lifts. Runs frame
-    // by frame only while there's something to follow or to settle.
-    LaunchedEffect(state) {
-        var last = 0L
+    val animation = when {
+        state.asleep -> DOZE
+        state.waking -> WAKE
+        state.walking != 0 -> WALK
+        state.scratching -> SCRATCH
+        state.pondering -> PONDER
+        else -> SIT
+    }
+    // Which of [animation]'s frames is showing. Read only while drawing, so
+    // stepping it redraws the cat without recomposing anything.
+    var step by remember { mutableIntStateOf(0) }
+    LaunchedEffect(animation) {
+        step = 0
         while (true) {
-            if (state.gaze == 0f && state.follow == 0f) {
-                snapshotFlow { state.finger != null && sleep.value == 0f }.first { it }
-                last = 0L
-            }
-            withFrameNanos { now ->
-                val dt = if (last == 0L) 1f / 60f else ((now - last) / 1e9f).coerceAtMost(0.1f)
-                last = now
-                val target = if (sleep.value == 0f) state.gazeTarget() else null
-                if (target != null) {
-                    state.gaze = approach(state.gaze, target, dt, FOLLOW_TAU_S)
-                    state.follow = approach(state.follow, 1f, dt, FOLLOW_TAU_S, maxPerSecond = 3f)
-                } else {
-                    state.gaze = approach(state.gaze, 0f, dt, RETURN_TAU_S)
-                    state.follow = approach(state.follow, 0f, dt, RETURN_TAU_S, maxPerSecond = 3f)
-                    if (abs(state.gaze) < 0.05f && state.follow < 0.01f) {
-                        state.gaze = 0f
-                        state.follow = 0f
-                    }
-                }
-            }
+            delay(animation.frameMs)
+            step = (step + 1) % animation.frames.size
         }
     }
 
-    val parts = remember { CatParts() }
-    val tailStroke = remember { Stroke(width = 7f, cap = StrokeCap.Round) }
-
-    // One layer per pose, so each fades as a whole: fading the parts one by
-    // one would show brighter seams where they overlap.
-    Box(modifier.onGloballyPositioned { state.self = it }) {
-        Canvas(Modifier.matchParentSize().graphicsLayer { alpha = 1f - sleep.value }) {
-            inCatBox {
-                // Sitting faces left: the shapes below face right, so
-                // mirror them.
-                scale(scaleX = -1f, scaleY = 1f, pivot = Offset(BOX_W / 2f, BOX_H / 2f)) {
-                    // Tail first, so the body covers its base.
-                    rotate(tail, pivot = Offset(30f, 113f)) {
-                        drawPath(parts.tail, color, style = tailStroke)
-                    }
-                    scale(scaleX = 1f, scaleY = breath, pivot = Offset(0f, 118f)) {
-                        drawPath(parts.haunch, color)
-                        drawPath(parts.body, color)
-                    }
-                    drawPath(parts.backLeg, color)
-                    drawPath(parts.frontLeg, color)
-                    val head = tilt * (1f - state.follow) + state.gaze
-                    rotate(head, pivot = NECK) {
-                        drawPath(parts.head, color)
-                        drawPath(parts.leftEar, color)
-                        rotate(ear, pivot = Offset(76f, 24f)) {
-                            drawPath(parts.rightEar, color)
-                        }
-                    }
-                }
-            }
+    val sheet = ImageBitmap.imageResource(R.drawable.tuxedo_cat)
+    val feet = remember(sheet) { feetOf(sheet) }
+    val shadow = MaterialTheme.colorScheme.onSurface.copy(alpha = SHADOW_ALPHA)
+    val clearOfIcon = with(LocalDensity.current) { CLEAR_OF_ICON.toPx() }
+    Canvas(
+        modifier.onPlaced { spot ->
+            state.spot = spot
+            // Room for a stroll: from its spot, left along the row it's in to
+            // just past the search icon at its start, sitting down only in
+            // the row's empty half (the search hint is in the other).
+            val row = spot.parentLayoutCoordinates ?: return@onPlaced
+            val pixel = pixelSize(spot.size.width.toFloat(), spot.size.height.toFloat())
+            val home = row.localPositionOf(spot, Offset.Zero).x + (spot.size.width - CELL_W * pixel) / 2f
+            state.room = ((home - clearOfIcon) / pixel).coerceAtLeast(0f)
+            state.restRoom = ((home - max(clearOfIcon, row.size.width / 2f)) / pixel).coerceAtLeast(0f)
         }
-        Canvas(Modifier.matchParentSize().graphicsLayer { alpha = sleep.value }) {
-            inCatBox {
-                // Slower-looking, deeper breaths than sitting.
-                scale(scaleX = 1f, scaleY = 1f + (breath - 1f) * 2f, pivot = Offset(0f, 118f)) {
-                    drawPath(parts.curled, color)
-                }
-                drawPath(parts.curledTail, color, style = tailStroke)
-                drawPath(parts.restingHead, color)
-                drawPath(parts.restingEars, color)
-                // Two Zs, half a cycle apart, rising and fading.
-                for (i in 0..1) {
-                    val p = (zzz + i * 0.5f) % 1f
-                    drawZ(
-                        x = 84f + 8f * p,
-                        y = 84f - 26f * p,
-                        h = 4f + 3f * p,
-                        color = color.copy(alpha = color.alpha * sin(PI.toFloat() * p))
-                    )
-                }
+    ) {
+        val frame = animation.frames[step % animation.frames.size]
+        val pixel = pixelSize(size.width, size.height)
+        val width = CELL_W * pixel
+        val height = CELL_H * pixel
+        // Whole sprite pixels away from its spot, so it stays crisp walking.
+        val x = ((size.width - width) / 2f).roundToInt() - state.away.roundToInt() * pixel
+        val y = (size.height - height).roundToInt()
+        state.drawn = Rect(x.toFloat(), y.toFloat(), (x + width).toFloat(), (y + height).toFloat())
+        // The walk faces right on the sheet: mirrored to walk left.
+        val mirror = if (state.walking == LEFT) -1f else 1f
+        scale(scaleX = mirror, scaleY = 1f, pivot = Offset(x + width / 2f, y + height / 2f)) {
+            // Its shadow, two of its pixels deep: as wide as its feet in the
+            // bottom row, a little narrower just below it.
+            val (left, right) = feet[frame]
+            if (right >= left) {
+                fun band(row: Int, from: Int, to: Int) = drawRect(
+                    shadow,
+                    topLeft = Offset((x + from * pixel).toFloat(), (y + row * pixel).toFloat()),
+                    size = Size(((to - from + 1) * pixel).toFloat(), pixel.toFloat())
+                )
+                band(CELL_H - 1, left - 1, right + 1)
+                band(CELL_H, left + 1, right - 1)
             }
+            drawImage(
+                image = sheet,
+                srcOffset = IntOffset(frame % SHEET_COLUMNS * CELL_W, frame / SHEET_COLUMNS * CELL_H),
+                srcSize = IntSize(CELL_W, CELL_H),
+                dstOffset = IntOffset(x, y),
+                dstSize = IntSize(width, height),
+                filterQuality = FilterQuality.None
+            )
         }
     }
 }
 
-/**
- * The head turn, in degrees, that points the sitting cat's face at the
- * finger, or null with no finger (or no layout yet). Worked out in the
- * drawing's own facing-right space, where turning clockwise looks down.
- * A finger behind the cat is watched as if it were in front — it can only
- * tilt its head, not turn round — and the turn is limited to what a neck
- * can do.
- */
-private fun CotCatState.gazeTarget(): Float? {
-    val finger = finger ?: return null
-    val self = self?.takeIf { it.isAttached } ?: return null
-    val w = self.size.width.toFloat()
-    val h = self.size.height.toFloat()
-    val s = min(w / BOX_W, h / BOX_H)
-    // The middle of the face, mirrored because sitting is drawn flipped.
-    val face = self.localToRoot(
-        Offset((w - BOX_W * s) / 2f + (BOX_W - 68f) * s, (h - BOX_H * s) / 2f + 34f * s)
-    )
-    val dx = abs(finger.x - face.x)
-    val dy = finger.y - face.y
-    val degrees = atan2(dy, dx) * (180f / PI.toFloat())
-    return degrees.coerceIn(-GAZE_UP_MAX, GAZE_DOWN_MAX)
+/** Screen pixels per sprite pixel in a spot [width] x [height]: as many
+ *  whole ones as fit, at least one. */
+private fun pixelSize(width: Float, height: Float): Int =
+    max(1, min(width / CELL_W, height / CELL_H).toInt())
+
+/** For each frame of [sheet], the first and last column with something in
+ *  its bottom two rows, where its feet (and tail) are; or (0, -1) for none. */
+private fun feetOf(sheet: ImageBitmap): Array<Pair<Int, Int>> {
+    val pixels = IntArray(sheet.width * sheet.height)
+    sheet.readPixels(pixels)
+    val columns = sheet.width / CELL_W
+    return Array(columns * (sheet.height / CELL_H)) { i ->
+        val x0 = i % columns * CELL_W
+        val y0 = i / columns * CELL_H
+        var left = CELL_W
+        var right = -1
+        for (y in CELL_H - 2 until CELL_H) for (x in 0 until CELL_W) {
+            if (pixels[(y0 + y) * sheet.width + x0 + x] ushr 24 != 0) {
+                left = min(left, x)
+                right = max(right, x)
+            }
+        }
+        if (right < 0) 0 to -1 else left to right
+    }
 }
 
 /**
- * Waits out [ms] of time awake before its next chance to sleep. It won't
- * doze off while it's watching a finger: a touch holds the wait, and
- * lifting the finger starts a fresh one.
+ * Sits for [ms], every so often going for a stroll when [roam] says so and
+ * there's room. Timed by the frame clock, as everything else about it is.
  */
-private suspend fun CotCatState.stayAwake(ms: Long) {
-    var wait = ms
+private suspend fun CotCatState.stayAwake(ms: Long, roam: () -> Boolean) {
+    val start = withFrameMillis { it }
     while (true) {
-        withTimeoutOrNull(wait) { snapshotFlow { finger != null }.first { it } } ?: return
-        snapshotFlow { finger == null }.first { it }
-        wait = Random.nextLong(AWAKE_MIN_MS, AWAKE_MAX_MS)
+        val left = ms - (withFrameMillis { it } - start)
+        val sit = Random.nextLong(SIT_MIN_MS, SIT_MAX_MS)
+        if (sit >= left) {
+            delay(left.coerceAtLeast(0L))
+            return
+        }
+        delay(sit)
+        if (roam() && room >= MIN_STROLL && Random.nextFloat() < mood().strollChance) stroll()
     }
 }
 
-/** Moves [current] towards [target], closing most of the gap within about
- *  [tau] seconds, and never faster than [maxPerSecond]. */
-private fun approach(
-    current: Float,
-    target: Float,
-    dt: Float,
-    tau: Float,
-    maxPerSecond: Float = GAZE_MAX_DEG_PER_S
-): Float {
-    val step = (target - current) * (1f - exp(-dt / tau))
-    val limit = maxPerSecond * dt
-    return current + step.coerceIn(-limit, limit)
+/** Wakes up, if it's asleep, with a stretch and a yawn. */
+private suspend fun CotCatState.wakeUp() {
+    if (!asleep) return
+    asleep = false
+    waking = true
+    try {
+        delay(WAKE.frames.size * WAKE.frameMs)
+    } finally {
+        waking = false
+    }
 }
 
-/** Awake 20-45s between chances to sleep; half the time it takes one, for
- *  40-90s. On arriving at the home page it's already asleep 40% of the
- *  time, and its first change (waking, or its first chance to sleep) comes
- *  after anywhere from 3s up to the usual maximum. */
-private const val START_ASLEEP_CHANCE = 0.4f
+/** Twice through the scratching frames: what a tap gets while it's awake. */
+private suspend fun CotCatState.scratch() {
+    scratching = true
+    try {
+        delay(SCRATCH.frames.size * SCRATCH.frameMs * SCRATCH_LOOPS)
+    } finally {
+        scratching = false
+    }
+}
+
+/** Off along the row: one to three legs back and forth, with a sit at the
+ *  end of one in the row's empty half (where it isn't, only a stop to turn
+ *  round, so it doesn't sit on the search hint), then back to its spot. Now
+ *  and then it thinks better of a leg partway: stops, blinks, and goes back
+ *  the way it came. */
+private suspend fun CotCatState.stroll() {
+    repeat(Random.nextInt(1, MAX_LEGS + 1)) {
+        val from = away
+        val target = somewhereElse()
+        if (Random.nextFloat() < CHANGE_MIND_CHANCE) {
+            val share = CHANGE_MIND_MIN + Random.nextFloat() * (CHANGE_MIND_MAX - CHANGE_MIND_MIN)
+            walkTo((from + (target - from) * share).roundToInt().toFloat())
+            ponder()
+            walkTo(from)
+        } else {
+            walkTo(target)
+            delay(if (target <= restRoom) Random.nextLong(REST_MIN_MS, REST_MAX_MS) else Random.nextLong(TURN_MIN_MS, TURN_MAX_MS))
+        }
+    }
+    walkTo(0f)
+}
+
+/** A stop to think about it, with a blink. */
+private suspend fun CotCatState.ponder() {
+    pondering = true
+    try {
+        delay(PONDER.frames.size * PONDER.frameMs)
+    } finally {
+        pondering = false
+    }
+}
+
+/** Somewhere along its row, in sprite pixels left of its spot, at least a
+ *  short walk from where it is. */
+private fun CotCatState.somewhereElse(): Float {
+    repeat(8) {
+        val target = (Random.nextFloat() * room).roundToInt().toFloat()
+        if (abs(target - away) >= MIN_LEG) return target
+    }
+    return if (away < room / 2f) room.roundToInt().toFloat() else 0f
+}
+
+/** Walks at a steady pace until it's [target] sprite pixels left of its spot. */
+private suspend fun CotCatState.walkTo(target: Float) {
+    if (away == target) return
+    walking = if (target > away) LEFT else RIGHT
+    try {
+        var last = 0L
+        while (away != target) {
+            withFrameNanos { now ->
+                val seconds = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.1f)
+                last = now
+                val stride = WALK_SPEED * seconds
+                away = if (target > away) min(target, away + stride) else max(target, away - stride)
+            }
+        }
+    } finally {
+        walking = 0
+    }
+}
+
+/**
+ * Its body clock, by the hour: how likely it is to be found asleep, how
+ * often (at each chance to nap) and how long it naps, and how often it goes
+ * for a stroll when it could. Sleepy at night (11pm to 7am), lively in the
+ * evening (6 to 11pm), and in between those by day.
+ */
+internal class Mood(
+    val startAsleep: Float,
+    val napChance: Float,
+    val napMinMs: Long,
+    val napMaxMs: Long,
+    val strollChance: Float
+)
+
+private val DAY = Mood(startAsleep = 0.25f, napChance = 0.35f, napMinMs = 30_000L, napMaxMs = 60_000L, strollChance = 0.65f)
+private val EVENING = Mood(startAsleep = 0.1f, napChance = 0.15f, napMinMs = 20_000L, napMaxMs = 40_000L, strollChance = 0.85f)
+private val NIGHT = Mood(startAsleep = 0.6f, napChance = 0.7f, napMinMs = 60_000L, napMaxMs = 120_000L, strollChance = 0.3f)
+
+internal fun moodAt(hour: Int): Mood = when (hour) {
+    in 7..17 -> DAY
+    in 18..22 -> EVENING
+    else -> NIGHT
+}
+
+private fun CotCatState.mood(): Mood = moodAt(hour())
+
+/** One of the sheet's animations: its frames, by their place on the sheet
+ *  (left to right, then down), and how fast they play, looping. */
+private class CatAnimation(val frames: IntArray, fps: Int) {
+    val frameMs = 1_000L / fps
+}
+
+// The sheet's frames: 0-3 walking, 4 sitting, 5 blinking, 6 an ear flicked,
+// 7-9 scratching with the right paw, 10-12 with the left, 13-20 dozing,
+// 21-22 stretching up (2, then 4 of its pixels taller), 23 yawning at full
+// stretch.
+private val WALK = CatAnimation(intArrayOf(0, 1, 2, 3), fps = 8)
+private val SIT = CatAnimation(intArrayOf(4, 4, 4, 4, 4, 5, 4, 4, 6, 4), fps = 4)
+private val SCRATCH = CatAnimation(intArrayOf(7, 8, 9, 10, 11, 12), fps = 9)
+private val DOZE = CatAnimation(intArrayOf(13, 14, 15, 16, 17, 18, 19, 20), fps = 4)
+
+/** Played once, waking up: eyes still shut, up into a stretch, a long
+ *  yawn, back down, and eyes open. */
+private val WAKE = CatAnimation(intArrayOf(5, 21, 22, 22, 23, 23, 23, 23, 22, 21, 5, 4), fps = 6)
+
+/** Played once, stopping to think on a stroll: a blink. */
+private val PONDER = CatAnimation(intArrayOf(4, 4, 5, 5, 4, 4), fps = 6)
+
+private const val CELL_W = 38
+private const val CELL_H = 32
+private const val SHEET_COLUMNS = 8
+
+private const val LEFT = -1
+private const val RIGHT = 1
+
+/** Awake 25-50s between chances to nap (how likely it is to take one, and
+ *  for how long, is down to its body clock: see [Mood]). Its first change on
+ *  arriving at the home page (waking, or its first chance to nap) comes after
+ *  anywhere from 3s up to the usual maximum. */
 private const val FIRST_CHANGE_MIN_MS = 3_000L
-private const val AWAKE_MIN_MS = 20_000L
-private const val AWAKE_MAX_MS = 45_000L
-private const val SLEEP_CHANCE = 0.5f
-private const val ASLEEP_MIN_MS = 40_000L
-private const val ASLEEP_MAX_MS = 90_000L
+private const val AWAKE_MIN_MS = 25_000L
+private const val AWAKE_MAX_MS = 50_000L
 
-/** How the head follows a finger: an unhurried turn towards it, a gentler
- *  one back, never faster than 90 degrees a second, and no further than
- *  28 degrees down or 24 up. */
-private const val FOLLOW_TAU_S = 0.35f
-private const val RETURN_TAU_S = 0.6f
-private const val GAZE_MAX_DEG_PER_S = 90f
-private const val GAZE_DOWN_MAX = 28f
-private const val GAZE_UP_MAX = 24f
+/** Awake, it sits 4-10s at a time, and then, if its body clock says so and
+ *  there's room (two of its own lengths at least), goes for a stroll: one to
+ *  three legs, at a walk of 24 of its pixels a second, with a sit of 1.5-4s,
+ *  or a stop of a moment to turn round, at the end of each; one leg in four
+ *  it gives up on 30-70% of the way along. A tap while it's awake gets a
+ *  scratch: twice through its frames. */
+private const val SIT_MIN_MS = 4_000L
+private const val SIT_MAX_MS = 10_000L
+private const val SCRATCH_LOOPS = 2
+private const val MIN_STROLL = 2f * CELL_W
+private const val MAX_LEGS = 3
+private const val MIN_LEG = 24f
+private const val REST_MIN_MS = 1_500L
+private const val REST_MAX_MS = 4_000L
+private const val TURN_MIN_MS = 300L
+private const val TURN_MAX_MS = 700L
+private const val WALK_SPEED = 24f
+private const val CHANGE_MIND_CHANCE = 0.25f
+private const val CHANGE_MIND_MIN = 0.3f
+private const val CHANGE_MIND_MAX = 0.7f
 
-private const val BOX_W = 100f
-private const val BOX_H = 120f
+/** How strong its shadow is: the theme's text colour, faint. */
+private const val SHADOW_ALPHA = 0.16f
 
-/** Where the sitting cat's head turns, in the drawing's box. */
-private val NECK = Offset(66f, 40f)
+/** The start of the row it always stays out of: the search icon and the
+ *  gap after it. */
+private val CLEAR_OF_ICON = 36.dp
 
-/** Runs [block] with the 100 x 120 cat box scaled to fit and centred. */
-private inline fun DrawScope.inCatBox(block: DrawScope.() -> Unit) {
-    val s = min(size.width / BOX_W, size.height / BOX_H)
-    translate(left = (size.width - BOX_W * s) / 2f, top = (size.height - BOX_H * s) / 2f) {
-        scale(s, pivot = Offset.Zero) { block() }
-    }
-}
-
-/** A "Z" [h] units square with its top-left corner at ([x], [y]). */
-private fun DrawScope.drawZ(x: Float, y: Float, h: Float, color: Color) {
-    val w = 2.5f
-    drawLine(color, Offset(x, y), Offset(x + h, y), w, StrokeCap.Round)
-    drawLine(color, Offset(x + h, y), Offset(x, y + h), w, StrokeCap.Round)
-    drawLine(color, Offset(x, y + h), Offset(x + h, y + h), w, StrokeCap.Round)
-}
-
-/** The cat's shapes, built once, in the 100 x 120 box with the ground at
- *  y = 118. Overlapping shapes are separate paths: one path holding shapes
- *  wound in opposite directions would leave a hole where they overlap. */
-private class CatParts {
-    // Sitting, drawn facing right (CotCat mirrors it to face left).
-    val tail = Path().apply {
-        moveTo(30f, 113f)
-        cubicTo(10f, 115f, 4f, 97f, 14f, 83f)
-        cubicTo(18f, 78f, 24f, 79f, 24f, 83f)
-    }
-    val haunch = Path().apply { addOval(Rect(22f, 78f, 70f, 118f)) }
-    val body = Path().apply {
-        moveTo(28f, 112f)                               // back, neck, chest
-        cubicTo(26f, 84f, 44f, 60f, 58f, 40f)
-        lineTo(76f, 40f)
-        cubicTo(86f, 58f, 78f, 84f, 80f, 118f)
-        lineTo(36f, 118f)
-        close()
-    }
-    val backLeg = Path().apply {
-        addRoundRect(RoundRect(62f, 86f, 70f, 118f, CornerRadius(4f)))
-    }
-    val frontLeg = Path().apply {
-        addRoundRect(RoundRect(70f, 88f, 78f, 118f, CornerRadius(4f)))
-    }
-    val head = Path().apply { addOval(Rect(52f, 20.5f, 84f, 47.5f)) }
-    val leftEar = Path().apply {
-        moveTo(55f, 30f)
-        lineTo(57f, 13f)
-        lineTo(66f, 23f)
-        close()
-    }
-    val rightEar = Path().apply {
-        moveTo(71f, 22f)
-        lineTo(80f, 11f)
-        lineTo(82f, 30f)
-        close()
-    }
-
-    // Curled up asleep, head resting on the right.
-    val curled = Path().apply { addOval(Rect(20f, 88f, 82f, 118f)) }
-    val curledTail = Path().apply {
-        moveTo(24f, 110f)
-        cubicTo(24f, 118f, 56f, 118f, 74f, 114f)
-    }
-    val restingHead = Path().apply { addOval(Rect(66f, 92f, 92f, 116f)) }
-    val restingEars = Path().apply {
-        moveTo(69f, 98f)
-        lineTo(70f, 86f)
-        lineTo(78f, 94f)
-        close()
-        moveTo(78f, 93f)
-        lineTo(86f, 84f)
-        lineTo(89f, 99f)
-        close()
-    }
-}
+/** How far off the cat a tap can land and still count as on it. */
+private val TAP_SLOP = 6.dp

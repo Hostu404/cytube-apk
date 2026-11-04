@@ -18,12 +18,23 @@ enum class CompatMode { AUTOMATIC, NATIVE, WEB;
     companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: AUTOMATIC }
 }
 
-/** System default / Light / Dark / Cot — drives CyTubeSettingsTheme, which
- *  is what the home and settings screens use (see MainActivity). SYSTEM is
- *  the default so a fresh install still just follows the phone's own
- *  setting. COT is Dark with a cat in the home search bar (CotCat). */
-enum class ThemeMode { SYSTEM, LIGHT, DARK, COT;
-    companion object { fun parse(s: String?) = entries.firstOrNull { it.name == s } ?: SYSTEM }
+/** System default / Light / Dark — drives CyTubeSettingsTheme, which is
+ *  what the home and settings screens use (see MainActivity). SYSTEM is the
+ *  default so a fresh install still just follows the phone's own setting.
+ *  The cat in the home search bar has its own switch ([Settings.cot]). */
+enum class ThemeMode { SYSTEM, LIGHT, DARK;
+    companion object {
+        fun parse(s: String?) = when (s) {
+            // Saved while cot was a theme rather than a switch: "COT" (dark
+            // with the cat), then for a while "COT_B" and "COT_W".
+            "COT", "COT_B" -> DARK
+            "COT_W" -> LIGHT
+            else -> entries.firstOrNull { it.name == s } ?: SYSTEM
+        }
+
+        /** True when [s] is one of those old cot themes: cot is still on. */
+        fun wasCot(s: String?) = s == "COT" || s == "COT_B" || s == "COT_W"
+    }
 }
 
 data class Settings(
@@ -51,7 +62,10 @@ data class Settings(
     /** Manual override for CyTubeSettingsTheme (home, settings and account
      *  screens, phone only). SYSTEM follows the phone's own light/dark
      *  setting. */
-    val themeMode: ThemeMode = ThemeMode.SYSTEM
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    /** "cot", under the themes: a cat lives in the home search bar (see
+     *  CotCat), on whichever theme is picked. Phone only; off by default. */
+    val cot: Boolean = false
 )
 
 class SettingsStore(private val context: Context) {
@@ -67,7 +81,8 @@ class SettingsStore(private val context: Context) {
             channelBackgrounds = p[CHANNEL_BACKGROUNDS] ?: true,
             nicoEmotesOnly = p[NICO_EMOTES_ONLY] ?: false,
             guestName = p[GUEST_NAME] ?: "",
-            themeMode = ThemeMode.parse(p[THEME_MODE])
+            themeMode = ThemeMode.parse(p[THEME_MODE]),
+            cot = p[COT] ?: ThemeMode.wasCot(p[THEME_MODE])
         )
     }
 
@@ -81,7 +96,12 @@ class SettingsStore(private val context: Context) {
     suspend fun setNicoEmotesOnly(v: Boolean) = context.dataStore.edit { it[NICO_EMOTES_ONLY] = v }.let {}
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
-    suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { it[THEME_MODE] = v.name }.let {}
+    suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { p ->
+        // Replacing an old cot theme: its cat stays, on the cot switch.
+        if (p[COT] == null && ThemeMode.wasCot(p[THEME_MODE])) p[COT] = true
+        p[THEME_MODE] = v.name
+    }.let {}
+    suspend fun setCot(v: Boolean) = context.dataStore.edit { it[COT] = v }.let {}
 
     // ---- per-channel state ----
 
@@ -156,6 +176,7 @@ class SettingsStore(private val context: Context) {
         val NICO_EMOTES_ONLY = booleanPreferencesKey("nico_emotes_only")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val COT = booleanPreferencesKey("cot")
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")
