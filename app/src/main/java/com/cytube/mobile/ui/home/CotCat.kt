@@ -50,6 +50,8 @@ import androidx.compose.ui.unit.dp
 import com.cytube.mobile.R
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import java.time.DayOfWeek
+import java.time.LocalDate
 import java.time.LocalTime
 import kotlin.math.PI
 import kotlin.math.abs
@@ -75,6 +77,9 @@ class PrinceState {
      *  set the time here, or its moods themselves. */
     internal var hour: () -> Int = { LocalTime.now().hour }
     internal var moods: (hour: Int) -> Mood = { moodAt(it) }
+
+    /** Today, for its hat ([hatFor]). A test can set the day. */
+    internal var today: () -> LocalDate = { LocalDate.now() }
 
     /** Each visit to the home page finds it at a random point in its day:
      *  some of the time already asleep, more so at night. */
@@ -113,6 +118,15 @@ class PrinceState {
     /** Whether it was in the middle of waking when it was last tapped: no
      *  hearts for that, only a scratch. */
     internal var tappedWaking = false
+
+    /** When its recent taps came (uptime ms), and how many in a row: enough
+     *  and it may get up and go (see [fedUp]). */
+    internal val tapTimes = ArrayDeque<Long>()
+    internal var tapStreak = 0
+
+    /** Found out along the bar on the page opening (see [seed]): how far
+     *  along its room, as a share, once that's known; then null. */
+    internal var opening: Float? = null
 
     /** How far it is to the left of its spot, in the sprite's own pixels. */
     internal var away by mutableFloatStateOf(0f)
@@ -207,11 +221,18 @@ private fun overlaps(a: DroppedLetter, b: DroppedLetter) =
 fun rememberPrinceState(hint: String? = null): PrinceState =
     remember { PrinceState().apply { if (hint != null) seed(hint) } }
 
-/** By his body clock, he may already have taken one or two letters of [hint]. */
+/** By his body clock, he may already have taken one or two letters of
+ *  [hint]; and (if he's not asleep) be out along the bar, walking home, or
+ *  bringing one more home in his mouth. */
 internal fun PrinceState.seed(hint: String) {
-    if (random.nextFloat() >= mood().startWithLetters) return
+    val mood = mood()
     val letters = hint.indices.filter { hint[it].isLetter() }.shuffled(random)
-    pretaken += letters.take(if (random.nextBoolean()) 1 else 2)
+    if (random.nextFloat() < mood.startWithLetters) pretaken += letters.take(if (random.nextBoolean()) 1 else 2)
+    if (asleep) return
+    val r = random.nextFloat()
+    if (r >= mood.startWalking + mood.startCarrying) return
+    if (r >= mood.startWalking) carrying = letters.firstOrNull { it !in pretaken } ?: return
+    opening = OPENING_MIN + random.nextFloat() * (1f - OPENING_MIN)
 }
 
 /**
@@ -228,6 +249,11 @@ fun Modifier.princeTaps(state: PrinceState): Modifier = this
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
             if (!state.isUnder(down.position, slop)) return@awaitEachGesture
+            // His from the start: the bar never sees the press, so it can't
+            // take quick taps on him for a double tap, or a long one for a
+            // press and hold, and focus itself. (A finger that moves off is
+            // let go of, below, for the page to scroll.)
+            down.consume()
             while (true) {
                 val change = awaitPointerEvent(PointerEventPass.Initial).changes
                     .firstOrNull { it.id == down.id } ?: return@awaitEachGesture
@@ -236,6 +262,10 @@ fun Modifier.princeTaps(state: PrinceState): Modifier = this
                 if (!change.pressed) {
                     change.consume()
                     state.tappedWaking = state.waking
+                    val t = change.uptimeMillis
+                    state.tapTimes.addLast(t)
+                    while (t - state.tapTimes.first() > TAP_STREAK_MS) state.tapTimes.removeFirst()
+                    state.tapStreak = state.tapTimes.size
                     state.taps++
                     return@awaitEachGesture
                 }
@@ -346,6 +376,8 @@ fun Prince(
             tapped -> when {
                 state.asleep -> state.wakeUp()
                 state.carrying != null -> state.dropInAnger()
+                !state.tappedWaking && canRoam && state.tapStreak >= FED_UP_TAPS &&
+                    random.nextFloat() < state.mood().fedUpChance -> state.fedUp()
                 !state.tappedWaking && random.nextFloat() < state.mood().loveChance -> state.love()
                 else -> state.scratch()
             }
@@ -358,6 +390,9 @@ fun Prince(
             // Found awake: somewhere into its time awake.
             else -> awakeFor = random.nextLong(FIRST_CHANGE_MIN_MS, AWAKE_MAX_MS)
         }
+        // Found out along the bar on the page opening: placed there once it's
+        // laid out (see seed), then on its way.
+        while (state.opening != null) withFrameMillis { }
         // Out on a stroll when that happened: back to its spot, by way of
         // its pile with any letter it had.
         state.goHome()
@@ -414,6 +449,7 @@ fun Prince(
     val density = LocalDensity.current
     val clearOfIcon = with(density) { CLEAR_OF_ICON.toPx() }
     val pixel = princePixelSize(density.density)
+    val hat = hatFor(state.today())
     val measurer = rememberTextMeasurer()
     val glyphs = remember(measurer) { HashMap<Pair<Char, TextStyle>, TextLayoutResult>() }
     Canvas(
@@ -428,6 +464,11 @@ fun Prince(
             val home = row.localPositionOf(spot, Offset.Zero).x + state.homeLeft()
             state.room = ((home - clearOfIcon) / pixel).coerceAtLeast(0f)
             state.restRoom = ((home - max(clearOfIcon, row.size.width / 2f)) / pixel).coerceAtLeast(0f)
+            state.opening?.let { share ->
+                val from = if (state.carrying != null) PILE_AWAY + MIN_LEG else MIN_LEG
+                state.away = (from + share * (state.room - from)).coerceIn(0f, state.room).roundToInt().toFloat()
+                state.opening = null
+            }
         }
     ) {
         val frame = animation.frames[step % animation.frames.size]
@@ -472,6 +513,19 @@ fun Prince(
                 filterQuality = FilterQuality.None
             )
             cell(frame)
+            // Its hat for the day, if there's one, on its head as it is in this frame.
+            if (hat != null) {
+                val art = if (side) hat.side else hat.front
+                val (headX, headY) = hatAnchor(frame)
+                drawImage(
+                    image = sheet,
+                    srcOffset = IntOffset(art.x, art.y),
+                    srcSize = IntSize(art.w, art.h),
+                    dstOffset = IntOffset(x + (headX - art.ax) * pixel, y + (headY - art.ay) * pixel),
+                    dstSize = IntSize(art.w * pixel, art.h * pixel),
+                    filterQuality = FilterQuality.None
+                )
+            }
             if (state.angry) cell(ANGER_MARK)
         }
 
@@ -758,6 +812,29 @@ private suspend fun PrinceState.hopFor(index: Int) {
     }
 }
 
+/** Tapped once too often: up and off, now and then for a letter, else
+ *  somewhere else along the empty half of the bar for a sit. */
+private suspend fun PrinceState.fedUp() {
+    tapTimes.clear()
+    tapStreak = 0
+    val letter = if (random.nextFloat() < mood().fedUpFetch) pickLetter() else null
+    if (letter != null) return fetch(letter)
+    val target = somewhereToSit() ?: return scratch()
+    walkTo(target)
+    delay(random.nextLong(FED_UP_SIT_MIN_MS, FED_UP_SIT_MAX_MS))
+}
+
+/** A place to sit in the empty half of the row, a short walk at least from
+ *  where it is; null if there's no such place. */
+private fun PrinceState.somewhereToSit(): Float? {
+    if (restRoom < MIN_LEG) return null
+    repeat(8) {
+        val target = (MIN_LEG + random.nextFloat() * (restRoom - MIN_LEG)).roundToInt().toFloat()
+        if (abs(target - away) >= MIN_LEG) return target
+    }
+    return null
+}
+
 /** A tap it liked: hearts and sparkles round its head, and a swish of its tail. */
 private suspend fun PrinceState.love() {
     val now = withFrameMillis { it }
@@ -951,8 +1028,10 @@ private fun PrinceState.settle(now: Long) {
  * often (at each chance to nap) and how long it naps, and after each sit how
  * often it goes for a letter when it could, else for a stroll when it
  * could, else swishes its tail; and how often a tap gets hearts and
- * sparkles rather than a scratch; and how likely it is, on the page being
- * opened, to have taken a letter or two already. Sleepy at night (11pm to 7am),
+ * sparkles rather than a scratch, and after three taps in a row how often
+ * it gets up and goes (and of those, how many for a letter); and how likely it is, on the
+ * page being opened, to have taken a letter or two already, and (awake) to
+ * be out walking home, or bringing a letter home. Sleepy at night (11pm to 7am),
  * lively in the evening (6 to 11pm), and in between those by day.
  */
 internal class Mood(
@@ -964,15 +1043,22 @@ internal class Mood(
     val fetchChance: Float,
     val wagChance: Float,
     val loveChance: Float,
-    val startWithLetters: Float
+    val startWithLetters: Float,
+    val startWalking: Float,
+    val startCarrying: Float,
+    val fedUpChance: Float,
+    val fedUpFetch: Float
 )
 
 private val DAY = Mood(startAsleep = 0.25f, napChance = 0.35f, napMinMs = 30_000L, napMaxMs = 60_000L,
-    strollChance = 0.45f, fetchChance = 0.15f, wagChance = 0.6f, loveChance = 0.35f, startWithLetters = 0.4f)
+    strollChance = 0.45f, fetchChance = 0.15f, wagChance = 0.6f, loveChance = 0.35f, startWithLetters = 0.4f,
+    startWalking = 0.2f, startCarrying = 0.1f, fedUpChance = 0.5f, fedUpFetch = 0.4f)
 private val EVENING = Mood(startAsleep = 0.1f, napChance = 0.15f, napMinMs = 20_000L, napMaxMs = 40_000L,
-    strollChance = 0.6f, fetchChance = 0.22f, wagChance = 0.7f, loveChance = 0.4f, startWithLetters = 0.5f)
+    strollChance = 0.6f, fetchChance = 0.22f, wagChance = 0.7f, loveChance = 0.4f, startWithLetters = 0.5f,
+    startWalking = 0.25f, startCarrying = 0.15f, fedUpChance = 0.6f, fedUpFetch = 0.5f)
 private val NIGHT = Mood(startAsleep = 0.6f, napChance = 0.7f, napMinMs = 60_000L, napMaxMs = 120_000L,
-    strollChance = 0.2f, fetchChance = 0.05f, wagChance = 0.35f, loveChance = 0.3f, startWithLetters = 0.25f)
+    strollChance = 0.2f, fetchChance = 0.05f, wagChance = 0.35f, loveChance = 0.3f, startWithLetters = 0.25f,
+    startWalking = 0.075f, startCarrying = 0.0375f, fedUpChance = 0.3f, fedUpFetch = 0.2f)
 
 internal fun moodAt(hour: Int): Mood = when (hour) {
     in 7..17 -> DAY
@@ -993,8 +1079,8 @@ private class CatAnimation(val frames: IntArray, fps: Int, val sideOn: Boolean =
 // 7-9 scratching with the right paw, 10-12 with the left, 13-20 dozing,
 // 21-22 stretching up (2, then 4 of its pixels taller), 23 yawning at full
 // stretch, 24-27 sitting with its tail's tip swung far right, up, left and
-// far left (on 4 it's to the right), and 28 the anger mark alone, drawn over
-// it side-on.
+// far left (on 4 it's to the right), 28 the anger mark alone, drawn over
+// it side-on, 29 hearts and sparkles, and 30-31 its holiday hats (see Hat).
 private val WALK = CatAnimation(intArrayOf(0, 1, 2, 3), fps = 8, sideOn = true)
 private val SIT = CatAnimation(intArrayOf(4, 4, 4, 4, 4, 5, 4, 4, 6, 4), fps = 4)
 private val SCRATCH = CatAnimation(intArrayOf(7, 8, 9, 10, 11, 12), fps = 9)
@@ -1015,6 +1101,78 @@ private val STAND = CatAnimation(intArrayOf(0), fps = 1, sideOn = true)
 private val HOP = CatAnimation(intArrayOf(1), fps = 1, sideOn = true)
 
 private const val ANGER_MARK = 28
+
+/**
+ * Its hats, for the holidays: a party hat at New Year (31 Dec-2 Jan), heart
+ * boppers for Valentine's (13-15 Feb), a green top hat for St Patrick's
+ * (16-18 Mar), bunny ears for Easter (Good Friday to Easter Monday), a
+ * pumpkin mask for Halloween (24-31 Oct), a roast turkey for (American)
+ * Thanksgiving (its Thursday to the Sunday) and a Santa hat for Christmas
+ * (1-26 Dec). On the sheet in cells 30 and 31 (the turkey, and the Santa hat
+ * side-on, its tip falling behind it).
+ */
+internal enum class Hat(val front: HatArt, val side: HatArt = front) {
+    PARTY(hatArt(30, 31, 0, 7, 8, 3, 7)),
+    HEARTS(hatArt(30, 0, 15, 13, 9, 6, 8)),
+    TOP_HAT(hatArt(30, 14, 15, 7, 7, 3, 6)),
+    BUNNY(hatArt(30, 22, 15, 15, 13, 7, 11)),
+    PUMPKIN(hatArt(30, 0, 0, 13, 11, 6, 2)),
+    TURKEY(hatArt(31, 18, 0, 15, 11, 7, 10)),
+    SANTA(hatArt(30, 14, 0, 17, 14, 8, 10), side = hatArt(31, 0, 0, 17, 14, 8, 10))
+}
+
+/** Where a hat is on the sheet ([x], [y], [w] x [h]), and its pixel ([ax],
+ *  [ay]) that goes on the middle of its head (see [hatAnchor]). */
+internal class HatArt(val x: Int, val y: Int, val w: Int, val h: Int, val ax: Int, val ay: Int)
+
+private fun hatArt(cell: Int, x: Int, y: Int, w: Int, h: Int, ax: Int, ay: Int) =
+    HatArt(cell % SHEET_COLUMNS * CELL_W + x, cell / SHEET_COLUMNS * CELL_H + y, w, h, ax, ay)
+
+/** Its hat on [date], if it's a holiday. */
+internal fun hatFor(date: LocalDate): Hat? {
+    val day = date.monthValue * 100 + date.dayOfMonth
+    val easter = easterSunday(date.year)
+    val turkey = thanksgiving(date.year)
+    return when {
+        day >= 1231 || day <= 102 -> Hat.PARTY
+        day in 213..215 -> Hat.HEARTS
+        day in 316..318 -> Hat.TOP_HAT
+        !date.isBefore(easter.minusDays(2)) && !date.isAfter(easter.plusDays(1)) -> Hat.BUNNY
+        day in 1024..1031 -> Hat.PUMPKIN
+        !date.isBefore(turkey) && !date.isAfter(turkey.plusDays(3)) -> Hat.TURKEY
+        day in 1201..1226 -> Hat.SANTA
+        else -> null
+    }
+}
+
+/** (American) Thanksgiving in [year]: the fourth Thursday of November. */
+internal fun thanksgiving(year: Int): LocalDate {
+    val first = LocalDate.of(year, 11, 1)
+    val toThursday = (DayOfWeek.THURSDAY.value - first.dayOfWeek.value + 7) % 7
+    return first.plusDays(toThursday + 21L)
+}
+
+/** Easter Sunday in [year], by the Gregorian calendar (the anonymous algorithm). */
+internal fun easterSunday(year: Int): LocalDate {
+    val a = year % 19
+    val b = year / 100
+    val c = year % 100
+    val h = (19 * a + b - b / 4 - (b - (b + 8) / 25 + 1) / 3 + 15) % 30
+    val l = (32 + 2 * (b % 4) + 2 * (c / 4) - h - c % 4) % 7
+    val m = (a + 11 * h + 22 * l) / 451
+    val n = h + l - 7 * m + 114
+    return LocalDate.of(year, n / 31, n % 31 + 1)
+}
+
+/** Where its hat goes in [frame], in its own pixels: the middle of its head
+ *  between its ear tips. Side-on (walking, nose right) it bobs up a pixel
+ *  every other step; stretching up it's 2, then 4, pixels higher. */
+private fun hatAnchor(frame: Int): Pair<Int, Int> = when (frame) {
+    in 0..3 -> 25 to (if (frame % 2 == 1) 15 else 16)
+    21 -> 16 to 9
+    22, 23 -> 16 to 7
+    else -> 16 to 11
+}
 
 /** Cell 29: the hearts and sparkles, side by side along its top. */
 private const val LOVE_CELL = 29
@@ -1126,6 +1284,15 @@ private const val LIE_MS = 5 * 60_000L
 private const val FADE_MS = 1_500L
 private const val RETURN_MS = 1_000L
 private const val MAX_TAKEN = 4
+
+/** Found out on the bar, on the page opening: at least 30% of the way along. */
+private const val OPENING_MIN = 0.3f
+
+/** Three taps within 6s: it may get up and go, and sit 5-10s where it goes. */
+private const val TAP_STREAK_MS = 6_000L
+private const val FED_UP_TAPS = 3
+private const val FED_UP_SIT_MIN_MS = 5_000L
+private const val FED_UP_SIT_MAX_MS = 10_000L
 
 /** Taken before the page opened: dropped half a minute to four minutes before. */
 private const val PRETAKEN_MIN_AGO_MS = 30_000L
