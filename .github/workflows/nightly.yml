@@ -82,10 +82,14 @@ jobs:
       - name: Build
         if: steps.changes.outputs.build == 'true'
         run: |
-          stamp="$(date -u +%Y%m%d).$(git rev-parse --short=7 HEAD)"
-          echo "STAMP=$stamp" >> "$GITHUB_ENV"
-          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PnightlyBuild="$stamp"
-          cp app/build/outputs/apk/release/app-release.apk "cytube-nightly-$stamp.apk"
+          # Named after the night: "apustaja nightly 4 Nov" in the app (see
+          # app/build.gradle.kts), cytube-nightly-4-nov.apk to download.
+          # Which commit it is goes in the release notes below.
+          night=$(LC_ALL=C date -u '+%-d %b')
+          apk="cytube-nightly-$(echo "$night" | tr ' A-Z' '-a-z').apk"
+          echo "APK=$apk" >> "$GITHUB_ENV"
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease -PnightlyBuild="$night"
+          cp app/build/outputs/apk/release/app-release.apk "$apk"
 
       - name: Publish the nightly release
         if: steps.changes.outputs.build == 'true'
@@ -119,7 +123,7 @@ jobs:
           gh release delete nightly --yes --cleanup-tag || true
           git tag -f nightly
           git push -f origin refs/tags/nightly
-          gh release create nightly "cytube-nightly-$STAMP.apk" \
+          gh release create nightly "$APK" \
             --prerelease \
             --title "Nightly $(date -u '+%-d %b %Y')" \
             --notes-file nightly-notes.md
