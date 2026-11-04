@@ -154,7 +154,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenChannel = { nav.navigate("channel/$it") },
                                 onOpenLogin = { nav.navigate("login") },
                                 onOpenSettings = { nav.navigate("settings") },
-                                showCat = settings.cot
+                                showPrince = settings.cot
                             )
                         }
                         if (isTv) {

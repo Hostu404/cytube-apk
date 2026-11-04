@@ -15,7 +15,7 @@ class ThemeModeTest {
         assertEquals(ThemeMode.SYSTEM, ThemeMode.parse("PURPLE"))
     }
 
-    @Test fun anOldCotThemeKeepsItsLookAndItsCat() {
+    @Test fun anOldCotThemeKeepsItsLookAndPrince() {
         // Saved while cot was a theme: "COT" (dark), then "COT_B" and "COT_W".
         assertEquals(ThemeMode.DARK, ThemeMode.parse("COT"))
         assertEquals(ThemeMode.DARK, ThemeMode.parse("COT_B"))

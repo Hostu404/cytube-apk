@@ -45,7 +45,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val focusManager = LocalFocusManager.current
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
-    // their own dark palette — see MainActivity — and the cot cat is
+    // their own dark palette — see MainActivity — and Prince is
     // phone only), PiP (no home-screen window to float into), grouped chat
     // messages and the ignored users list.
     val isTv = remember { isTvDevice(context) }
@@ -92,7 +92,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     }
                 }
 
-                // The cat in the home search bar (see CotCat), on whichever
+                // Prince in the home search bar (see Prince), on whichever
                 // theme is picked above.
                 SwitchRow(title = "cot", checked = settings.cot) {
                     scope.launch { store.setCot(it) }

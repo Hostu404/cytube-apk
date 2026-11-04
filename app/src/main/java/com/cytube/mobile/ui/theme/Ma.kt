@@ -132,7 +132,10 @@ fun MaTextField(
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     leading: (@Composable () -> Unit)? = null,
-    trailing: (@Composable RowScope.() -> Unit)? = null
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+    /** Draws the hint itself, in place of [placeholder], given the field's
+     *  text style: the home page's, for Prince (see PrinceHint). */
+    placeholderContent: (@Composable (TextStyle) -> Unit)? = null
 ) {
     val colors = MaterialTheme.colorScheme
     val interaction = remember { MutableInteractionSource() }
@@ -185,8 +188,12 @@ fun MaTextField(
                         Spacer(Modifier.width(16.dp))
                     }
                     Box(Modifier.weight(1f)) {
-                        if (value.isEmpty() && placeholder != null) {
-                            Text(placeholder, style = textStyle, color = colors.onSurfaceVariant, maxLines = 1)
+                        if (value.isEmpty()) {
+                            if (placeholderContent != null) {
+                                placeholderContent(textStyle)
+                            } else if (placeholder != null) {
+                                Text(placeholder, style = textStyle, color = colors.onSurfaceVariant, maxLines = 1)
+                            }
                         }
                         innerTextField()
                     }

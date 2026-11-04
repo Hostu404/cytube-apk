@@ -21,12 +21,12 @@ enum class CompatMode { AUTOMATIC, NATIVE, WEB;
 /** System default / Light / Dark — drives CyTubeSettingsTheme, which is
  *  what the home and settings screens use (see MainActivity). SYSTEM is the
  *  default so a fresh install still just follows the phone's own setting.
- *  The cat in the home search bar has its own switch ([Settings.cot]). */
+ *  Prince, in the home search bar, has his own switch ([Settings.cot]). */
 enum class ThemeMode { SYSTEM, LIGHT, DARK;
     companion object {
         fun parse(s: String?) = when (s) {
             // Saved while cot was a theme rather than a switch: "COT" (dark
-            // with the cat), then for a while "COT_B" and "COT_W".
+            // with Prince), then for a while "COT_B" and "COT_W".
             "COT", "COT_B" -> DARK
             "COT_W" -> LIGHT
             else -> entries.firstOrNull { it.name == s } ?: SYSTEM
@@ -63,8 +63,8 @@ data class Settings(
      *  screens, phone only). SYSTEM follows the phone's own light/dark
      *  setting. */
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    /** "cot", under the themes: a cat lives in the home search bar (see
-     *  CotCat), on whichever theme is picked. Phone only; off by default. */
+    /** "cot", under the themes: Prince lives in the home search bar (see
+     *  Prince), on whichever theme is picked. Phone only; off by default. */
     val cot: Boolean = false
 )
 
@@ -97,7 +97,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setGuestName(v: String) =
         context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
     suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { p ->
-        // Replacing an old cot theme: its cat stays, on the cot switch.
+        // Replacing an old cot theme: Prince stays, on the cot switch.
         if (p[COT] == null && ThemeMode.wasCot(p[THEME_MODE])) p[COT] = true
         p[THEME_MODE] = v.name
     }.let {}

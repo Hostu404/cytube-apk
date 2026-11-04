@@ -64,8 +64,8 @@ fun HomeScreen(
     onOpenChannel: (String) -> Unit,
     onOpenLogin: () -> Unit,
     onOpenSettings: () -> Unit,
-    /** Settings > Appearance > cot: a cat sits in the search bar (see CotCat). */
-    showCat: Boolean = false,
+    /** Settings > Appearance > cot: Prince sits in the search bar (see Prince). */
+    showPrince: Boolean = false,
     vm: HomeViewModel = viewModel()
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -73,8 +73,8 @@ fun HomeScreen(
     val isTv = remember { isTvDevice(context) }
     val focusManager = LocalFocusManager.current
     val initialFocusRequester = remember { FocusRequester() }
-    val catShown = showCat && !isTv
-    val cat = rememberCotCatState()
+    val princeShown = showPrince && !isTv
+    val prince = rememberPrinceState(SEARCH_HINT)
 
     // Runs each time Home enters composition -- which, under
     // Navigation-Compose, is every time the homepage is navigated to:
@@ -173,7 +173,7 @@ fun HomeScreen(
                     onQueryChange = vm::setQuery,
                     onSubmit = { state.submitName?.let(onOpenChannel) },
                     isTv = isTv,
-                    cat = cat.takeIf { catShown }
+                    prince = prince.takeIf { princeShown }
                 )
             }
 
@@ -224,7 +224,7 @@ fun HomeScreen(
 
             item {
                 MaSectionLabel("Public channels") {
-                    // Small and grey, spinner included: the cat (on cot) is
+                    // Small and grey, spinner included: Prince (on cot) is
                     // the only thing on this page that should draw the eye
                     // by moving.
                     IconButton(onClick = { vm.refresh(force = true) }, enabled = !state.loading) {
@@ -286,18 +286,20 @@ private fun SearchField(
     onQueryChange: (String) -> Unit,
     onSubmit: () -> Unit,
     isTv: Boolean,
-    /** Set when cot is on: the cat that sits in the bar. */
-    cat: CotCatState? = null
+    /** Set when cot is on: Prince, who sits in the bar. */
+    prince: PrinceState? = null
 ) {
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val colors = MaterialTheme.colorScheme
-    // In the box: searching, which wakes the cat (see CotCat).
+    // In the box: searching, which wakes Prince (see Prince).
     var searching by remember { mutableStateOf(false) }
     MaTextField(
         value = query,
         onValueChange = onQueryChange,
-        placeholder = "Search channels…",
+        placeholder = SEARCH_HINT,
+        // With Prince, the hint it takes letters from.
+        placeholderContent = if (prince != null) { style -> PrinceHint(prince, SEARCH_HINT, style) } else null,
         // On TV the on-screen keyboard covers the screen and takes the
         // remote's D-pad itself, so after typing its action key is the way
         // out: it closes the keyboard and moves down to the results (the
@@ -326,12 +328,17 @@ private fun SearchField(
                     Icon(Icons.Default.Close, contentDescription = "Clear", tint = colors.onSurfaceVariant)
                 }
             }
-            if (cat != null) {
-                CotCat(
-                    state = cat,
-                    // A 38 x 32 pixel sprite: room for it at a whole
-                    // number of screen pixels per pixel, about 32-37dp tall.
-                    modifier = Modifier.padding(start = 8.dp).size(width = 44.dp, height = 38.dp),
+            if (prince != null) {
+                Prince(
+                    state = prince,
+                    // Sitting on the bar's line: its feet at the bottom of
+                    // its spot, just above the line. It's drawn about 32dp
+                    // tall, reaching up out of its spot; the spot is room
+                    // for it at the right and its pile of letters beside it.
+                    modifier = Modifier
+                        .align(Alignment.Bottom)
+                        .padding(start = 8.dp, bottom = 2.dp)
+                        .size(width = 64.dp, height = 38.dp),
                     wakeKey = query,
                     // Strolls only over an empty bar, and not while you're in it.
                     roam = query.isEmpty() && !searching,
@@ -344,9 +351,9 @@ private fun SearchField(
             .fillMaxWidth()
             .padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 16.dp, bottom = 8.dp)
             .onFocusChanged { searching = it.isFocused }
-            // A tap on the cat, wherever it's got to along the bar, is for it,
+            // A tap on Prince, wherever it's got to along the bar, is for it,
             // not for the box.
-            .then(if (cat != null) Modifier.cotCatTaps(cat) else Modifier)
+            .then(if (prince != null) Modifier.princeTaps(prince) else Modifier)
             .then(
                 if (isTv) {
                     // Focusing this field on TV pops the on-screen keyboard, and
@@ -561,3 +568,6 @@ private const val JUMPER_RIGHT = 0.762f
 /** How far a p reaches below the line in the app's font (Roboto), as a
  *  share of its size. */
 private const val DESCENDER = 0.21f
+
+/** The search bar's hint (which, with cot on, Prince takes letters from). */
+private const val SEARCH_HINT = "Search channels…"
