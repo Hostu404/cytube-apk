@@ -1,6 +1,7 @@
 package com.cytube.mobile.ui.channel
 
 import android.app.Application
+import androidx.core.content.edit
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,6 +10,7 @@ import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
+import com.cytube.mobile.data.RecentEmotesStore
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.data.isIgnoredName
 import com.cytube.mobile.di.Graph
@@ -41,6 +43,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
@@ -98,7 +102,7 @@ private object AnnouncementMemory {
         val seen = prefs.getString(KEY_SEEN, null)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
         if (id in seen) return false
         val updated = (seen + id).takeLast(MAX)
-        prefs.edit().putString(KEY_SEEN, updated.joinToString(",")).apply()
+        prefs.edit { putString(KEY_SEEN, updated.joinToString(",")) }
         return true
     }
 }
@@ -136,8 +140,8 @@ data class UnreadPm(
     }
 }
 
-/** True when messages from [username] are hidden: they're ignored, and it
- *  isn't us. A name once ignored can later be our own (a guest name). */
+/** True when messages from [username] are hidden: they're ignored, and the
+ *  name isn't our own. A name once ignored can later be ours (a guest name). */
 internal fun ChannelUiState.hidesMessagesFrom(username: String): Boolean =
     isIgnoredName(username, ignored) && !username.equals(localUser, ignoreCase = true)
 
@@ -184,7 +188,7 @@ data class ChannelUiState(
     val messages: PersistentList<ChatMessage> = persistentListOf(),
     val emotes: EmoteSet = EmoteSet.EMPTY,
     /** User list name colours from the channel's CSS (see ChannelStyle). */
-    val nameColors: com.cytube.mobile.net.NameColors = com.cytube.mobile.net.NameColors.NONE,
+    val nameColors: NameColors = NameColors.NONE,
     val showEmotes: Boolean = true,
     /** Mirrors the Settings toggle (off by default, same as Settings);
      *  MainActivity reads this (via PlaybackHost) to decide whether leaving
@@ -198,7 +202,7 @@ data class ChannelUiState(
     val nicoEmotesOnly: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
-     *  media switch never silently un-mutes. */
+     *  media switch never silently unmutes. */
     val muted: Boolean = false,
     val leader: String? = null,
     val localUser: String? = null,
@@ -287,6 +291,12 @@ data class ChannelUiState(
      *  sets it. */
     val pmTarget: String? = null,
     val unreadPm: UnreadPm? = null,
+    /** What you've sent here this visit, for the chat box's ↑ and ↓ (see
+     *  SentChat). Phone only. */
+    val sentChat: SentChat = SentChat.EMPTY,
+    /** The emotes you've used here lately, newest first, for the top of the
+     *  emote sheet (see RecentEmotes). Phone only. */
+    val recentEmotes: PersistentList<String> = persistentListOf(),
     /** The playing item's subtitles, for the CC button; see
      *  NativePlayerHandle.onSubtitlesChanged. */
     val subtitles: SubtitleOptions = SubtitleOptions.NONE
@@ -303,6 +313,7 @@ data class VoteskipTally(val count: Int, val need: Int) {
 class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
+    private val recentEmotesStore = RecentEmotesStore(app)
     private val client = Graph.newClient()
     private val sync = SyncEngine().apply { log = { Log.i(SYNC_TAG, it) } }
     /** TV chat shows spoilers revealed (no tap to reveal them with). */
@@ -563,6 +574,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         joined = true
         _state.value = _state.value.copy(channel = channel)
         restoreLeadMemory()
+        // The emotes you used here lately, for the top of the emote sheet
+        // (behind any you've used since coming in, should one beat it here).
+        viewModelScope.launch {
+            val kept = recentEmotesStore.load(channel)
+            if (kept.isNotEmpty()) update { it.copy(recentEmotes = RecentEmotes.after(kept, it.recentEmotes).toPersistentList()) }
+        }
         // The picture this channel had last time, straight away: the
         // channel's own CSS only comes once it's joined.
         viewModelScope.launch {
@@ -712,7 +729,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         refusedRetryJob = viewModelScope.launch {
-            delay(REFUSED_RETRY_MS)
+            delay(REFUSED_RETRY_MS.milliseconds)
             // Cleared first: connect() cancels a pending retry, and this is it.
             refusedRetryJob = null
             val s = _state.value
@@ -837,7 +854,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             if (guestLoginRetryJob?.isActive != true) {
                                 update { it.copy(statusMessage = "Joining chat in ${waitSeconds}s…") }
                                 guestLoginRetryJob = viewModelScope.launch {
-                                    delay(waitSeconds * 1000L + 1_000L)
+                                    delay((waitSeconds + 1).seconds)
                                     client.retryGuestLogin()
                                 }
                             }
@@ -866,7 +883,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                         loginRefusedOnce = true
                         Log.i(TAG, "saved login was refused; retrying once")
                         client.disconnect()
-                        delay(2_000)
+                        delay(2.seconds)
                         connect(_state.value.channel)
                         return@collect
                     }
@@ -1005,7 +1022,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     channelCssJob = viewModelScope.launch {
                         val page = pageAddress()
                         val (style, sheets) = withContext(Dispatchers.Default) {
-                            com.cytube.mobile.net.ChannelStyle.parse(event.css, page) to
+                            ChannelStyle.parse(event.css, page) to
                                 ChannelHeader.scriptStylesheets(event.js)
                         }
                         ownStyle = style
@@ -1083,7 +1100,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     val key = "${event.title}|${event.html}"
                     if (key != lastAnnouncementKey) {
                         lastAnnouncementKey = key
-                        if (AnnouncementMemory.firstSighting(getApplication<Application>(), key)) appendLocalNotice(
+                        if (AnnouncementMemory.firstSighting(getApplication(), key)) appendLocalNotice(
                             ChatMessage(
                                 username = "",
                                 html = "<strong>${escapeHtml(event.title.ifBlank { "Announcement" })}</strong>: ${event.html}",
@@ -1326,7 +1343,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         syncTicker?.cancel()
         syncTicker = viewModelScope.launch {
             while (true) {
-                delay(1_000)
+                delay(1.seconds)
                 evaluateSync()
             }
         }
@@ -1736,7 +1753,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (!_state.value.isLeader) return
         leaderTicker = viewModelScope.launch {
             while (true) {
-                delay(5_000)
+                delay(5.seconds)
                 // Being the room's leader means BEING its clock — but a
                 // personal pick (see pickPersonal) has this client playing
                 // something else entirely, with no handle on the channel's
@@ -1939,7 +1956,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 client.disconnect()
                 connect(_state.value.channel)
             }
-            delay(600)
+            delay(600.milliseconds)
             update { it.copy(refreshing = false) }
         }
     }
@@ -1994,9 +2011,24 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** Public chat, or a private message while a PM target is set. */
     fun sendChat(text: String) {
         if (text.isBlank()) return
-        val target = _state.value.pmTarget
-        if (target != null) client.sendPm(target, text.trim())
-        else client.sendChat(text.trim())
+        val sent = _state.value
+        val target = sent.pmTarget
+        val line = text.trim()
+        if (target != null) client.sendPm(target, line)
+        else client.sendChat(line)
+        // Kept for the chat box's ↑ (see SentChat), and its emotes for the
+        // top of the emote sheet (see RecentEmotes), that one between visits.
+        val used = RecentEmotes.usedIn(line, sent.emotes)
+        update {
+            it.copy(
+                sentChat = it.sentChat.adding(target, line),
+                recentEmotes = if (used.isEmpty()) it.recentEmotes else RecentEmotes.after(it.recentEmotes, used).toPersistentList()
+            )
+        }
+        if (used.isNotEmpty() && sent.channel.isNotEmpty()) {
+            val recent = _state.value.recentEmotes
+            viewModelScope.launch { recentEmotesStore.save(sent.channel, recent) }
+        }
     }
 
     // ---- private messages ----
@@ -2261,7 +2293,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun guestName(): String {
         val saved = settings.guestName
-        return if (saved.isNotBlank()) saved else "Guest" + (1000..9999).random()
+        return saved.ifBlank { "Guest" + (1000..9999).random() }
     }
 
     /** Graph.auth() may still be building EncryptedSharedPreferences on a
@@ -2360,7 +2392,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             val items = batch.toList()
             batch.clear()
             withContext(Dispatchers.Main) { runCatching { applyChat(items) } }
-            delay(CHAT_BATCH_INTERVAL_MS)
+            delay(CHAT_BATCH_INTERVAL_MS.milliseconds)
         }
     }
 
@@ -2482,7 +2514,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(queueStatus = QueueStatus("Adding…", inProgress = true)) }
         pendingQueueJob?.cancel()
         pendingQueueJob = viewModelScope.launch {
-            delay(QUEUE_TIMEOUT_MS)
+            delay(QUEUE_TIMEOUT_MS.milliseconds)
             // The server answers every accepted or refused request, EXCEPT a
             // refusal for lacking permission, which it drops silently.
             finishQueue(QueueStatus(
@@ -2503,7 +2535,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(queueStatus = status) }
         queueStatusClearJob?.cancel()
         queueStatusClearJob = viewModelScope.launch {
-            delay(if (status.isError) QUEUE_ERROR_VISIBLE_MS else QUEUE_RESULT_VISIBLE_MS)
+            delay((if (status.isError) QUEUE_ERROR_VISIBLE_MS else QUEUE_RESULT_VISIBLE_MS).milliseconds)
             update { if (it.queueStatus == status) it.copy(queueStatus = null) else it }
         }
     }
@@ -2520,7 +2552,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         update { it.copy(statusMessage = message) }
         transientStatusJob?.cancel()
         transientStatusJob = viewModelScope.launch {
-            delay(TRANSIENT_STATUS_MS)
+            delay(TRANSIENT_STATUS_MS.milliseconds)
             update { if (it.statusMessage == message) it.copy(statusMessage = null) else it }
         }
     }
@@ -2569,7 +2601,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         runCatching {
             val json = org.json.JSONObject()
             snapshot.forEach { (server, seconds) -> json.put(server, seconds) }
-            leadPrefs().edit().putString(KEY_OPEN_LEADS, json.toString()).apply()
+            leadPrefs().edit { putString(KEY_OPEN_LEADS, json.toString()) }
         }
     }
 
@@ -2583,7 +2615,6 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         leaderTicker?.cancel()
         player?.release()
         client.disconnect()
-        super.onCleared()
     }
 
     private companion object {

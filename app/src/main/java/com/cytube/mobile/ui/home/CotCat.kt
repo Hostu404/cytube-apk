@@ -26,6 +26,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
@@ -128,8 +129,23 @@ class PrinceState {
      *  along its room, as a share, once that's known; then null. */
     internal var opening: Float? = null
 
-    /** How far it is to the left of its spot, in the sprite's own pixels. */
-    internal var away by mutableFloatStateOf(0f)
+    /** How far it is to the left of its spot, in the sprite's own pixels: to
+     *  a fraction of one while it walks, but drawn to the whole pixel, so it's
+     *  [awayPx] (that whole pixel) that's watched for redrawing it. A walk
+     *  then redraws it only as it visibly moves (24 times a second), not on
+     *  every frame. */
+    internal var away: Float = 0f
+        set(value) {
+            field = value
+            val px = value.roundToInt()
+            if (px != awayPx) awayPx = px
+        }
+    internal var awayPx by mutableIntStateOf(0)
+        private set
+
+    /** Counts the frames of a walk with a letter in its mouth: the letter
+     *  swings every frame, so it's redrawn every frame then. */
+    internal var swingFrames by mutableIntStateOf(0)
 
     /** Taps on it so far (see [princeTaps]): each sets it scratching, wakes
      *  it if it's asleep, or makes it drop the letter it's carrying. */
@@ -453,7 +469,9 @@ fun Prince(
     val measurer = rememberTextMeasurer()
     val glyphs = remember(measurer) { HashMap<Pair<Char, TextStyle>, TextLayoutResult>() }
     Canvas(
-        modifier.onPlaced { spot ->
+        // On a layer of its own, so redrawing it doesn't redraw the bar
+        // round it. Not clipped: it still reaches out of its spot.
+        modifier.graphicsLayer().onPlaced { spot ->
             state.spot = spot
             state.pixel = pixel
             state.spotSize = spot.size
@@ -477,7 +495,7 @@ fun Prince(
         val width = CELL_W * pixel
         val height = CELL_H * pixel
         // Whole sprite pixels away from its spot, so it stays crisp walking.
-        val x = state.homeLeft() - state.away.roundToInt() * pixel
+        val x = state.homeLeft() - state.awayPx * pixel
         val ground = size.height.roundToInt()
         val y = ground - height - (state.hop * pixel).roundToInt()
         val style = state.hint?.layoutInput?.style
@@ -543,6 +561,7 @@ fun Prince(
             if (c != null) {
                 val glyph = glyphs.getOrPut(c to style) { measurer.measure(c.toString(), style) }
                 val ink = inkHeight(c, glyph)
+                state.swingFrames   // swinging: redrawn every frame of the walk
                 val swing = if (state.walking != 0) SWING_DEGREES * sin(state.away * 2f * PI.toFloat() / SWING_PIXELS) else 0f
                 rotate(swing, pivot = Offset(mouthX, mouthY)) {
                     drawText(glyph, topLeft = Offset(mouthX - glyph.size.width / 2f, mouthY + ink - glyph.firstBaseline))
@@ -747,6 +766,7 @@ private suspend fun PrinceState.walkTo(target: Float) {
                 last = now
                 val stride = WALK_SPEED * seconds
                 away = if (target > away) min(target, away + stride) else max(target, away - stride)
+                if (carrying != null) swingFrames++
             }
         }
     } finally {

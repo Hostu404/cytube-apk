@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -75,6 +78,7 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Density
 import kotlin.math.abs
@@ -296,7 +300,13 @@ fun ChatPanel(
     nameColors: NameColors = NameColors.NONE,
     /** Someone's messages in a row under their name once (Settings, phone
      *  only); off, each has its own name and time. */
-    groupMessages: Boolean = false
+    groupMessages: Boolean = false,
+    /** What you've sent here, for the box's ↑ and ↓ (phone only; see
+     *  SentChat). */
+    sentChat: SentChat = SentChat.EMPTY,
+    /** The emotes you've used here lately, newest first, for the top of the
+     *  emote sheet (phone only; see RecentEmotes). */
+    recentEmotes: ImmutableList<String> = persistentListOf()
 ) {
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
@@ -327,6 +337,44 @@ fun ChatPanel(
     }
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var showEmotePicker by remember { mutableStateOf(false) }
+    // The box's ↑ and ↓ (phone only), as Up and Down in the website's chat
+    // line: back and forth through what you've sent to whoever the box is
+    // sending to (see SentChat). Only while the box is empty, or has one of
+    // them in it just as it was sent: changed in any way (typed in, or a
+    // reply or an emote put in), it's a draft, and they're out of the way.
+    // [recalling] is which one's in it.
+    val conversation = conversationOf(pmTarget)
+    val sent = remember(sentChat, conversation, isTv) { if (isTv) emptyList() else sentChat.of(pmTarget) }
+    var recalled by remember { mutableStateOf<Recalled?>(null) }
+    val recalling = recalled
+        ?.takeIf { it.conversation == conversation && it.text == draft.text && sent.getOrNull(it.index) == it.text }
+        ?.index
+    val canRecall = canSend && sent.isNotEmpty() && (draft.text.isEmpty() || recalling != null)
+    fun recall(i: Int) {
+        if (i in sent.indices) {
+            recalled = Recalled(conversation, i, sent[i])
+            draft = TextFieldValue(sent[i], TextRange(sent[i].length))
+        } else {                                            // down past the newest: an empty box again
+            recalled = null
+            draft = TextFieldValue("")
+        }
+    }
+    fun recallOlder() {
+        val i = (recalling ?: sent.size) - 1
+        if (i >= 0) recall(i)
+    }
+    fun recallNewer() {
+        recalling?.let { recall(it + 1) }
+    }
+    // One brought back belongs to its conversation: switching to another
+    // (out of a PM into public chat, say) with it still in the box as it
+    // was takes it out, so it can't go there by mistake. A draft stays.
+    LaunchedEffect(conversation) {
+        val r = recalled ?: return@LaunchedEffect
+        if (r.conversation == conversation) return@LaunchedEffect
+        if (draft.text == r.text) draft = TextFieldValue("")
+        recalled = null
+    }
     val listState = rememberLazyListState()
 
     // How fast messages are arriving, for the jump button below.
@@ -655,17 +703,46 @@ fun ChatPanel(
                 // while there's more text than fits on one line.
                 maxLines = 5,
                 shape = RoundedCornerShape(24.dp),
+                // ↓ to the left of ↑, so ↑ stays where it is to be tapped
+                // again and again.
+                trailingIcon = if (!canRecall) null else {
+                    {
+                        Row {
+                            if (recalling != null) {
+                                IconButton(onClick = ::recallNewer, modifier = Modifier.size(40.dp)) {
+                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next message you sent")
+                                }
+                            }
+                            IconButton(
+                                onClick = ::recallOlder,
+                                enabled = (recalling ?: sent.size) > 0,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Previous message you sent")
+                            }
+                        }
+                    }
+                },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = {
-                    onSend(draft.text); draft = TextFieldValue("")
+                    onSend(draft.text); draft = TextFieldValue(""); recalled = null
                 }),
                 modifier = Modifier.weight(1f)
                     .focusRequester(inputFocus)
                     .onFocusChanged { inputFocused = it.isFocused }
+                    // A keyboard's Up and Down do the same, as on the website.
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown || !canRecall) false
+                        else when (event.key) {
+                            Key.DirectionUp -> { recallOlder(); true }
+                            Key.DirectionDown -> if (recalling != null) { recallNewer(); true } else false
+                            else -> false
+                        }
+                    }
                     .then(inputFieldModifier)
             )
             FilledIconButton(
-                onClick = { onSend(draft.text); draft = TextFieldValue("") },
+                onClick = { onSend(draft.text); draft = TextFieldValue(""); recalled = null },
                 enabled = canSend && draft.text.isNotBlank(),
                 modifier = Modifier.size(48.dp)
             ) {
@@ -677,6 +754,10 @@ fun ChatPanel(
     if (showEmotePicker) {
         EmotePicker(
             emotes = emotes.all,
+            recent = remember(recentEmotes, emotes) {
+                val byName = emotes.all.associateBy { it.name }
+                recentEmotes.mapNotNull(byName::get)
+            },
             onPick = { name -> draft = draft.insertAtCursor(name) },
             onDismiss = { showEmotePicker = false }
         )
@@ -1112,6 +1193,8 @@ private fun FlyingCommentItem(
 @Composable
 private fun EmotePicker(
     emotes: List<Emote>,
+    /** The ones you've used lately, newest first: a row of them at the top. */
+    recent: List<Emote> = emptyList(),
     onPick: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1129,7 +1212,6 @@ private fun EmotePicker(
     // its own first page rather than wherever scrolling had gotten to.
     var visibleCount by remember(query) { mutableStateOf(EMOTE_PAGE_SIZE) }
     val page = remember(shown, visibleCount) { shown.take(visibleCount) }
-    val context = LocalContext.current
     val tilePx = with(LocalDensity.current) { 48.dp.roundToPx() }.coerceAtLeast(1)
 
     ModalBottomSheet(onDismissRequest = onDismiss, properties = ChannelSheetProperties) {
@@ -1140,6 +1222,24 @@ private fun EmotePicker(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 8.dp)
             )
+            // Your usual ones first, a tap away (not while filtering: what
+            // that finds is all in the grid).
+            if (recent.isNotEmpty() && query.isBlank()) {
+                Text(
+                    "Recent",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp)
+                )
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    items(recent, key = { "${it.name}_${it.image}" }) { emote ->
+                        EmoteTile(emote, tilePx, onPick, Modifier.width(88.dp))
+                    }
+                }
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -1155,34 +1255,7 @@ private fun EmotePicker(
                 modifier = Modifier.fillMaxSize()
             ) {
                 gridItems(page, key = { "${it.name}_${it.image}" }) { emote ->
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .padding(6.dp)
-                            // Insert only. Never send.
-                            .clickable { onPick(emote.name) }
-                            .padding(6.dp)
-                    ) {
-                        AsyncImage(
-                            model = remember(emote.image) {
-                                ImageRequest.Builder(context)
-                                    .data(emote.image)
-                                    .size(Size(tilePx, tilePx))
-                                    .precision(Precision.INEXACT)
-                                    .build()
-                            },
-                            contentDescription = emote.name,
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            emote.name,
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    EmoteTile(emote, tilePx, onPick)
                 }
 
                 if (visibleCount < shown.size) {
@@ -1197,6 +1270,45 @@ private fun EmotePicker(
                 }
             }
         }
+    }
+}
+
+/** A message of yours brought back into the chat box (see ChatPanel): from
+ *  which conversation, which of them, and what it said. */
+private class Recalled(val conversation: String, val index: Int, val text: String)
+
+/** One emote in the emote sheet: its picture and name. A tap puts it in the
+ *  box (never sends it). */
+@Composable
+private fun EmoteTile(emote: Emote, tilePx: Int, onPick: (String) -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .padding(6.dp)
+            // Insert only. Never send.
+            .clickable { onPick(emote.name) }
+            .padding(6.dp)
+    ) {
+        AsyncImage(
+            model = remember(emote.image) {
+                ImageRequest.Builder(context)
+                    .data(emote.image)
+                    .size(Size(tilePx, tilePx))
+                    .precision(Precision.INEXACT)
+                    .build()
+            },
+            contentDescription = emote.name,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.size(48.dp)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            emote.name,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1494,6 +1606,8 @@ fun PlaylistPanel(
         if (query.isBlank()) items
         else items.filter { it.title.contains(query, ignoreCase = true) }
     }
+    val context = LocalContext.current
+    val linkColor = MaterialTheme.colorScheme.primary
 
     Column(modifier.fillMaxSize()) {
         if (canAdd) {
@@ -1570,10 +1684,20 @@ fun PlaylistPanel(
                                 maxLines = 2, overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                buildString {
+                                buildAnnotatedString {
                                     append(item.duration)
                                     append(" · ")
-                                    append(MediaTypes.label(item.type))
+                                    // Where it's from, as a link to its page (as the
+                                    // website links its playlist titles): a tap on it
+                                    // opens that in the browser; anywhere else on the
+                                    // row does what it always did.
+                                    val link = item.link
+                                    if (link == null) append(MediaTypes.label(item.type))
+                                    else withLink(
+                                        LinkAnnotation.Url(link, TextLinkStyles(SpanStyle(color = linkColor))) {
+                                            openInBrowser(context, link)
+                                        }
+                                    ) { append(MediaTypes.label(item.type) + " ↗") }
                                     if (item.queueby.isNotBlank()) { append(" · "); append(item.queueby) }
                                     if (!syncEnabled && !personallyResolvable) { append(" · unavailable unsynced") }
                                 },

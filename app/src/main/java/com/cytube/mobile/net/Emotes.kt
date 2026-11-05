@@ -126,6 +126,33 @@ class EmoteSet private constructor(
         return false
     }
 
+    /**
+     * The emotes [line] will show once it's sent, each once: what you're
+     * sending, as typed. It reaches everyone escaped, as the names here are
+     * kept, so it's escaped the same way first; then its words are looked up
+     * by name, in the order they come, and the few names with spaces found
+     * by their own patterns, just as [apply] will find them.
+     */
+    fun usedIn(line: String): List<Emote> {
+        if (all.isEmpty() || line.isBlank()) return emptyList()
+        val text = sanitize(line)
+        val found = LinkedHashSet<Emote>()
+        if (hashed.isNotEmpty()) for (word in TOKEN.findAll(text)) hashed[word.value]?.let(found::add)
+        if (spaced.isNotEmpty()) {
+            val deadline = Deadline()
+            for ((regex, emote) in spaced) {
+                if (deadline.passed) break
+                val hit = try {
+                    regex.containsMatchIn(deadline.guard(text))
+                } catch (_: Deadline.Passed) {
+                    false
+                }
+                if (hit) found += emote
+            }
+        }
+        return found.toList()
+    }
+
     fun withUpdated(emote: Emote): EmoteSet =
         from(all.filterNot { it.name == emote.name } + emote, effects)
 

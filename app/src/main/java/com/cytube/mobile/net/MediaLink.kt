@@ -31,6 +31,50 @@ object MediaLink {
 
     data class Parsed(val type: String, val id: String)
 
+    /**
+     * The page a playlist item came from, as the website links each title in
+     * its playlist: a port of formatURL() in CyTube's www/js/util.js, the
+     * other way from [parse]. From the item's type and id, and for custom
+     * embeds and PeerTube its meta.embed. Null for a type the website doesn't
+     * link either, an id missing a part, a PeerTube domain or Bandcamp artist
+     * that isn't a plain host name (they go in front of the address, so
+     * nothing can be smuggled in there), or anything that isn't a web page at
+     * all (an rtmp:// stream, say): only http(s) is offered.
+     */
+    fun pageOf(type: String, id: String, embed: MediaEmbed? = null): String? {
+        if (id.isBlank() && type != "cu" && type != "pt") return null
+        val parts = id.split(';')
+        val first = parts.getOrNull(0).orEmpty()
+        val second = parts.getOrNull(1).orEmpty()
+        val both = first.isNotEmpty() && second.isNotEmpty()
+        val page = when (type) {
+            "yt" -> "https://youtube.com/watch?v=$id"
+            "vi" -> "https://vimeo.com/$id"
+            "dm" -> "https://dailymotion.com/video/$id"
+            "li" -> if (both) "https://livestream.com/accounts/$first/events/$second" else null
+            "tw" -> "https://twitch.tv/$id"
+            "gd" -> "https://docs.google.com/file/d/$id"
+            "sb" -> "https://streamable.com/$id"
+            "tc" -> "https://clips.twitch.tv/$id"
+            "sc", "rt", "fi", "hl", "cm" -> id
+            "cu" -> embed?.src
+            "pt" -> embed?.takeIf { MediaTypes.HOSTNAME_REGEX.matches(it.domain) }?.let { e ->
+                if (e.onlyLong) e.uuid.takeIf(PAGE_ID::matches)?.let { "https://${e.domain}/videos/watch/$it" }
+                else e.short.takeIf(PAGE_ID::matches)?.let { "https://${e.domain}/w/$it" }
+            }
+            "bc" -> "https://www.bitchute.com/video/$id/"
+            "bn" -> if (both && HOST_LABEL.matches(first)) "https://$first.bandcamp.com/track/$second" else null
+            "od" -> if (both) "https://odysee.com/@$first/$second" else null
+            "nv" -> "https://www.nicovideo.jp/watch/$id"
+            else -> null
+        }?.trim()
+        return page?.takeIf(WEB_PAGE::matches)
+    }
+
+    private val WEB_PAGE = Regex("^https?://[^\\s/?#@]+(?:[/?#]\\S*)?$", RegexOption.IGNORE_CASE)
+    private val PAGE_ID = Regex("^[A-Za-z0-9-]{1,64}$")
+    private val HOST_LABEL = Regex("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
     private val SHORTHAND = Regex("^[a-z]{2}:")
     private val PEERTUBE_PATH = Regex(
         "(?:/w/|/videos/watch/)(?:([a-zA-Z0-9]{22})|([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))"

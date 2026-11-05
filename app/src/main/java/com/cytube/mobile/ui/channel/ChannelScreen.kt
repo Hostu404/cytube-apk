@@ -1112,6 +1112,8 @@ fun ChannelScreen(
                 users = state.users,
                 nameColors = state.nameColors,
                 groupMessages = state.groupChat,
+                sentChat = state.sentChat,
+                recentEmotes = state.recentEmotes,
                 modifier = Modifier.weight(1f)
             )
             }

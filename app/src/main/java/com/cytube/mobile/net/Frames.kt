@@ -336,6 +336,17 @@ data class ChannelUser(
     }
 }
 
+/** What a custom embed ("cu") or PeerTube ("pt") item's meta.embed says
+ *  about where it lives: for its link (see MediaLink.pageOf). */
+@Immutable
+data class MediaEmbed(
+    val src: String = "",
+    val domain: String = "",
+    val uuid: String = "",
+    val short: String = "",
+    val onlyLong: Boolean = false
+)
+
 @Immutable
 data class PlaylistItem(
     val uid: Int,
@@ -343,18 +354,33 @@ data class PlaylistItem(
     val duration: String,
     val type: String,
     val mediaId: String,
-    val queueby: String
+    val queueby: String,
+    /** A custom embed's or PeerTube item's meta.embed, for [link]; null for
+     *  everything else (their type and id are enough). */
+    val embed: MediaEmbed? = null
 ) {
+    /** The page it came from, as the website links its playlist titles (see
+     *  MediaLink.pageOf); null when there's none to go to. */
+    val link: String? get() = MediaLink.pageOf(type, mediaId, embed)
+
     companion object {
         fun from(o: JSONObject): PlaylistItem {
             val media = o.optJSONObject("media") ?: JSONObject()
+            val type = media.optString("type", "")
             return PlaylistItem(
                 uid = o.optInt("uid", -1),
                 title = media.optString("title", "Untitled"),
                 duration = media.optString("duration", ""),
-                type = media.optString("type", ""),
+                type = type,
                 mediaId = media.optString("id", ""),
-                queueby = o.optString("queueby", "")
+                queueby = o.optString("queueby", ""),
+                embed = if (type != "cu" && type != "pt") null
+                    else media.optJSONObject("meta")?.optJSONObject("embed")?.let { e ->
+                        MediaEmbed(
+                            src = e.optString("src"), domain = e.optString("domain"), uuid = e.optString("uuid"),
+                            short = e.optString("short"), onlyLong = e.optBoolean("onlyLong")
+                        )
+                    }
             )
         }
 
