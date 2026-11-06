@@ -322,8 +322,21 @@ private fun SearchField(
         value = query,
         onValueChange = onQueryChange,
         placeholder = SEARCH_HINT,
-        // With Prince, the hint it takes letters from.
-        placeholderContent = if (prince != null) { style -> PrinceHint(prince, SEARCH_HINT, style) } else null,
+        // The hint (with Prince, the one it takes letters from), and after it, at
+        // midnight on New Year's Eve, fireworks (see NewYearFireworks): phone
+        // only, and not while you're in the box.
+        placeholderContent = { style ->
+            Row(Modifier.height(IntrinsicSize.Min)) {
+                if (prince != null) PrinceHint(prince, SEARCH_HINT, style)
+                else Text(SEARCH_HINT, style = style, color = colors.onSurfaceVariant, maxLines = 1)
+                if (!isTv) {
+                    NewYearFireworks(
+                        shown = !searching,
+                        modifier = Modifier.weight(1f).fillMaxHeight().padding(start = 16.dp)
+                    )
+                }
+            }
+        },
         // On TV the on-screen keyboard covers the screen and takes the
         // remote's D-pad itself, so after typing its action key is the way
         // out: it closes the keyboard and moves down to the results (the

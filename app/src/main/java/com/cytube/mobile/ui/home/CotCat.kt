@@ -531,11 +531,11 @@ fun Prince(
                 filterQuality = FilterQuality.None
             )
             cell(frame)
-            // Its hat for the day, if there's one, on its head as it is in this frame.
+            // Its hat for the day, if there's one, on its head as it is in this frame,
+            // and with some, something round its neck, just under its chin.
             if (hat != null) {
-                val art = if (side) hat.side else hat.front
                 val (headX, headY) = hatAnchor(frame)
-                drawImage(
+                fun wear(art: HatArt) = drawImage(
                     image = sheet,
                     srcOffset = IntOffset(art.x, art.y),
                     srcSize = IntSize(art.w, art.h),
@@ -543,6 +543,8 @@ fun Prince(
                     dstSize = IntSize(art.w * pixel, art.h * pixel),
                     filterQuality = FilterQuality.None
                 )
+                wear(if (side) hat.side else hat.front)
+                hat.neck?.let { wear(it) }
             }
             if (state.angry) cell(ANGER_MARK)
         }
@@ -1125,24 +1127,27 @@ private const val ANGER_MARK = 28
 /**
  * Its hats, for the holidays: a party hat at New Year (31 Dec-2 Jan), heart
  * boppers for Valentine's (13-15 Feb), a green top hat for St Patrick's
- * (16-18 Mar), bunny ears for Easter (Good Friday to Easter Monday), a
+ * (16-18 Mar, with a four-leaf clover bowtie round its neck), a bunny hat
+ * for Easter (Good Friday to Easter Monday: one ear up, one flopped over, a
+ * face of its own and flaps down to pompoms), a
  * pumpkin mask for Halloween (24-31 Oct), a roast turkey for (American)
  * Thanksgiving (its Thursday to the Sunday) and a Santa hat for Christmas
- * (1-26 Dec). On the sheet in cells 30 and 31 (the turkey, and the Santa hat
- * side-on, its tip falling behind it).
+ * (1-26 Dec). On the sheet in cells 30 and 31 (the turkey, the Santa hat
+ * side-on, its tip falling behind it, the bunny hat, and the bowtie).
  */
-internal enum class Hat(val front: HatArt, val side: HatArt = front) {
+internal enum class Hat(val front: HatArt, val side: HatArt = front, val neck: HatArt? = null) {
     PARTY(hatArt(30, 31, 0, 7, 8, 3, 7)),
     HEARTS(hatArt(30, 0, 15, 13, 9, 6, 8)),
-    TOP_HAT(hatArt(30, 14, 15, 7, 7, 3, 6)),
-    BUNNY(hatArt(30, 22, 15, 15, 13, 7, 11)),
+    TOP_HAT(hatArt(30, 14, 15, 7, 7, 3, 6), neck = hatArt(30, 22, 15, 9, 7, 4, -7)),
+    BUNNY(hatArt(31, 0, 14, 18, 18, 8, 9)),
     PUMPKIN(hatArt(30, 0, 0, 13, 11, 6, 2)),
     TURKEY(hatArt(31, 18, 0, 15, 11, 7, 10)),
     SANTA(hatArt(30, 14, 0, 17, 14, 8, 10), side = hatArt(31, 0, 0, 17, 14, 8, 10))
 }
 
 /** Where a hat is on the sheet ([x], [y], [w] x [h]), and its pixel ([ax],
- *  [ay]) that goes on the middle of its head (see [hatAnchor]). */
+ *  [ay]) that goes on the middle of its head (see [hatAnchor]). For what goes
+ *  round its neck [ay] is less than 0: its top row is that far below there. */
 internal class HatArt(val x: Int, val y: Int, val w: Int, val h: Int, val ax: Int, val ay: Int)
 
 private fun hatArt(cell: Int, x: Int, y: Int, w: Int, h: Int, ax: Int, ay: Int) =
