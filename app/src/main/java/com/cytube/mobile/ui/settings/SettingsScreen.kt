@@ -33,7 +33,10 @@ import com.cytube.mobile.ui.theme.MaSectionLabel
 import com.cytube.mobile.ui.theme.MaTopBar
 import com.cytube.mobile.ui.theme.maFaint
 import com.cytube.mobile.ui.theme.maPageBackground
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.cytube.mobile.data.LIGHTS_DOWN_DIM_RANGE
+import com.cytube.mobile.data.NICO_SPEED_RANGE
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -113,36 +116,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.syncEnabled
             ) { scope.launch { store.setSync(it) } }
 
-            Column(Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 8.dp, bottom = 8.dp)) {
-                Text("Sync tolerance: ${settings.syncAccuracy.roundToInt()}s",
-                    style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    "How far the player may drift before it's corrected — by briefly " +
-                        "speeding up or slowing down, or a seek if it's far out. Lower is " +
-                        "tighter but corrects more often on a slow connection.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Slider(
-                    // Material3's Slider takes Up/Down as well as Left/Right
-                    // to change its value, so a TV remote's D-pad could never
-                    // leave it. Up/Down move focus instead; Left/Right still
-                    // adjust.
-                    modifier = Modifier.onPreviewKeyEvent { event ->
-                        val direction = when (event.key) {
-                            Key.DirectionUp -> FocusDirection.Up
-                            Key.DirectionDown -> FocusDirection.Down
-                            else -> return@onPreviewKeyEvent false
-                        }
-                        if (event.type == KeyEventType.KeyDown) focusManager.moveFocus(direction)
-                        true
-                    },
-                    value = settings.syncAccuracy.toFloat(),
-                    onValueChange = { scope.launch { store.setAccuracy(it.toDouble()) } },
-                    valueRange = 1f..10f,
-                    steps = 8
-                )
-            }
+            SliderRow(
+                label = { "Sync tolerance: ${it.roundToInt()}s" },
+                subtitle = "How far the player may drift before it's corrected — by briefly " +
+                    "speeding up or slowing down, or a seek if it's far out. Lower is " +
+                    "tighter but corrects more often on a slow connection.",
+                value = settings.syncAccuracy.toFloat(),
+                range = 1f..10f,
+                steps = 8
+            ) { scope.launch { store.setAccuracy(it.toDouble()) } }
 
             if (!isTv) {
                 SwitchRow(
@@ -192,12 +174,34 @@ fun SettingsScreen(onBack: () -> Unit) {
                 ) { scope.launch { store.setNicoEmotesOnly(it) } }
             }
 
+            SliderRow(
+                label = { "Nico speed: ${java.math.BigDecimal(it.toDouble()).setScale(2, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()}×" },
+                value = settings.nicoSpeed,
+                range = NICO_SPEED_RANGE,
+                steps = 5                                          // 0.5, 0.75 … 2
+            ) { scope.launch { store.setNicoSpeed(it) } }
+
+            // Lights down is phone only.
+            if (!isTv) {
+                SliderRow(
+                    label = { "Lights down: ${(it * 100).roundToInt()}% dark" },
+                    value = settings.lightsDownDim,
+                    range = LIGHTS_DOWN_DIM_RANGE,
+                    steps = 9                                      // 50%, 55% … 100%
+                ) { scope.launch { store.setLightsDownDim(it) } }
+            }
+
             if (!isTv) {
                 SwitchRow(
                     title = "Group messages",
                     subtitle = "Groups each user's chat messages together under their name.",
                     checked = settings.groupChat
                 ) { scope.launch { store.setGroupChat(it) } }
+                SwitchRow(
+                    title = "Message recall",
+                    subtitle = "An up arrow in the empty message box brings back the last four messages you sent there.",
+                    checked = settings.messageRecall
+                ) { scope.launch { store.setMessageRecall(it) } }
             }
 
             if (!isTv) {
@@ -261,6 +265,61 @@ private fun LinkRow(text: String, onClick: () -> Unit) {
         )
     }
 }
+
+/**
+ * A setting picked on a slider, its value in its [label]. The handle and the label follow the
+ * finger, and it's saved ([onChange]) once it's let go, not at every step on the way; or, however it
+ * was moved (TalkBack's adjustments aren't "let go" of), once it's been still a moment. On TV the
+ * remote's Left and Right change it (saved as each press is let go); Up and Down move on: Material3's
+ * Slider would take Up and Down too, and a D-pad could never leave it.
+ */
+@Composable
+private fun SliderRow(
+    label: (Float) -> String,
+    subtitle: String? = null,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onChange: (Float) -> Unit
+) {
+    val focusManager = LocalFocusManager.current
+    var shown by remember(value) { mutableFloatStateOf(value) }
+    val save by rememberUpdatedState(onChange)
+    LaunchedEffect(shown) {
+        if (shown == value) return@LaunchedEffect
+        delay(SLIDER_SAVE_AFTER_MS)
+        save(shown)
+    }
+    Column(Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 8.dp, bottom = 8.dp)) {
+        Text(label(shown), style = MaterialTheme.typography.bodyLarge)
+        if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Slider(
+            modifier = Modifier.onPreviewKeyEvent { event ->
+                when (event.key) {
+                    Key.DirectionUp, Key.DirectionDown -> {
+                        if (event.type == KeyEventType.KeyDown) {
+                            focusManager.moveFocus(if (event.key == Key.DirectionUp) FocusDirection.Up else FocusDirection.Down)
+                        }
+                        true
+                    }
+                    Key.DirectionLeft, Key.DirectionRight -> {
+                        if (event.type == KeyEventType.KeyUp) onChange(shown)
+                        false
+                    }
+                    else -> false
+                }
+            },
+            value = shown,
+            onValueChange = { shown = it },
+            onValueChangeFinished = { onChange(shown) },
+            valueRange = range,
+            steps = steps
+        )
+    }
+}
+
+/** How long a slider's been still before it's saved anyway (see SliderRow). */
+private const val SLIDER_SAVE_AFTER_MS = 400L
 
 @Composable
 private fun SwitchRow(

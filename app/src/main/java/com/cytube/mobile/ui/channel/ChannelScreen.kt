@@ -146,7 +146,6 @@ internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
 /** How dark lights down makes everything around the video (black at this
  *  opacity), how long the fades take (going down, coming up), and how long
  *  a tap around the video brings the lights up for. */
-private const val LIGHTS_DIM = 0.85f
 private const val LIGHTS_DOWN_MS = 350
 private const val LIGHTS_UP_MS = 220
 /** A touch around the video: how much of the dark it lifts, and its fades
@@ -215,9 +214,9 @@ fun ChannelScreen(
     val nekoState = remember(chatOverlayOn) { NekoOverlayState() }
     var openPanel by remember { mutableStateOf<Panel?>(null) }
     var showModeSheet by remember { mutableStateOf(false) }
-    // Lights down: everything around the windowed video dimmed (see
-    // LIGHTS_DIM below). For this visit only: the next channel opens with
-    // the lights up.
+    // Lights down: everything around the windowed video dimmed, as dark as
+    // Settings says (Settings.lightsDownDim). For this visit only: the next
+    // channel opens with the lights up.
     var lightsDown by rememberSaveable { mutableStateOf(false) }
     var passwordDraft by remember { mutableStateOf("") }
 
@@ -621,7 +620,8 @@ fun ChannelScreen(
                         showEmotes = state.showEmotes,
                         emotes = state.emotes,
                         state = nekoState,
-                        emotesOnly = state.nicoEmotesOnly
+                        emotesOnly = state.nicoEmotesOnly,
+                        speed = state.nicoSpeed
                     )
                 }
 
@@ -738,12 +738,13 @@ fun ChannelScreen(
     // (LIGHTS_PEEK_LIFT), and that fade, and the one back down after it, is
     // a little slower and smoother than the bulb button's.
     var fadeFromTouch by remember { mutableStateOf(false) }
+    val lightsDim = state.lightsDownDim
     val dimTarget = when {
         !lightsDown || !canDimAround || WindowInsets.isImeVisible -> 0f
-        peeking -> LIGHTS_DIM * (1f - LIGHTS_PEEK_LIFT)
-        else -> LIGHTS_DIM
+        peeking -> lightsDim * (1f - LIGHTS_PEEK_LIFT)
+        else -> lightsDim
     }
-    val navBarDimmedNow = dimTarget == LIGHTS_DIM
+    val navBarDimmedNow = dimTarget == lightsDim
     SideEffect { navBarDimmedState.value = navBarDimmedNow }
     // One short fade each way, then still: nothing animates while it sits.
     val dimAnimation = animateFloatAsState(
@@ -755,7 +756,7 @@ fun ChannelScreen(
             )
             // The bulb button: down eases in and out; up starts at full
             // speed, so the tap is answered at once.
-            dimTarget == LIGHTS_DIM -> tween(LIGHTS_DOWN_MS, easing = FastOutSlowInEasing)
+            dimTarget == lightsDim -> tween(LIGHTS_DOWN_MS, easing = FastOutSlowInEasing)
             else -> tween(LIGHTS_UP_MS, easing = LinearOutSlowInEasing)
         },
         label = "lightsDown"
@@ -1112,7 +1113,7 @@ fun ChannelScreen(
                 users = state.users,
                 nameColors = state.nameColors,
                 groupMessages = state.groupChat,
-                sentChat = state.sentChat,
+                sentChat = if (state.messageRecall) state.sentChat else SentChat.EMPTY,
                 recentEmotes = state.recentEmotes,
                 modifier = Modifier.weight(1f)
             )
@@ -1163,7 +1164,8 @@ fun ChannelScreen(
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
                 state = nekoState,
-                emotesOnly = state.nicoEmotesOnly
+                emotesOnly = state.nicoEmotesOnly,
+                speed = state.nicoSpeed
             )
         }
     }
@@ -2563,7 +2565,8 @@ private fun FullscreenPlayer(
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
                 state = nekoState,
-                emotesOnly = state.nicoEmotesOnly
+                emotesOnly = state.nicoEmotesOnly,
+                speed = state.nicoSpeed
             )
         }
 

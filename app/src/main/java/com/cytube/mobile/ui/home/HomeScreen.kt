@@ -19,7 +19,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -49,6 +52,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.cytube.mobile.BuildConfig
 import com.cytube.mobile.R
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
+import com.cytube.mobile.data.UpdateAlerts
+import com.cytube.mobile.ui.channel.openInBrowser
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubePageTheme
 import com.cytube.mobile.ui.theme.Ma
@@ -57,6 +62,8 @@ import com.cytube.mobile.ui.theme.MaTextField
 import com.cytube.mobile.ui.theme.maFaint
 import com.cytube.mobile.ui.theme.maIsLight
 import com.cytube.mobile.ui.theme.maPageBackground
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +82,13 @@ fun HomeScreen(
     val initialFocusRequester = remember { FocusRequester() }
     val princeShown = showPrince && !isTv
     val prince = rememberPrinceState(SEARCH_HINT)
+    // Update and news alerts (see UpdateAlerts): phone only, looked for at most
+    // twice a day as this page opens, with nothing running in the background.
+    val updateAlerts = remember { UpdateAlerts(context.applicationContext) }
+    val alerts by remember(isTv) { if (isTv) flowOf(emptyList()) else updateAlerts.shown }
+        .collectAsStateWithLifecycle(emptyList())
+    if (!isTv) LaunchedEffect(Unit) { updateAlerts.refreshInBackground() }
+    val scope = rememberCoroutineScope()
 
     // Runs each time Home enters composition -- which, under
     // Navigation-Compose, is every time the homepage is navigated to:
@@ -129,6 +143,8 @@ fun HomeScreen(
                         Spacer(Modifier.width(8.dp))
                         if (BuildConfig.VERSION_NAME.startsWith("apustaja")) {
                             ApustajaName(Modifier.alignByBaseline())
+                        } else if (BuildConfig.VERSION_NAME.startsWith("classless")) {
+                            ClasslessName(Modifier.alignByBaseline())
                         } else {
                             Text(
                                 BuildConfig.VERSION_NAME,
@@ -167,6 +183,14 @@ fun HomeScreen(
                 bottom = 32.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             )
         ) {
+            items(alerts, key = { "alert-${it.id}" }) { alert ->
+                AlertBanner(
+                    alert,
+                    onOpen = { alert.link?.let { openInBrowser(context, it) } },
+                    onDismiss = { scope.launch { updateAlerts.dismiss(alert.id) } },
+                    modifier = Modifier.fillMaxWidth().padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 8.dp)
+                )
+            }
             item {
                 SearchField(
                     query = state.query,
@@ -568,6 +592,63 @@ private const val JUMPER_RIGHT = 0.762f
 /** How far a p reaches below the line in the app's font (Roboto), as a
  *  share of its size. */
 private const val DESCENDER = 0.21f
+
+/**
+ * The version's name for classless: its usual small grey text, wearing the top hat. The hat sits on
+ * the first "l" as on a peg, its brim just on the l's tip (found from the letter itself, so it fits
+ * whatever the phone's font), clear of the letters either side. Drawn over the bar, the title's row
+ * keeps its size. On the dark theme its dark felt is lit up, so it doesn't vanish into the black.
+ * Smoothed down from its bigger picture (mipmaps), as Apu is.
+ */
+@Composable
+internal fun ClasslessName(modifier: Modifier = Modifier, versionName: String = BuildConfig.VERSION_NAME) {
+    val hat = ImageBitmap.imageResource(R.drawable.classless_hat)
+    remember(hat) { hat.asAndroidBitmap().setHasMipMap(true) }
+    val style = MaterialTheme.typography.labelSmall
+    val lit = if (maIsLight()) null else HAT_LIT
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        versionName,
+        style = style,
+        color = maFaint(),
+        onTextLayout = { layout = it },
+        modifier = modifier.drawWithCache {
+            val peg = versionName.indexOf('l')
+            val tip = layout?.takeIf { peg >= 0 && peg < it.layoutInput.text.length }?.getPathForRange(peg, peg + 1)?.getBounds()
+            val em = style.fontSize.toPx()
+            val height = em * HAT_HEIGHT
+            val width = height * hat.width / hat.height
+            onDrawWithContent {
+                drawContent()
+                if (tip == null || tip.isEmpty) return@onDrawWithContent
+                drawImage(
+                    hat,
+                    dstOffset = IntOffset(((tip.left + tip.right - width) / 2).roundToInt(), (tip.top + em * HAT_ON_TIP - height).roundToInt()),
+                    dstSize = IntSize(width.roundToInt(), height.roundToInt()),
+                    filterQuality = FilterQuality.High,
+                    colorFilter = lit
+                )
+            }
+        }
+    )
+}
+
+/** The hat's height, and how far its brim comes down over the l's tip, as shares of the version's
+ *  font size. */
+private const val HAT_HEIGHT = 1.3f
+private const val HAT_ON_TIP = 0.04f
+
+/** The hat's felt on the dark theme: half as bright again, and lifted, so it shows on the black. */
+private val HAT_LIT = ColorFilter.colorMatrix(
+    ColorMatrix(
+        floatArrayOf(
+            1.5f, 0f, 0f, 0f, 30f,
+            0f, 1.5f, 0f, 0f, 30f,
+            0f, 0f, 1.5f, 0f, 30f,
+            0f, 0f, 0f, 1f, 0f
+        )
+    )
+)
 
 /** The search bar's hint (which, with cot on, Prince takes letters from). */
 private const val SEARCH_HINT = "Search channels…"

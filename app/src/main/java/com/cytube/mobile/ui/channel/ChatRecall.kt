@@ -11,8 +11,9 @@ internal fun conversationOf(pmTarget: String?): String = pmTarget?.lowercase() ?
  * What you've sent in a channel this visit, oldest first, for the chat box's
  * ↑ and ↓ (phone only): as Up and Down do in the website's chat line, they
  * step back and forth through it. Public chat and each private conversation
- * are kept apart, so a PM never comes back up in public chat. Kept only while
- * you're in the channel, as the website keeps its own.
+ * are kept apart, so a PM never comes back up in public chat. Only the last
+ * [KEEP], and only while you're in the channel. Settings can turn it off
+ * (Settings.messageRecall).
  */
 @Immutable
 class SentChat private constructor(private val byConversation: Map<String, List<String>>) {
@@ -30,7 +31,7 @@ class SentChat private constructor(private val byConversation: Map<String, List<
 
     companion object {
         val EMPTY = SentChat(emptyMap())
-        const val KEEP = 20
+        const val KEEP = 4
     }
 }
 

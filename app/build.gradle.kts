@@ -28,8 +28,8 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 23
-        versionName = "apustaja"
+        versionCode = 24
+        versionName = "classless"
         // Nightly builds (.github/workflows/nightly.yml) pass
         // -PnightlyBuild=<the night>, so the home screen shows which night an
         // APK is from, e.g. "apustaja nightly 4 Nov". (Its commit is in the

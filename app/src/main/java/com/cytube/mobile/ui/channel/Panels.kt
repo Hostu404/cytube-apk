@@ -876,6 +876,8 @@ fun NekoChatOverlay(
     /** Settings' "Nico chat: emotes only": each comment flies just its
      *  emotes, and one with none doesn't fly. */
     emotesOnly: Boolean = false,
+    /** Settings' "Nico speed": 2 crosses in half the time, 0.5 in twice. */
+    speed: Float = 1f,
     modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
@@ -942,6 +944,7 @@ fun NekoChatOverlay(
         val currentShowEmotes by rememberUpdatedState(showEmotes)
         val currentEmotes by rememberUpdatedState(emotes)
         val currentEmotesOnly by rememberUpdatedState(emotesOnly)
+        val currentSpeed by rememberUpdatedState(speed)
         // Each waiting message's estimated width, by seq, worked out once:
         // the loop looks at every waiting message each time round, not just
         // the first. Started afresh when the emote settings change the
@@ -960,7 +963,7 @@ fun NekoChatOverlay(
                     val widthPx = widths.getOrPut(msg.seq) {
                         estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, density)
                     }
-                    LaneCandidate(widthPx, (screenWidthPx + widthPx) / nekoDurationMs(screenWidthPx + widthPx))
+                    LaneCandidate(widthPx, (screenWidthPx + widthPx) / nekoDurationMs(screenWidthPx + widthPx, currentSpeed))
                 }
                 // Forget the ones that have flown or been dropped.
                 if (widths.size > waiting.size) widths.keys.retainAll(state.pending.mapTo(HashSet()) { it.seq })
@@ -969,7 +972,7 @@ fun NekoChatOverlay(
                     is LanePick.Fly -> {
                         val msg = state.pending.removeAt(pick.index)
                         val comment = waiting[pick.index]
-                        val durationMs = nekoDurationMs(screenWidthPx + comment.widthPx)
+                        val durationMs = nekoDurationMs(screenWidthPx + comment.widthPx, currentSpeed)
                         state.lanes.add(
                             pick.lane,
                             LaneOccupant(
@@ -1094,9 +1097,11 @@ private val NEKO_TEXT_STYLE = TextStyle(
 )
 
 /** Computes duration based on travel distance and speed ceiling. */
-private fun nekoDurationMs(distancePx: Float): Int {
+internal fun nekoDurationMs(distancePx: Float, speed: Float = 1f): Int {
     val durationFromSpeedLimit = (distancePx / NEKO_MAX_SPEED_PX_PER_MS).roundToInt()
-    return durationFromSpeedLimit.coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
+    val atNormalSpeed = durationFromSpeedLimit.coerceIn(NEKO_BASELINE_DURATION_MS, NEKO_MAX_DURATION_MS)
+    // Settings' speed: all of it scaled, so a long comment still goes faster than a short one.
+    return (atNormalSpeed / speed.coerceIn(0.25f, 4f)).roundToInt()
 }
 
 /** Accurately estimates comment width using ChatHtml's cached parse. */

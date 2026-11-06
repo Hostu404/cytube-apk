@@ -27,10 +27,10 @@ class ChatRecallTest {
         assertSame(sent, sent.adding(null, "  "))
     }
 
-    @Test fun onlyTheLastTwentyAreKept() {
+    @Test fun onlyTheLastFourAreKept() {
         var sent = SentChat.EMPTY
-        repeat(25) { sent = sent.adding(null, "line $it") }
-        assertEquals((5 until 25).map { "line $it" }, sent.of(null))
+        repeat(10) { sent = sent.adding(null, "line $it") }
+        assertEquals((6 until 10).map { "line $it" }, sent.of(null))
     }
 
     private val emotes = EmoteSet.from(listOf(

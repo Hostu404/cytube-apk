@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -65,8 +66,22 @@ data class Settings(
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     /** "cot", under the themes: Prince lives in the home search bar (see
      *  Prince), on whichever theme is picked. Phone only; off by default. */
-    val cot: Boolean = false
+    val cot: Boolean = false,
+    /** How fast Nico chat's comments fly across the video: 0.5 (half as
+     *  fast) to 2 (twice as fast); 1 is the website's own speed. */
+    val nicoSpeed: Float = 1f,
+    /** How dark lights down makes everything round the video: 0.5 to 1
+     *  (black). Phone only. */
+    val lightsDownDim: Float = DEFAULT_LIGHTS_DOWN_DIM,
+    /** The chat box's up arrow bringing back the last few messages you
+     *  sent (see SentChat). Phone only; on by default. */
+    val messageRecall: Boolean = true
 )
+
+/** Lights down's darkness as it always was, until changed in Settings. */
+const val DEFAULT_LIGHTS_DOWN_DIM = 0.85f
+val NICO_SPEED_RANGE = 0.5f..2f
+val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
 
 class SettingsStore(private val context: Context) {
 
@@ -82,7 +97,10 @@ class SettingsStore(private val context: Context) {
             nicoEmotesOnly = p[NICO_EMOTES_ONLY] ?: false,
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE]),
-            cot = p[COT] ?: ThemeMode.wasCot(p[THEME_MODE])
+            cot = p[COT] ?: ThemeMode.wasCot(p[THEME_MODE]),
+            nicoSpeed = (p[NICO_SPEED] ?: 1f).coerceIn(NICO_SPEED_RANGE),
+            lightsDownDim = (p[LIGHTS_DOWN_DIM] ?: DEFAULT_LIGHTS_DOWN_DIM).coerceIn(LIGHTS_DOWN_DIM_RANGE),
+            messageRecall = p[MESSAGE_RECALL] ?: true
         )
     }
 
@@ -102,6 +120,9 @@ class SettingsStore(private val context: Context) {
         p[THEME_MODE] = v.name
     }.let {}
     suspend fun setCot(v: Boolean) = context.dataStore.edit { it[COT] = v }.let {}
+    suspend fun setNicoSpeed(v: Float) = context.dataStore.edit { it[NICO_SPEED] = v.coerceIn(NICO_SPEED_RANGE) }.let {}
+    suspend fun setLightsDownDim(v: Float) = context.dataStore.edit { it[LIGHTS_DOWN_DIM] = v.coerceIn(LIGHTS_DOWN_DIM_RANGE) }.let {}
+    suspend fun setMessageRecall(v: Boolean) = context.dataStore.edit { it[MESSAGE_RECALL] = v }.let {}
 
     // ---- per-channel state ----
 
@@ -177,6 +198,9 @@ class SettingsStore(private val context: Context) {
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val COT = booleanPreferencesKey("cot")
+        val NICO_SPEED = floatPreferencesKey("nico_speed")
+        val LIGHTS_DOWN_DIM = floatPreferencesKey("lights_down_dim")
+        val MESSAGE_RECALL = booleanPreferencesKey("message_recall")
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")

@@ -9,6 +9,7 @@ import android.util.Log
 import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
+import com.cytube.mobile.data.DEFAULT_LIGHTS_DOWN_DIM
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.RecentEmotesStore
 import com.cytube.mobile.data.SettingsStore
@@ -200,6 +201,12 @@ data class ChannelUiState(
     val channelBackgrounds: Boolean = true,
     /** See Settings.nicoEmotesOnly. */
     val nicoEmotesOnly: Boolean = false,
+    /** See Settings.nicoSpeed. */
+    val nicoSpeed: Float = 1f,
+    /** See Settings.lightsDownDim. */
+    val lightsDownDim: Float = DEFAULT_LIGHTS_DOWN_DIM,
+    /** See Settings.messageRecall. */
+    val messageRecall: Boolean = true,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
      *  media switch never silently unmutes. */
@@ -600,6 +607,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 groupChat = settings.groupChat,
                 channelBackgrounds = settings.channelBackgrounds,
                 nicoEmotesOnly = settings.nicoEmotesOnly,
+                nicoSpeed = settings.nicoSpeed,
+                lightsDownDim = settings.lightsDownDim,
+                messageRecall = settings.messageRecall,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
@@ -629,6 +639,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             it.groupChat == s.groupChat &&
                             it.channelBackgrounds == s.channelBackgrounds &&
                             it.nicoEmotesOnly == s.nicoEmotesOnly &&
+                            it.nicoSpeed == s.nicoSpeed && it.lightsDownDim == s.lightsDownDim &&
+                            it.messageRecall == s.messageRecall &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
@@ -637,6 +649,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             groupChat = it.groupChat,
                             channelBackgrounds = it.channelBackgrounds,
                             nicoEmotesOnly = it.nicoEmotesOnly,
+                            nicoSpeed = it.nicoSpeed,
+                            lightsDownDim = it.lightsDownDim,
+                            messageRecall = it.messageRecall,
                             syncEnabled = it.syncEnabled
                         )
                     }
@@ -2021,7 +2036,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val used = RecentEmotes.usedIn(line, sent.emotes)
         update {
             it.copy(
-                sentChat = it.sentChat.adding(target, line),
+                // (Not kept at all while Settings has it off.)
+                sentChat = if (it.messageRecall) it.sentChat.adding(target, line) else it.sentChat,
                 recentEmotes = if (used.isEmpty()) it.recentEmotes else RecentEmotes.after(it.recentEmotes, used).toPersistentList()
             )
         }

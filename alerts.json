@@ -1,0 +1,4 @@
+{
+  "_how": "Edit this file on GitHub to put a message at the top of everyone's home page (phone app, which looks about twice a day). Each alert needs an id and a text (plain, up to 200 characters); a new id shows again to people who dismissed an older one. Optional: link (an https address, opened by an Open button), until (YYYY-MM-DD, the last day it shows), minVersionCode / maxVersionCode (only for those versions). Example: {\"id\": \"maint-11-08\", \"text\": \"Server maintenance tonight from 10pm\", \"until\": \"2026-11-08\"}. Update alerts don't need this file: they come from the releases.",
+  "alerts": []
+}
