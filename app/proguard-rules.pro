@@ -35,3 +35,13 @@
 -keepclassmembers class kotlin.Metadata { *; }
 -dontwarn kotlin.**
 -dontwarn kotlinx.coroutines.**
+
+# ---- Logging ----
+# Release builds keep warnings and errors, for bug reports, but not the
+# chatter: debug, verbose and info calls are taken out, with the strings built
+# for them.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}

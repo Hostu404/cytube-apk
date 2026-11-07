@@ -1,6 +1,7 @@
 package com.cytube.mobile.ui.channel
 
 import android.os.Build
+import android.os.SystemClock
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
@@ -43,6 +44,7 @@ import com.cytube.mobile.net.EmoteStyle
 import com.cytube.mobile.net.TextLook
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * An emote drawn with one of the channel's modifiers (ChatHtml.EmoteFx):
@@ -91,8 +93,8 @@ private fun StyledEmote(
     // 30 times a second (MIN_TICK_MS): smooth enough for these effects, and
     // half the redrawing of following the screen's own 60+ a second, which
     // matters with a chat full of them beside a playing video.
-    val startedAt = rememberSaveable { System.currentTimeMillis() }
-    val now = remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val startedAt = rememberSaveable { SystemClock.uptimeMillis() }
+    val now = remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
     val anim = style.animation
     // Held still (no ticks) while LocalEmotesStill, like a GIF: see HoldStill.
     val holdStill = LocalEmotesStill.current
@@ -101,9 +103,11 @@ private fun StyledEmote(
             if (holdStill) return@LaunchedEffect
             val endsAt = anim.endsAtMs
             while (true) {
+                // Asleep until the next tick, on a grid every emote shares so they
+                // all move in the same frame; then a frame (none while off screen).
+                delay(MIN_TICK_MS - SystemClock.uptimeMillis() % MIN_TICK_MS)
                 withFrameMillis { }
-                val t = System.currentTimeMillis()
-                if (t - now.longValue < MIN_TICK_MS) continue
+                val t = SystemClock.uptimeMillis()
                 now.longValue = t
                 if (endsAt != null && t - startedAt > endsAt) break
             }
@@ -113,7 +117,7 @@ private fun StyledEmote(
         if (anim == null) style.frameAt(0L, heightPx.toFloat(), heightPx.toFloat(), pxScale) else null
     }
     fun frame(width: Float, height: Float): EmoteFrame =
-        still ?: style.frameAt(now.longValue - startedAt, width, height, pxScale)
+        still ?: style.frameAt((now.longValue - startedAt).coerceAtLeast(0L), width, height, pxScale)
 
     val localDensity = LocalDensity.current
     // Blur and drop shadows need Android 12's render effects; on older
@@ -189,21 +193,22 @@ private const val TEXT_TICK_MS = 66L
 internal fun animatedChatText(text: AnnotatedString, fx: List<TextLook>, animate: Boolean = true): AnnotatedString {
     if (fx.isEmpty()) return text
     val ranges = remember(text) { text.getStringAnnotations(ChatHtml.TEXT_FX_TAG, 0, text.length) }
-    val startedAt = rememberSaveable { System.currentTimeMillis() }
-    val now = remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val startedAt = rememberSaveable { SystemClock.uptimeMillis() }
+    val now = remember { mutableLongStateOf(SystemClock.uptimeMillis()) }
     val holdStill = LocalEmotesStill.current || !animate
     LaunchedEffect(fx, holdStill) {
         if (holdStill) return@LaunchedEffect
         val endsAt = fx.map { it.animation?.endsAtMs }.let { ends -> if (null in ends) null else ends.filterNotNull().maxOrNull() }
         while (true) {
+            // As the emotes': asleep until the next tick on a shared grid.
+            delay(TEXT_TICK_MS - SystemClock.uptimeMillis() % TEXT_TICK_MS)
             withFrameMillis { }
-            val t = System.currentTimeMillis()
-            if (t - now.longValue < TEXT_TICK_MS) continue
+            val t = SystemClock.uptimeMillis()
             now.longValue = t
             if (endsAt != null && t - startedAt > endsAt) break
         }
     }
-    val elapsed = if (animate) now.longValue - startedAt else 0L
+    val elapsed = if (animate) (now.longValue - startedAt).coerceAtLeast(0L) else 0L
     return remember(text, fx, elapsed) {
         buildAnnotatedString {
             append(text)

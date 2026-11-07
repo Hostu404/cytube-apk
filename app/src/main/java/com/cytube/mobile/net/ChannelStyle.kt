@@ -1298,7 +1298,9 @@ internal fun worthReading(url: String): Boolean = NOT_BACKGROUNDS.none { url.con
  *  with a class or the like. */
 private val QUALIFIED_PAGE = Regex("""^(?:html[^\s>]*[\s>])?body[^\s>+~]*$|^html[.:#\[][^\s>+~]*$""")
 
-private val CSS_VAR = Regex("""var\(\s*(--[\w-]+)\s*(?:,\s*([^()]*(?:\([^()]*\))?[^()]*))?\)""")
+// Possessive (*+): on CSS with no closing bracket it gives up at once instead of
+// trying every way to split the fallback (time growing with its length squared).
+private val CSS_VAR = Regex("""var\(\s*+(--[\w-]++)\s*+(?:,\s*+([^()]*+(?:\([^()]*+\))?[^()]*+))?\)""")
 
 /** [decls] with var(--name) filled in from [vars] (or the fallback given
  *  in it), a few levels deep. */

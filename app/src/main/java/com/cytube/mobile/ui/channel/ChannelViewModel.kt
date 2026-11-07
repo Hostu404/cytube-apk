@@ -1360,8 +1360,30 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             while (true) {
                 delay(1.seconds)
                 evaluateSync()
+                lookUpNextEarly()
             }
         }
+    }
+
+    /** The playlist item last looked up ahead; see lookUpNextEarly. */
+    private var lookedUpUid = -1
+
+    /**
+     * The next item's stream looked up a minute before this one ends (see
+     * LookAhead), into the resolvers' own cache, so it plays as soon as the
+     * channel moves on: YouTube, Google Drive and the other kinds looked up.
+     * Not in web mode, nor while playing a personal pick.
+     */
+    private fun lookUpNextEarly() {
+        val s = _state.value
+        val media = s.media ?: return
+        if (s.effectiveMode == CompatMode.WEB || s.personalPickUid >= 0) return
+        val time = roomTimeNow(media.seconds) ?: return
+        val next = LookAhead.next(s.playlist, s.currentUid, media.seconds, time, lookedUpUid) ?: return
+        lookedUpUid = next.uid
+        val kind = MediaTypes.playerFor(next.type, hasDirect = false)
+        if (!StreamResolvers.handles(kind) || StreamResolvers.cached(kind, next.mediaId) != null) return
+        viewModelScope.launch { StreamResolvers.resolve(kind, next.mediaId) }
     }
 
     private fun evaluateSync() {
@@ -2129,6 +2151,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     // media/player state. See onMediaChanged/onTimeUpdate/retuneLeaderTicker
     // for the guards that keep the channel's real, still-arriving updates
     // from fighting a personal pick while one is active.
+
+    /** The playlist's Sync switch (phone): the same setting as Settings'
+     *  "stay in sync", so turning it back on rejoins the channel as that does. */
+    fun setSyncEnabled(on: Boolean) {
+        viewModelScope.launch { settingsStore.setSync(on) }
+    }
 
     /**
      * Loads [item] just for this client. Only reachable while sync is off

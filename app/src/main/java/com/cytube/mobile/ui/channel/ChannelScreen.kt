@@ -36,6 +36,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalResources
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -59,6 +61,12 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.outlined.Lightbulb as LightbulbOutlined
 import androidx.compose.material.icons.outlined.StarBorder
+import com.cytube.mobile.net.ChannelUser
+import com.cytube.mobile.net.ChatMessage
+import com.cytube.mobile.net.EmoteSet
+import com.cytube.mobile.net.MediaFrame
+import com.cytube.mobile.net.NameColors
+import com.cytube.mobile.net.PlaylistItem
 import com.cytube.mobile.player.SubtitleOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -73,6 +81,7 @@ import coil.decode.BitmapFactoryDecoder
 import coil.request.ImageRequest
 import androidx.compose.animation.core.snap
 import coil.decode.DataSource
+import kotlinx.collections.immutable.PersistentList
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlin.math.ceil
@@ -244,6 +253,7 @@ fun ChannelScreen(
     // comment on pickPersonal for why this exists and what it does and does
     // not touch.
     val onPersonalPick = remember(vm) { vm::pickPersonal }
+    val onSyncChange = remember(vm) { vm::setSyncEnabled }
     val onPlaybackEnded = remember(vm) { vm::onPlaybackEnded }
     val onPlaybackStall = remember(vm) { vm::onPlaybackStall }
     val onQueueLink = remember(vm) { vm::queueLink }
@@ -436,7 +446,7 @@ fun ChannelScreen(
     // onto a physically portrait phone would read as a genuine rotation and
     // reset fullscreen = false right as the effect above forces it true.
     val configuration = LocalConfiguration.current
-    var lastOrientation by remember { mutableStateOf(configuration.orientation) }
+    var lastOrientation by remember { mutableIntStateOf(configuration.orientation) }
 
     LaunchedEffect(configuration.orientation, isInPictureInPicture) {
         if (isTv) return@LaunchedEffect
@@ -641,7 +651,16 @@ fun ChannelScreen(
             // squeezed in alongside a still-showing video.
             if (tvShowingChat) {
                 TvChatView(
-                    state = state,
+                    channel = state.channel,
+                    connection = state.connection,
+                    emotes = state.emotes,
+                    localUser = state.localUser,
+                    messages = state.messages,
+                    nameColors = state.nameColors,
+                    player = state.player,
+                    showEmotes = state.showEmotes,
+                    subtitles = state.subtitles,
+                    users = state.users,
                     onSendChat = onSendChat,
                     chatOverlayOn = chatOverlayOn,
                     onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
@@ -652,7 +671,8 @@ fun ChannelScreen(
             }
             if (tvShowingPlaylist) {
                 TvPlaylistView(
-                    state = state,
+                    personalPickUid = state.personalPickUid,
+                    playlist = state.playlist,
                     onPersonalPick = onPersonalPick,
                     onExit = { tvShowingPlaylist = false },
                     modifier = Modifier.fillMaxSize()
@@ -666,7 +686,10 @@ fun ChannelScreen(
         // native playback failure was a silent black screen with no offer
         // to fall back to WebView.
         PlaybackDialogs(
-            state = state,
+            compatOffer = state.compatOffer,
+            needsPassword = state.needsPassword,
+            passwordWasWrong = state.passwordWasWrong,
+            playbackOffer = state.playbackOffer,
             vm = vm,
             passwordDraft = passwordDraft,
             onPasswordDraftChange = { passwordDraft = it },
@@ -686,7 +709,14 @@ fun ChannelScreen(
     if (fullscreen || isInPictureInPicture) {
         FullscreenPlayer(
             inPip = isInPictureInPicture,
-            state = state,
+            emotes = state.emotes,
+            media = state.media,
+            messages = state.messages,
+            nicoEmotesOnly = state.nicoEmotesOnly,
+            nicoSpeed = state.nicoSpeed,
+            player = state.player,
+            showEmotes = state.showEmotes,
+            unreadPm = state.unreadPm,
             controlsVisible = controlsVisible,
             onToggleControls = { controlsVisible = !controlsVisible },
             onExit = { fullscreen = false },
@@ -1185,6 +1215,7 @@ fun ChannelScreen(
                     syncEnabled = state.syncEnabled,
                     personalPickUid = state.personalPickUid,
                     onPersonalPick = onPersonalPick,
+                    onSyncChange = onSyncChange,
                     // Phone only: TV has its own playlist view and returns
                     // before this layout (a text box here would be a D-pad
                     // trap there, like the search box once was).
@@ -1230,7 +1261,10 @@ fun ChannelScreen(
     }
 
     PlaybackDialogs(
-        state = state,
+        compatOffer = state.compatOffer,
+        needsPassword = state.needsPassword,
+        passwordWasWrong = state.passwordWasWrong,
+        playbackOffer = state.playbackOffer,
         vm = vm,
         passwordDraft = passwordDraft,
         onPasswordDraftChange = { passwordDraft = it },
@@ -1249,7 +1283,10 @@ fun ChannelScreen(
  */
 @Composable
 private fun PlaybackDialogs(
-    state: ChannelUiState,
+    compatOffer: String?,
+    needsPassword: Boolean,
+    passwordWasWrong: Boolean,
+    playbackOffer: String?,
     vm: ChannelViewModel,
     passwordDraft: String,
     onPasswordDraftChange: (String) -> Unit,
@@ -1261,7 +1298,7 @@ private fun PlaybackDialogs(
     // sync, fullscreen and the Nico overlay all working exactly as they were
     // a moment ago. This dialog is for the case that actually costs
     // something: dropping the native socket for the whole CyTube page.
-    state.playbackOffer?.let { reason ->
+    playbackOffer?.let { reason ->
         AlertDialog(
             onDismissRequest = vm::declinePlaybackOffer,
             title = { Text("Playback isn't working natively") },
@@ -1275,7 +1312,7 @@ private fun PlaybackDialogs(
         )
     }
 
-    state.compatOffer?.let { reason ->
+    compatOffer?.let { reason ->
         AlertDialog(
             onDismissRequest = vm::declineCompatOffer,
             title = { Text("Can't play natively") },
@@ -1289,13 +1326,13 @@ private fun PlaybackDialogs(
         )
     }
 
-    if (state.needsPassword) {
+    if (needsPassword) {
         AlertDialog(
             onDismissRequest = onBack,
             title = { Text("Channel password") },
             text = {
                 Column {
-                    if (state.passwordWasWrong) {
+                    if (passwordWasWrong) {
                         Text(
                             "That password was not accepted.",
                             color = MaterialTheme.colorScheme.error,
@@ -1380,7 +1417,10 @@ private fun ChannelBackdrop(
     // Decoded no wider than the screen, which is as wide as the strip: a
     // huge photo is scaled down (quicker to decode), a pattern is kept at
     // its own size. Loading starts at once, not after the first layout.
-    val screenWidthPx = with(localDensity) { LocalConfiguration.current.screenWidthDp.dp.roundToPx() }
+    // (The window's width once it's laid out; the display's until then.)
+    val windowWidth = LocalWindowInfo.current.containerSize.width
+    val displayWidth = LocalResources.current.displayMetrics.widthPixels
+    val screenWidthPx = if (windowWidth > 0) windowWidth else displayWidth
     val request = remember(backdrop.url, screenWidthPx) {
         ImageRequest.Builder(context)
             .data(backdrop.url)
@@ -1977,7 +2017,16 @@ private fun backendNote(state: ChannelUiState): String {
  */
 @Composable
 private fun TvChatView(
-    state: ChannelUiState,
+    channel: String,
+    connection: ConnectionState,
+    emotes: EmoteSet,
+    localUser: String?,
+    messages: PersistentList<ChatMessage>,
+    nameColors: NameColors,
+    player: MediaTypes.Player,
+    showEmotes: Boolean,
+    subtitles: SubtitleOptions,
+    users: PersistentList<ChannelUser>,
     onSendChat: (String) -> Unit,
     chatOverlayOn: Boolean,
     onToggleChatOverlay: () -> Unit,
@@ -1990,8 +2039,8 @@ private fun TvChatView(
     val chatInputFocusRequester = remember { FocusRequester() }
     var nicoFocused by remember { mutableStateOf(false) }
     var ccFocused by remember { mutableStateOf(false) }
-    val ccAvailable = state.subtitles.available &&
-        state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+    val ccAvailable = subtitles.available &&
+        player != com.cytube.mobile.net.MediaTypes.Player.WEB
     // Whether CC is where focus is (or its menu, opened from it): set when
     // it gains focus, cleared only when Nico or the chat bar does, so that
     // focus moving into the menu, or the button's removal clearing focus,
@@ -2067,7 +2116,7 @@ private fun TvChatView(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                state.channel,
+                channel,
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -2079,7 +2128,7 @@ private fun TvChatView(
             ) {
             if (ccAvailable) {
                 TvSubtitleButton(
-                    options = state.subtitles,
+                    options = subtitles,
                     onSelect = onSelectSubtitle,
                     focusRequester = ccFocusRequester,
                     onFocused = { ccFocused = it },
@@ -2164,14 +2213,14 @@ private fun TvChatView(
         // nothing else TV-specific to hide here and no separate
         // implementation to keep in sync with the phone one.
         ChatPanel(
-            messages = state.messages,
-            canSend = state.connection == ConnectionState.CONNECTED,
-            showEmotes = state.showEmotes,
-            emotes = state.emotes,
+            messages = messages,
+            canSend = connection == ConnectionState.CONNECTED,
+            showEmotes = showEmotes,
+            emotes = emotes,
             onSend = onSendChat,
-            highlightName = state.localUser,
-            users = state.users,
-            nameColors = state.nameColors,
+            highlightName = localUser,
+            users = users,
+            nameColors = nameColors,
             modifier = Modifier.weight(1f).fillMaxWidth(),
             // No D-pad interaction with individual messages on TV — the
             // list stays pinned to the latest message and is never a focus
@@ -2302,7 +2351,8 @@ private fun TvSubtitleButton(
  */
 @Composable
 private fun TvPlaylistView(
-    state: ChannelUiState,
+    personalPickUid: Int,
+    playlist: PersistentList<PlaylistItem>,
     onPersonalPick: (com.cytube.mobile.net.PlaylistItem) -> Unit,
     onExit: () -> Unit,
     modifier: Modifier = Modifier
@@ -2323,7 +2373,7 @@ private fun TvPlaylistView(
     // Focusing the first row instead means the keyboard only appears when the
     // user deliberately navigates Up into search — exactly when they want it.
     LaunchedEffect(Unit) {
-        if (state.playlist.isNotEmpty()) {
+        if (playlist.isNotEmpty()) {
             runCatching { firstRowFocusRequester.requestFocus() }
         } else {
             // Nothing to scroll to — search is the only focusable thing here.
@@ -2331,9 +2381,9 @@ private fun TvPlaylistView(
         }
     }
 
-    val filtered = remember(state.playlist, query) {
-        if (query.isBlank()) state.playlist
-        else state.playlist.filter { it.title.contains(query, ignoreCase = true) }
+    val filtered = remember(playlist, query) {
+        if (query.isBlank()) playlist
+        else playlist.filter { it.title.contains(query, ignoreCase = true) }
     }
 
     Surface(
@@ -2427,7 +2477,7 @@ private fun TvPlaylistView(
         if (filtered.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(
-                    if (state.playlist.isEmpty()) "The playlist is empty."
+                    if (playlist.isEmpty()) "The playlist is empty."
                     else "No matches for \"$query\".",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2445,7 +2495,7 @@ private fun TvPlaylistView(
                 itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { idx, item ->
                     val personallyResolvable =
                         com.cytube.mobile.net.MediaTypes.canResolveIndependently(item.type)
-                    val isPick = item.uid == state.personalPickUid
+                    val isPick = item.uid == personalPickUid
                     var rowFocused by remember { mutableStateOf(false) }
                     Row(
                         Modifier
@@ -2514,7 +2564,14 @@ private fun TvPlaylistView(
 @Composable
 private fun FullscreenPlayer(
     inPip: Boolean,
-    state: ChannelUiState,
+    emotes: EmoteSet,
+    media: MediaFrame?,
+    messages: PersistentList<ChatMessage>,
+    nicoEmotesOnly: Boolean,
+    nicoSpeed: Float,
+    player: MediaTypes.Player,
+    showEmotes: Boolean,
+    unreadPm: UnreadPm?,
     controlsVisible: Boolean,
     onToggleControls: () -> Unit,
     onExit: () -> Unit,
@@ -2525,8 +2582,8 @@ private fun FullscreenPlayer(
 ) {
     Box(
         Modifier.fillMaxSize().background(Color.Black)
-            .pointerInput(state.player) {
-                if (state.player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
+            .pointerInput(player) {
+                if (player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
                     // EmbedSurface's WebView handles touch across its whole
                     // surface for its own scrolling/zoom/link taps, the same
                     // way PlayerView's controller owns part of its area — see
@@ -2561,12 +2618,12 @@ private fun FullscreenPlayer(
             // site — this has no on/off control of its own; that lives
             // solely in the TopAppBar, above the video.
             NekoChatOverlay(
-                messages = state.messages,
-                showEmotes = state.showEmotes,
-                emotes = state.emotes,
+                messages = messages,
+                showEmotes = showEmotes,
+                emotes = emotes,
                 state = nekoState,
-                emotesOnly = state.nicoEmotesOnly,
-                speed = state.nicoSpeed
+                emotesOnly = nicoEmotesOnly,
+                speed = nicoSpeed
             )
         }
 
@@ -2583,7 +2640,7 @@ private fun FullscreenPlayer(
                         Icon(Icons.Default.FullscreenExit, contentDescription = "Exit fullscreen", tint = Color.White)
                     }
                     Text(
-                        state.media?.title.orEmpty(),
+                        media?.title.orEmpty(),
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
@@ -2595,7 +2652,7 @@ private fun FullscreenPlayer(
 
         // Stays up regardless of the auto-hiding controls: it's the only sign
         // of a new PM while chat is off screen.
-        if (!inPip) state.unreadPm?.let { unread ->
+        if (!inPip) unreadPm?.let { unread ->
             Surface(
                 onClick = onOpenPm,
                 shape = RoundedCornerShape(50),

@@ -3,6 +3,7 @@ package com.cytube.mobile.ui.channel
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.fadeIn
@@ -37,6 +38,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Mood
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.SyncDisabled
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.Saver
@@ -81,6 +84,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Density
+import androidx.core.net.toUri
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableList
@@ -799,14 +803,14 @@ internal fun openInBrowser(context: Context, url: String) {
     // chat message or a channel's MOTD. Only ever hand the system a plain
     // web link; anything else (a scheme registered by some other installed
     // app, tel:, sms:, market:, etc.) gets dropped rather than launched.
-    val scheme = Uri.parse(url).scheme?.lowercase()
+    val scheme = url.toUri().scheme?.lowercase()
     if (scheme != "http" && scheme != "https") {
         Log.w("CyTube", "Refusing to open link with untrusted scheme: $scheme")
         return
     }
     runCatching {
         context.startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            Intent(Intent.ACTION_VIEW, url.toUri())
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
     }.onFailure { Log.w("CyTube", "No handler for chat link") }
@@ -873,12 +877,12 @@ fun NekoChatOverlay(
     showEmotes: Boolean,
     emotes: EmoteSet,
     state: NekoOverlayState,
+    modifier: Modifier = Modifier,
     /** Settings' "Nico chat: emotes only": each comment flies just its
      *  emotes, and one with none doesn't fly. */
     emotesOnly: Boolean = false,
     /** Settings' "Nico speed": 2 crosses in half the time, 0.5 in twice. */
     speed: Float = 1f,
-    modifier: Modifier = Modifier
 ) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val density = LocalDensity.current
@@ -957,7 +961,7 @@ fun NekoChatOverlay(
                     state.wakeSignal.receive()
                     continue
                 }
-                val now = System.currentTimeMillis()
+                val now = SystemClock.uptimeMillis()
                 val widths = currentWidthCache
                 val waiting = state.pending.map { msg ->
                     val widthPx = widths.getOrPut(msg.seq) {
@@ -1025,7 +1029,7 @@ data class FlyingComment(
     val lane: Int,
     val widthPx: Float,
     val durationMs: Int,
-    /** System.currentTimeMillis() when it set off — so a comment that's
+    /** SystemClock.uptimeMillis() when it set off — so a comment that's
      *  drawn afresh (switching in or out of fullscreen, rotating) carries on
      *  from where it had got to instead of starting again from the right. */
     val spawnAtMs: Long
@@ -1151,7 +1155,7 @@ private fun FlyingCommentItem(
     // otherwise one wider than estimated (CJK text, emoji) was removed with
     // its end still on screen.
     fun progressNow(): Float =
-        ((System.currentTimeMillis() - comment.spawnAtMs).toFloat() / comment.durationMs).coerceIn(0f, 1f)
+        ((SystemClock.uptimeMillis() - comment.spawnAtMs).toFloat() / comment.durationMs).coerceIn(0f, 1f)
     var progress by remember(comment.id) { mutableFloatStateOf(progressNow()) }
     LaunchedEffect(comment.id) {
         while (true) {
@@ -1215,7 +1219,7 @@ private fun EmotePicker(
     // Paging keeps the working set small and lets a search narrow it further
     // — resets whenever the filter text changes, so a new search starts from
     // its own first page rather than wherever scrolling had gotten to.
-    var visibleCount by remember(query) { mutableStateOf(EMOTE_PAGE_SIZE) }
+    var visibleCount by remember(query) { mutableIntStateOf(EMOTE_PAGE_SIZE) }
     val page = remember(shown, visibleCount) { shown.take(visibleCount) }
     val tilePx = with(LocalDensity.current) { 48.dp.roundToPx() }.coerceAtLeast(1)
 
@@ -1372,12 +1376,12 @@ private fun ChatRow(
     msg: ChatMessage,
     /** The name's colour; see chatNameColor. */
     nameColor: Color,
+    modifier: Modifier = Modifier,
     /** Whether its text whose colour changes (a channel's rainbow) changes
      *  here; see animatedChatText. */
     animateText: Boolean = true,
     /** Straight after the same person's last message: no name or time. */
     continuesGroup: Boolean,
-    modifier: Modifier = Modifier,
     showEmotes: Boolean,
     emotes: EmoteSet,
     onUsernameClick: (String) -> Unit,
@@ -1590,6 +1594,10 @@ fun PlaylistPanel(
      *  they're the channel's actual current item, which a personal pick by
      *  definition isn't. */
     onPersonalPick: (PlaylistItem) -> Unit = {},
+    /** Phone only: a small Sync switch by the search box, turning the
+     *  channel's sync (Settings' "stay in sync") off to pick a video of your
+     *  own, and back on to rejoin the channel. Null for none. */
+    onSyncChange: ((Boolean) -> Unit)? = null,
     /** Show the "add a video" box — see ChannelUiState.canQueue. */
     canAdd: Boolean = false,
     /** Also offer "Play next" — see ChannelUiState.canQueueNext. */
@@ -1622,15 +1630,35 @@ fun PlaylistPanel(
             EmptyPanel("The playlist is empty.", Modifier.weight(1f))
             return@Column
         }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            placeholder = { Text("Search playlist") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-        )
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search playlist") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.weight(1f)
+            )
+            if (onSyncChange != null) {
+                Spacer(Modifier.width(8.dp))
+                FilterChip(
+                    selected = syncEnabled,
+                    onClick = { onSyncChange(!syncEnabled) },
+                    label = { Text(if (syncEnabled) "Sync" else "Sync off") },
+                    leadingIcon = {
+                        Icon(
+                            if (syncEnabled) Icons.Default.Sync else Icons.Default.SyncDisabled,
+                            contentDescription = null,
+                            modifier = Modifier.size(FilterChipDefaults.IconSize)
+                        )
+                    }
+                )
+            }
+        }
 
         if (filtered.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {

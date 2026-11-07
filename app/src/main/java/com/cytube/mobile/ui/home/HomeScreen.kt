@@ -18,7 +18,6 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -38,10 +37,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -141,9 +137,7 @@ fun HomeScreen(
                     Row(Modifier.padding(start = 12.dp)) {
                         Text("CyTube APK", fontWeight = FontWeight.SemiBold, modifier = Modifier.alignByBaseline())
                         Spacer(Modifier.width(8.dp))
-                        if (BuildConfig.VERSION_NAME.startsWith("apustaja")) {
-                            ApustajaName(Modifier.alignByBaseline())
-                        } else if (BuildConfig.VERSION_NAME.startsWith("classless")) {
+                        if (BuildConfig.VERSION_NAME.startsWith("classless")) {
                             ClasslessName(Modifier.alignByBaseline())
                         } else {
                             Text(
@@ -550,63 +544,6 @@ private fun EmptyResults(query: String) {
 }
 
 /**
- * The version's name for apustaja, with its own Apu behind it: his blue
- * jumper just behind the name's first three letters, "apu", his face above
- * them. Those letters are white, in front of the jumper, so they read on it;
- * the rest is the version's usual grey. Apu is drawn behind, so the title's
- * row keeps its size, and smoothed down from his bigger picture (mipmaps)
- * rather than left jagged at this size.
- */
-@Composable
-private fun ApustajaName(modifier: Modifier = Modifier) {
-    val apu = ImageBitmap.imageResource(R.drawable.apu_apustaja)
-    remember(apu) { apu.asAndroidBitmap().setHasMipMap(true) }
-    val style = MaterialTheme.typography.labelSmall
-    val name = BuildConfig.VERSION_NAME
-    val text = remember(name) {
-        buildAnnotatedString {
-            withStyle(SpanStyle(color = Color.White)) { append(name.take(3)) }
-            append(name.drop(3))
-        }
-    }
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    Text(
-        text,
-        style = style,
-        color = maFaint(),
-        onTextLayout = { layout = it },
-        modifier = modifier.drawBehind {
-            val l = layout ?: return@drawBehind
-            if (l.layoutInput.text.length < 3) return@drawBehind
-            // "apu": from its first letter's left to its third's right.
-            val left = l.getBoundingBox(0).left
-            val right = l.getBoundingBox(2).right
-            // Sized so the solid part of his jumper, where the letters sit,
-            // is just as wide as them, and centred on them; his feet at the
-            // bottom of the p.
-            val side = (right - left) / (JUMPER_RIGHT - JUMPER_LEFT)
-            val x = (left + right) / 2f - side * (JUMPER_LEFT + JUMPER_RIGHT) / 2f
-            val bottom = l.firstBaseline + style.fontSize.toPx() * DESCENDER
-            drawImage(
-                apu,
-                dstOffset = IntOffset(x.roundToInt(), (bottom - side).roundToInt()),
-                dstSize = IntSize(side.roundToInt(), side.roundToInt()),
-                filterQuality = FilterQuality.High
-            )
-        }
-    )
-}
-
-/** Where his blue jumper is solid across the picture, at the height the
- *  letters sit at (its lower third), as shares of its width. */
-private const val JUMPER_LEFT = 0.038f
-private const val JUMPER_RIGHT = 0.762f
-
-/** How far a p reaches below the line in the app's font (Roboto), as a
- *  share of its size. */
-private const val DESCENDER = 0.21f
-
-/**
  * The version's name for classless: its usual small grey text, wearing the top hat. The hat sits on
  * the first "l" as on a peg, its brim just on the l's tip (found from the letter itself, so it fits
  * whatever the phone's font), clear of the letters either side. Drawn over the bar, the title's row
@@ -615,8 +552,7 @@ private const val DESCENDER = 0.21f
  */
 @Composable
 internal fun ClasslessName(modifier: Modifier = Modifier, versionName: String = BuildConfig.VERSION_NAME) {
-    val hat = ImageBitmap.imageResource(R.drawable.classless_hat)
-    remember(hat) { hat.asAndroidBitmap().setHasMipMap(true) }
+    val hat = ImageBitmap.imageResource(R.drawable.classless_hat).withMipMaps()
     val style = MaterialTheme.typography.labelSmall
     val lit = if (maIsLight()) null else HAT_LIT
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -665,3 +601,8 @@ private val HAT_LIT = ColorFilter.colorMatrix(
 
 /** The search bar's hint (which, with cot on, Prince takes letters from). */
 private const val SEARCH_HINT = "Search channels…"
+
+/** This picture, set up once to be smoothed down from its full size when it's drawn small
+ *  (mipmaps) rather than left jagged. */
+@Composable
+private fun ImageBitmap.withMipMaps(): ImageBitmap = remember(this) { apply { asAndroidBitmap().setHasMipMap(true) } }

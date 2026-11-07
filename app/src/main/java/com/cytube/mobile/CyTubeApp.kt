@@ -4,21 +4,18 @@ import android.app.Application
 import android.os.Build
 import coil.ImageLoader
 import coil.ImageLoaderFactory
-import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.disk.DiskCache
 import coil.intercept.Interceptor
 import coil.memory.MemoryCache
 import coil.request.ImageResult
 import com.cytube.mobile.di.Graph
+import com.cytube.mobile.di.separate
 import com.cytube.mobile.player.BandwidthEstimate
 import com.cytube.mobile.player.YouTubeResolver
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import okhttp3.ConnectionPool
-import okhttp3.Dispatcher
-import java.util.concurrent.TimeUnit
 
 /**
  * Emotes are the same handful of small images repeated thousands of times in a
@@ -41,26 +38,12 @@ class CyTubeApp : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         val isTv = isTvDevice(this)
         return ImageLoader.Builder(this)
-            // A client built off Graph.http, not Graph.http itself — but
-            // deliberately NOT sharing its Dispatcher/ConnectionPool.
-            // `newBuilder()` copies those by reference by default, which
-            // would mean emote-image fetches compete for the same request
-            // slots as the video player's own byte-fetching
-            // (NativePlayerHandle's OkHttpDataSource uses Graph.mediaHttp,
-            // which shares Graph.http's Dispatcher). A chat-heavy channel's
-            // backlog can fire a burst of emote image requests right as a
-            // video is loading, and a Dispatcher's limits (64 total, 5 per
-            // host by default) apply across every client sharing it — so
-            // this one gets its own, and a busy chat can't delay the
-            // player. Everything else (timeouts, no cookie jar — see the
-            // User-Agent comment below) still comes from Graph.http.
+            // Its own request slots and connections (see separate), so a busy
+            // chat's burst of emote images can't delay the video loading. The
+            // rest (timeouts, no cookie jar: see the User-Agent comment below)
+            // still comes from Graph.http.
             .okHttpClient {
-                Graph.http.newBuilder()
-                    .dispatcher(Dispatcher().apply {
-                        maxRequests = 64
-                        maxRequestsPerHost = 20
-                    })
-                    .connectionPool(ConnectionPool(20, 5, TimeUnit.MINUTES))
+                Graph.http.separate(maxRequestsPerHost = 20, idleConnections = 20)
                     // This header is specific to fetching third-party emote
                     // images, not something the login flow, channel-index
                     // scrape, or socket handshake want touched. Some emote
@@ -94,23 +77,10 @@ class CyTubeApp : Application(), ImageLoaderFactory {
             }
             .components {
                 add(OneFetchPerImage())
-                // Animated GIF emotes in chat and emote picker (CyTube channels
-                // use a lot of them). Registered globally on the loader.
-                //
-                // GifDecoder is registered ahead of ImageDecoderDecoder on
-                // every API level, not just <28. Coil tries factories in
-                // registration order and uses the first one that claims the
-                // source; platform ImageDecoder (API 28+) silently produces a
-                // *static* first frame for a subset of real-world GIFs (odd
-                // frame-disposal/timing metadata some emote packs use) rather
-                // than failing, so it was winning the claim and quietly
-                // de-animating them. GifDecoder's own Movie-based decoder is
-                // the one CyTube's own web client effectively relies on and
-                // handles that metadata correctly, so it goes first; that
-                // also means it now handles GIFs on all API levels. Non-GIF
-                // formats (PNG/WebP/etc.) aren't claimed by GifDecoder, so
-                // ImageDecoderDecoder still decodes those, on API 28+.
-                add(GifDecoder.Factory())
+                // GIF emotes: Android's own decoder where it animates them, the
+                // old Movie one where it can't (see EmoteGifDecoder). Other
+                // formats (PNG, WebP, animated WebP) go to ImageDecoder on 9+.
+                add(EmoteGifDecoder.Factory())
                 if (Build.VERSION.SDK_INT >= 28) add(ImageDecoderDecoder.Factory())
             }
             .allowRgb565(true)

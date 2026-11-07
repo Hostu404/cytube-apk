@@ -14,6 +14,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -118,3 +119,15 @@ object Graph {
 
     private const val MEDIA_CACHE_MAX_BYTES = 1_024L * 1024L * 1024L // 1GB
 }
+
+/**
+ * A client built off this one with request slots and connections of its own,
+ * for bursts of side requests (emote images, YouTube lookups) that mustn't hold
+ * up the video's own fetching. `newBuilder()` alone would share this client's
+ * Dispatcher, whose limits (64 requests at once, 5 per host by default) apply
+ * across every client sharing it.
+ */
+fun OkHttpClient.separate(maxRequestsPerHost: Int = 5, idleConnections: Int = 5): OkHttpClient.Builder =
+    newBuilder()
+        .dispatcher(Dispatcher().apply { this.maxRequestsPerHost = maxRequestsPerHost })
+        .connectionPool(ConnectionPool(idleConnections, 5, TimeUnit.MINUTES))

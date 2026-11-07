@@ -2,7 +2,6 @@ package com.cytube.mobile.ui.channel
 
 import android.annotation.SuppressLint
 import android.graphics.Color
-import android.net.Uri
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
@@ -16,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 /**
  * Compatibility View: the real CyTube channel page, whole.
  *
@@ -30,7 +31,8 @@ import androidx.compose.ui.viewinterop.AndroidView
  * for anything the native path genuinely cannot do, and for that it needs the
  * actual page: the channel's own layout, its scripts, its chat, its player.
  */
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "MissingOnRenderProcessGone") // both its WebViewClients do handle
+// onRenderProcessGone, which lint doesn't see in an object expression
 @Composable
 fun WebCompatView(
     baseUrl: String,
@@ -39,13 +41,13 @@ fun WebCompatView(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val homeHost = remember(baseUrl) { Uri.parse(baseUrl).host }
+    val homeHost = remember(baseUrl) { baseUrl.toUri().host }
     var isLoaded by remember(baseUrl, channel) { mutableStateOf(false) }
     // Bumped when the WebView's renderer process dies, so key() below
     // builds a fresh WebView and reloads the page — before, the dead one
     // was just removed and nothing replaced it, leaving a black area until
     // the user switched mode or channel.
-    var rendererGeneration by remember { mutableStateOf(0) }
+    var rendererGeneration by remember { mutableIntStateOf(0) }
     val alpha by animateFloatAsState(
         targetValue = if (isLoaded) 1f else 0f,
         animationSpec = tween(durationMillis = 200),

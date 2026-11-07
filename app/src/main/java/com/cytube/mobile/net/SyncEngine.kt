@@ -559,12 +559,14 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
         private const val MAX_SERVERS = 50
         val shared = LeadMemory()
 
+        private val HOST_IN_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#:@]+@)?([^/?#:]+)")
+        private val NUMERIC_HOST = Regex("^[0-9.]+$")
+
         /** "rr3---sn-abc.googlevideo.com" and "rr5---sn-xyz.googlevideo.com"
          *  are the same service: keyed on the last two labels of the host. */
         fun serverOf(url: String): String {
-            val host = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#:@]+@)?([^/?#:]+)")
-                .find(url)?.groupValues?.get(2)?.lowercase() ?: return ""
-            if (Regex("^[0-9.]+$").matches(host)) return host
+            val host = HOST_IN_URL.find(url)?.groupValues?.get(2)?.lowercase() ?: return ""
+            if (NUMERIC_HOST.matches(host)) return host
             return host.split('.').takeLast(2).joinToString(".")
         }
     }

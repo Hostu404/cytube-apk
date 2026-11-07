@@ -1,7 +1,7 @@
 package com.cytube.mobile.ui.channel
 
+import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.LayoutInflater
@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import android.app.ActivityManager
 import android.content.Context
+import androidx.core.net.toUri
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -87,6 +88,8 @@ import com.cytube.mobile.webview.sameSite
 import com.cytube.mobile.webview.streamableSdkHtml
 import com.cytube.mobile.webview.vimeoSdkHtml
 import com.cytube.mobile.webview.youtubeIframeApiHtml
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -195,7 +198,7 @@ fun PlayerSurface(
      *  ChannelViewModel.onPlaybackStall's quality step-down, which only
      *  acts on NATIVE items (the only ones with a quality list). */
     onStall: ((Long) -> Unit)? = null,
-    /** Which entry of the current item's MediaFrame.direct the NATIVE
+    /** Which entry of the current item's `MediaFrame.direct` the NATIVE
      *  backend should load — see NativePlayerHandle.load. Meaningless
      *  for every other player type, which never reads CyTube's own quality
      *  list to begin with. */
@@ -363,6 +366,8 @@ private class EmbedPlayerHandle(
  * key() on the item (see PlayerSurface), so one instance only ever shows one
  * item.
  */
+@SuppressLint("SetJavaScriptEnabled", "MissingOnRenderProcessGone") // the players are web pages; both its
+// WebViewClients do handle onRenderProcessGone, which lint doesn't see in an object expression
 @Composable
 private fun EmbedSurface(
     media: MediaFrame,
@@ -375,7 +380,7 @@ private fun EmbedSurface(
     val currentOnHandle by rememberUpdatedState(onHandle)
     val currentOnFailed by rememberUpdatedState(onFailed)
     val currentOnEnded by rememberUpdatedState(onEnded)
-    val embedHost = remember(embedSrc) { Uri.parse(embedSrc).host }
+    val embedHost = remember(embedSrc) { embedSrc.toUri().host }
     val type = media.type
     val id = media.id
     // The provider pages report their own failures (EMBED_ERROR_SENTINEL);
@@ -591,13 +596,11 @@ private fun EmbedSurface(
                     }
 
                     override fun onRenderProcessGone(
-                        view: WebView?,
-                        detail: RenderProcessGoneDetail?
+                        view: WebView,
+                        detail: RenderProcessGoneDetail
                     ): Boolean {
-                        view?.let {
-                            (it.parent as? ViewGroup)?.removeView(it)
-                            it.destroy()
-                        }
+                        (view.parent as? ViewGroup)?.removeView(view)
+                        view.destroy()
                         // Nothing is left on screen, so say so rather than
                         // sit on a black area (ChannelViewModel offers
                         // Compatibility View), and stop the ViewModel
@@ -640,7 +643,7 @@ private fun EmbedSurface(
                                     currentTime = json.optDouble("currentTime", 0.0),
                                     buffering = json.optBoolean("buffering", false)
                                 )
-                            } catch (ignored: Throwable) {}
+                            } catch (_: Throwable) {}
                             isReady = true
                             return true
                         }
@@ -695,8 +698,8 @@ private fun EmbedSurface(
             it.stopLoading()
             it.webViewClient = object : WebViewClient() {
                 override fun onRenderProcessGone(
-                    view: WebView?,
-                    detail: RenderProcessGoneDetail?
+                    view: WebView,
+                    detail: RenderProcessGoneDetail
                 ): Boolean = true
             }
             it.webChromeClient = null
@@ -846,7 +849,7 @@ private fun ExoSurface(
                 context: Context,
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink? {
+            ): AudioSink {
                 // A fixed 750 ms audio buffer: within the 0.5–2 s range the
                 // old size-scaling setters (deprecated in Media3 1.11) gave.
                 val bufferSizeProvider = DefaultAudioTrackBufferSizeProvider.Builder()
@@ -987,7 +990,7 @@ private fun ExoSurface(
     }
     LaunchedEffect(exo) {
         while (true) {
-            delay(1_000L)
+            delay(1.seconds)
             val buffered = runCatching { exo.bufferedPosition }.getOrDefault(0L)
             downloadWatch.sample(SystemClock.elapsedRealtime(), MediaBytes.total(), buffered)
         }
@@ -1017,9 +1020,6 @@ private fun ExoSurface(
         // buffering while it reconnects is the error's, not a slow
         // connection's, and mustn't count as a stall (lower the quality).
         var recoveringFromError = false
-        // MediaBytes.total() when the current stall began, to tell a slow
-        // connection (some data still arriving) from no connection at all.
-        var stallBytesAtStart = 0L
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 reachedReadyOnce = false
@@ -1094,7 +1094,7 @@ private fun ExoSurface(
                     Log.i("CyTubePlayer", "retrying the same source in ${wait}ms (attempt $transientRetries)")
                     retryJob?.cancel()
                     retryJob = scope.launch {
-                        delay(wait)
+                        delay(wait.milliseconds)
                         handle.retry(rejoinLive = detail == "ERROR_CODE_BEHIND_LIVE_WINDOW")
                     }
                     return
@@ -1174,6 +1174,8 @@ private fun ExoSurface(
                             }
                         }
                     }
+                    // ENDED is dealt with above; IDLE is before anything's loaded.
+                    Player.STATE_IDLE, Player.STATE_ENDED -> {}
                     Player.STATE_BUFFERING -> {
                         // Only mid-playback rebuffers count as stalls. The initial buffer-up
                         // (discovering container index/moov atom and seeking to start position on
@@ -1201,13 +1203,15 @@ private fun ExoSurface(
                         ) {
                             val start = SystemClock.elapsedRealtime()
                             stallStartedAtMs = start
-                            stallBytesAtStart = MediaBytes.total()
+                            // What had arrived when this stall began, to tell a slow connection
+                            // (some data still arriving) from no connection at all.
+                            val stallBytesAtStart = MediaBytes.total()
                             stallJob?.cancel()
                             stallJob = scope.launch {
                                 recentStalls.removeAll { start - it.first > RECENT_STALL_WINDOW_MS }
                                 val priorStalled = recentStalls.sumOf { it.second }
                                 val threshold = (STALL_TRIGGER_MS - priorStalled).coerceIn(500L, STALL_TRIGGER_MS)
-                                delay(threshold)
+                                delay(threshold.milliseconds)
                                 if (stallStartedAtMs == start && MediaBytes.total() == stallBytesAtStart) {
                                     // Not one byte since it stalled: the
                                     // connection is down, not slow, and a
@@ -1323,6 +1327,8 @@ private fun ExoSurface(
                 // Inflated from XML (player_view.xml) because a TextureView
                 // surface can only be chosen there; it's what the
                 // quality-switch freeze frame's capture needs.
+                // No parent to give it yet: AndroidView adds it, with layout params of its own.
+                @SuppressLint("InflateParams")
                 val view = LayoutInflater.from(ctx)
                     .inflate(R.layout.player_view, null, false) as PlayerView
                 view.apply {
