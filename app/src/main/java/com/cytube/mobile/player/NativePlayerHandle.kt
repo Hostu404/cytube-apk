@@ -1,6 +1,7 @@
 package com.cytube.mobile.player
 
 import android.content.Context
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
@@ -15,8 +16,10 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.text.Cue
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.util.Util
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -167,8 +170,14 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     private fun applySubtitlePreference(files: List<TextTrackSource>, sameItem: Boolean) {
         loadGeneration++
-        externalCaptions.reset(files, sameItem)
-        val showFile = externalCaptions.selected < 0 && pickExternalOnLoad()
+        // The subtitle files are extras: this runs inside load() and
+        // loadUrl(), between handing ExoPlayer the item and preparing it, so
+        // anything going wrong with them must not stop the video itself.
+        val showFile = runCatching {
+            externalCaptions.reset(files, sameItem)
+            externalCaptions.selected < 0 && pickExternalOnLoad()
+        }.onFailure { Log.w("CyTubePlayer", "subtitle files skipped: ${it.message}", it) }
+            .getOrDefault(false)
         val builder = exo.trackSelectionParameters.buildUpon()
             .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .setSelectUndeterminedTextLanguage(false)
@@ -267,14 +276,14 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * Every byte fetched for playback — whether the raw source straight off
      * CyTube's playlist (load()) or a resolver-supplied URL (loadUrl()) —
      * goes through this: Graph.mediaHttp instead of the default HTTP stack
-     * (a longer read timeout tuned for large files, see Graph.kt), wrapped
-     * in a disk cache so a SyncEngine hard-seek or a rejoin landing
-     * somewhere already downloaded doesn't re-fetch it over the network.
-     * FLAG_IGNORE_CACHE_ON_ERROR: a cache write failure (e.g. disk pressure)
-     * should fall back to reading straight from upstream, not take playback
-     * down with it.
+     * (a longer read timeout tuned for large files, see Graph.kt), read
+     * through this run's disk cache when [cached] (see Graph.prepareMediaCache
+     * and mediaDataSourceFactory), so what was just downloaded is read back
+     * from disk rather than fetched again: a seek back (on TV, which keeps no
+     * back buffer, every one), playing on after a dropped connection, a
+     * quality switch back, video coming back on after the background.
      */
-    private fun cachedDataSourceFactory(headers: Map<String, String> = emptyMap()): DataSource.Factory {
+    private fun dataSourceFactory(headers: Map<String, String>, cached: Boolean): DataSource.Factory {
         val userAgent = if (headers.containsKey("User-Agent")) {
             headers["User-Agent"]?.ifBlank { null }
         } else {
@@ -286,22 +295,32 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             .setUserAgent(userAgent)
             .setTransferListener(MediaBytes.counting(bandwidthMeter))
             .apply { if (requestHeaders.isNotEmpty()) setDefaultRequestProperties(requestHeaders) }
-        return CacheDataSource.Factory()
-            .setCache(Graph.mediaCache(appContext))
-            .setUpstreamDataSourceFactory(upstream)
-            .setFlags(
-                CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or
-                CacheDataSource.FLAG_IGNORE_CACHE_FOR_UNSET_LENGTH_REQUESTS
-            )
+        return mediaDataSourceFactory(upstream, if (cached) Graph.mediaCache(appContext) else null)
     }
 
+    /**
+     * Whether what [media] streams from [uri] is read through the disk
+     * cache: progressive files only (a plain file, a YouTube, Drive,
+     * Streamable or PeerTube one), decided as Media3 itself decides how to
+     * play it. Not a live stream, which never reads the same bytes twice.
+     * Nor HLS or DASH: their playlists come through here too, and change
+     * under the same address while a stream is live, so one that's live
+     * though its item says otherwise (a custom manifest's say-so) would be
+     * stuck on its first playlist for the rest of the run.
+     */
+    private fun cacheable(media: MediaFrame, uri: String, mimeType: String?): Boolean =
+        !media.isLivestream && media.type != "hl" &&
+            Util.inferContentTypeForUriAndMimeType(Uri.parse(uri), mimeType?.ifBlank { null }) == C.CONTENT_TYPE_OTHER
+
+    /** [cached]: see [cacheable]. */
     private fun createMediaSourceFactory(
-        headers: Map<String, String> = emptyMap()
+        headers: Map<String, String> = emptyMap(),
+        cached: Boolean
     ): DefaultMediaSourceFactory {
         val extractorsFactory = DefaultExtractorsFactory()
             .setConstantBitrateSeekingEnabled(true)
             .setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES)
-        return DefaultMediaSourceFactory(cachedDataSourceFactory(headers), extractorsFactory)
+        return DefaultMediaSourceFactory(dataSourceFactory(headers, cached), extractorsFactory)
     }
 
     /** [media]'s own subtitle files (a manifest's textTracks, Google
@@ -323,7 +342,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      * resolvers used to look the URL up in the first place — enough of a
      * mismatch for the CDN to 403 it even though the URL itself is valid. Using
      * an OkHttpClient built off the SAME one (Graph.mediaHttp, layered on
-     * Graph.http — see cachedDataSourceFactory) for the actual byte fetch
+     * Graph.http — see dataSourceFactory) for the actual byte fetch
      * keeps the path consistent. [headers] carries whatever the resolver says
      * the stream itself needs (e.g. Referer) on top of that.
      */
@@ -367,7 +386,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 // response just has a blank title to show for what's playing.
                 .setMediaMetadata(MediaMetadata.Builder().setTitle(media.title).build())
                 .build()
-            val mediaSource = createMediaSourceFactory(headers).createMediaSource(item)
+            val mediaSource = createMediaSourceFactory(headers, cached = cacheable(media, url, mimeType)).createMediaSource(item)
             exo.setPlaybackSpeed(1f)
             // Seed the real starting position instead of always beginning at 0 —
             // see the comment on startPositionMs() below for why this matters.
@@ -437,11 +456,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
                 "separateAudio=${media.audioTracks.size} subtitles=${media.textTracks.size}")
             exo.setPlaybackSpeed(1f)
             // Routed through the same cached, longer-timeout data source as
-            // loadUrl() above (see cachedDataSourceFactory) rather than
+            // loadUrl() above (see dataSourceFactory) rather than
             // exo.setMediaItem()'s default HTTP stack — this is the main native
             // playback path (a straight "fi" file off CyTube's own playlist),
             // exactly where a large file's buffering has to hold up.
-            val factory = createMediaSourceFactory()
+            val factory = createMediaSourceFactory(cached = cacheable(media, source?.link ?: media.id, source?.contentType))
             lastLoad = media to qualityIndex
             val mediaSource = withSeparateAudio(factory, factory.createMediaSource(item), media)
             // Seed the real starting position instead of always beginning at 0 —
@@ -668,7 +687,13 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
         return if (forwardPastBuffer) SeekParameters.NEXT_SYNC else SeekParameters.EXACT
     }
 
-    override suspend fun currentTimeSeconds(): Double = withContext(Dispatchers.Main) {
+    // Main.immediate, not Main: the callers (SyncEngine's checks, the leader
+    // clock) are already on the main thread, in viewModelScope, and plain
+    // Main would post each read to the back of the main thread's queue,
+    // reading the position later than the room's time it's compared with —
+    // the busier the screen (a chat flood), the later. Called from anywhere
+    // else, it still goes to the main thread, where ExoPlayer has to be read.
+    override suspend fun currentTimeSeconds(): Double = withContext(Dispatchers.Main.immediate) {
         if (isReleased) 0.0
         else runCatching { (exo.currentPosition / 1000.0).coerceAtLeast(0.0) }.getOrDefault(0.0)
     }
@@ -768,3 +793,27 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             "${media.type}:${media.id}:$url"
     }
 }
+
+/**
+ * [upstream], read through [cache] when there is one (without, straight from
+ * [upstream]).
+ *
+ * FLAG_IGNORE_CACHE_ON_ERROR: once the cache fails while a video plays (a
+ * full disk, say), that video leaves it out from then on. The read it failed
+ * still fails, and ExoPlayer tries that load again, now straight from the
+ * network, rather than the video failing over and over. Deliberately not
+ * FLAG_IGNORE_CACHE_FOR_UNSET_LENGTH_REQUESTS ("for legacy reasons only", in
+ * Media3's words): Media3 asks for a progressive file with no length, so with
+ * that flag nothing was ever cached at all. A progressive stream whose length
+ * the server doesn't give (a live one) is still kept out, by Media3 itself.
+ */
+@OptIn(UnstableApi::class)
+internal fun mediaDataSourceFactory(upstream: DataSource.Factory, cache: Cache?): DataSource.Factory =
+    if (cache == null) {
+        upstream
+    } else {
+        CacheDataSource.Factory()
+            .setCache(cache)
+            .setUpstreamDataSourceFactory(upstream)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }

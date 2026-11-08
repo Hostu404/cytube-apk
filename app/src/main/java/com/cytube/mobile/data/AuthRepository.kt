@@ -82,7 +82,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
 
     /** Decrypted copy of the remembered session, read from [store] once
      *  rather than decrypted again on every call (ChannelScreen asks for it
-     *  during composition in Compatibility View). Kept in step with the
+     *  each time Compatibility View opens). Kept in step with the
      *  store by [login] and [logout], the only writers. */
     @Volatile private var persistedSession: Session? = null
     @Volatile private var persistedLoaded = false

@@ -1,6 +1,7 @@
 package com.cytube.mobile.player
 
 import android.util.Log
+import com.cytube.mobile.di.Graph
 import com.cytube.mobile.di.separate
 import com.cytube.mobile.net.TextTrackSource
 import kotlinx.coroutines.Dispatchers
@@ -51,19 +52,30 @@ object YouTubeResolver {
 
     @Volatile private var initialised = false
 
+    /**
+     * Sets NewPipeExtractor (a singleton) up with an HTTP client it can use;
+     * it must be, once, before any extraction. Done by [resolve] itself, off
+     * the main thread, the first time a lookup needs it, rather than as the
+     * app starts: most runs never look a YouTube video up at all, and the
+     * ones that do shouldn't pay for it before the first screen. Once only,
+     * from whichever thread gets there first.
+     */
     fun init(http: OkHttpClient) {
         if (initialised) return
-        // Its own request slots and connections (see separate): one lookup
-        // fires a burst of requests (player page, config, cipher) just as the
-        // player is starting, and that mustn't hold up the video's own fetching.
-        val newPipeHttp = http.separate()
-            .followRedirects(true)
-            .cookieJar(SessionCookieJar())
-            .build()
-        // Use an explicit localization to bypass region-specific consent walls
-        // and ensure a consistent response format for the extractor.
-        NewPipe.init(OkHttpDownloader(newPipeHttp), Localization("en", "US"), ContentCountry("US"))
-        initialised = true
+        synchronized(this) {
+            if (initialised) return
+            // Its own request slots and connections (see separate): one lookup
+            // fires a burst of requests (player page, config, cipher) just as the
+            // player is starting, and that mustn't hold up the video's own fetching.
+            val newPipeHttp = http.separate()
+                .followRedirects(true)
+                .cookieJar(SessionCookieJar())
+                .build()
+            // Use an explicit localization to bypass region-specific consent walls
+            // and ensure a consistent response format for the extractor.
+            NewPipe.init(OkHttpDownloader(newPipeHttp), Localization("en", "US"), ContentCountry("US"))
+            initialised = true
+        }
     }
 
     // YouTube video IDs are typically base64url-like (letters, digits,
@@ -93,6 +105,7 @@ object YouTubeResolver {
         }
         cache.get(videoId)?.let { return@withContext Result.success(it) }
         runCatching {
+            init(Graph.http)
             val info = StreamInfo.getInfo(
                 ServiceList.YouTube,
                 "https://www.youtube.com/watch?v=$videoId"

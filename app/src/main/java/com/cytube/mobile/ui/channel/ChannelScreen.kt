@@ -616,13 +616,17 @@ fun ChannelScreen(
             ) {
                 if (state.player == MediaTypes.Player.WEB) {
                     // Left running when the app goes to the background,
-                    // like the other players.
-                    WebCompatView(
-                        baseUrl = Graph.BASE_URL,
-                        channel = channel,
-                        authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    // like the other players. Once the saved login has been
+                    // looked up (see rememberSavedLogin).
+                    val login = rememberSavedLogin()
+                    if (login != null) {
+                        WebCompatView(
+                            baseUrl = Graph.BASE_URL,
+                            channel = channel,
+                            authCookie = login.cookie,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 } else {
                     playerContent()
                 }
@@ -1109,14 +1113,18 @@ fun ChannelScreen(
                     // Compatibility View is the whole CyTube page again, not a
                     // player surface. It owns the channel entirely while it is up.
                     // Left running when the app goes to the background,
-                    // like the other players.
-                    WebCompatView(
-                        baseUrl = Graph.BASE_URL,
-                        channel = channel,
-                        authCookie = Graph.auth(context).savedSession()?.authCookie,
-                        reloadKey = webReloads,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    // like the other players. Once the saved login has been
+                    // looked up (see rememberSavedLogin).
+                    val login = rememberSavedLogin()
+                    if (login != null) {
+                        WebCompatView(
+                            baseUrl = Graph.BASE_URL,
+                            channel = channel,
+                            authCookie = login.cookie,
+                            reloadKey = webReloads,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 } else {
                     playerContent()
                     // The Niconico comments over this video are drawn by
@@ -1448,6 +1456,27 @@ private fun WithMessages(
     content: @Composable (PersistentList<ChatMessage>) -> Unit
 ) {
     content(messages.value)
+}
+
+/** The saved login as Compatibility View needs it: its cookie, or null
+ *  for none. */
+private class SavedLogin(val cookie: String?)
+
+/**
+ * The saved login, looked up off the main thread: the first Graph.auth()
+ * call opens the Keystore, and the first savedSession() decrypts what's
+ * saved (see Graph.auth), and on a cold start straight into a channel kept
+ * in Compatibility View, this can be the first of both. Null until it's
+ * known; the page waits for it, as it hands the cookie to WebView once, as
+ * it opens, and would otherwise open logged out.
+ */
+@Composable
+private fun rememberSavedLogin(): SavedLogin? {
+    val context = LocalContext.current
+    val login by produceState<SavedLogin?>(initialValue = null) {
+        value = SavedLogin(withContext(Dispatchers.IO) { Graph.auth(context).savedSession()?.authCookie })
+    }
+    return login
 }
 
 /**

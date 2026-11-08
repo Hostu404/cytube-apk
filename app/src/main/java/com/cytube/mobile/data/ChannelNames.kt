@@ -10,3 +10,12 @@ package com.cytube.mobile.data
  * quietly drift apart from one another.
  */
 val CHANNEL_NAME_REGEX = Regex("^[A-Za-z0-9_-]{1,100}$")
+
+/**
+ * [name] as CyTube itself has it: the server lowercases every channel name
+ * it's given (user.js handleJoinChannel, server.js getChannel), so "/r/Foo"
+ * and "/r/foo" are one channel. Everything the app keys on a channel
+ * (favourites, recents, its compatibility mode, picture and recent emotes)
+ * goes through this, so one channel isn't kept as two.
+ */
+fun canonicalChannelName(name: String): String = name.lowercase()

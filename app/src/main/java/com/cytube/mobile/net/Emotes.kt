@@ -113,13 +113,17 @@ class EmoteSet private constructor(
             if (hit) return true
         }
         if (hashed.isEmpty()) return false
+        // Split where apply() splits (TOKEN), or this and apply() disagree
+        // about where a word ends: Kotlin's isWhitespace() counted a
+        // non-breaking space as a space, TOKEN didn't, so an emote followed
+        // by one was found here and then never substituted.
         var start = 0
         val len = message.length
         while (start < len) {
-            while (start < len && message[start].isWhitespace()) start++
+            while (start < len && isEmoteSpace(message[start])) start++
             if (start >= len) break
             var end = start
-            while (end < len && !message[end].isWhitespace()) end++
+            while (end < len && !isEmoteSpace(message[end])) end++
             if (hashed.containsKey(message.substring(start, end))) return true
             start = end
         }
@@ -170,7 +174,9 @@ class EmoteSet private constructor(
         private val NEXT_ID = java.util.concurrent.atomic.AtomicLong(1)
         val EMPTY = EmoteSet(emptyList(), emptyMap(), emptyList())
 
-        private val TOKEN = Regex("[^\\s]+")
+        /** A run of anything but whitespace, as the website's own
+         *  `/[^\s]+/g` finds one (see [EMOTE_SPACES]). */
+        private val TOKEN = Regex("[^$EMOTE_SPACES]+")
 
         /**
          * Image hosts anyone can upload to, whose folders ("attachments",
@@ -210,7 +216,9 @@ class EmoteSet private constructor(
             if (segments.size < 2 || segments[0].isBlank()) return null
             return parsed.host.lowercase() + "/" + segments[0]
         }
-        private val WHITESPACE = Regex("\\s+")
+        /** Whitespace as the website means it when it sorts out names that
+         *  can't be looked up word by word (`/\s/` in loadEmotes). */
+        private val WHITESPACE = Regex("[$EMOTE_SPACES]")
 
         fun from(emotes: List<Emote>, effects: EmoteEffects = EmoteEffects.NONE): EmoteSet {
             // Each name once, and only emotes that can be shown. CyTube's
@@ -257,6 +265,23 @@ class EmoteSet private constructor(
             """<img class="channel-emote" title="${sanitize(e.name)}" src="${sanitize(e.image)}">"""
     }
 }
+
+/**
+ * The characters that separate one word from the next for emotes, as a
+ * regex character class: exactly JavaScript's `\s`, which is what the
+ * website's own emote code splits on (TAB, LF, VT, FF, CR, the space
+ * separators — the non-breaking space among them — LS, PS and the BOM).
+ * Java's `\s` leaves out the non-breaking space, and Kotlin's isWhitespace()
+ * takes in more, so neither is used here: every split and test in this file
+ * goes through this one definition (and [isEmoteSpace], its match).
+ */
+internal const val EMOTE_SPACES =
+    """\t\n\x0B\f\r\x20\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF"""
+
+/** Whether [c] is one of [EMOTE_SPACES]. */
+internal fun isEmoteSpace(c: Char): Boolean =
+    c == ' ' || c in '\t'..'\r' || c == '\u00A0' || c == '\u1680' || c in '\u2000'..'\u200A' ||
+        c == '\u2028' || c == '\u2029' || c == '\u202F' || c == '\u205F' || c == '\u3000' || c == '\uFEFF'
 
 /**
  * A time limit for running the channel's own emote patterns. They're

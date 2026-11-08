@@ -170,27 +170,24 @@ class SettingsStore(private val context: Context) {
 
     // ---- per-channel state ----
 
+    // Channel names canonical (see canonicalChannelName), as they're saved
+    // now; an older save could have the same channel in two spellings.
     val favourites: Flow<List<String>> =
-        prefs.map { (it[FAVOURITES] ?: emptySet()).sorted() }.distinctUntilChanged()
+        prefs.map { favouritesOf(it[FAVOURITES]) }.distinctUntilChanged()
 
     val recents: Flow<List<String>> =
-        prefs.map { p ->
-            (p[RECENTS] ?: "").split('\n').filter { it.isNotBlank() }
-        }.distinctUntilChanged()
+        prefs.map { recentsOf(it[RECENTS]) }.distinctUntilChanged()
 
     /** False when it couldn't be saved, and so didn't change. */
     suspend fun toggleFavourite(channel: String) = save { p ->
-        val cur = (p[FAVOURITES] ?: emptySet()).toMutableSet()
-        if (!cur.add(channel)) cur.remove(channel)
-        p[FAVOURITES] = cur
+        p[FAVOURITES] = toggledFavourites(p[FAVOURITES].orEmpty(), channel)
     }
 
     /** Waterfall: joining a channel bumps it to the front, and the list is
      *  capped at [MAX_RECENTS] — the oldest entry falls off the end rather
      *  than the list growing without bound. */
     suspend fun noteVisit(channel: String) = save { p ->
-        val cur = (p[RECENTS] ?: "").split('\n').filter { it.isNotBlank() && it != channel }
-        p[RECENTS] = (listOf(channel) + cur).take(MAX_RECENTS).joinToString("\n")
+        p[RECENTS] = recentsAfterVisit(p[RECENTS], channel, MAX_RECENTS)
     }
 
     suspend fun clearRecents() = save { p -> p[RECENTS] = "" }
@@ -209,23 +206,22 @@ class SettingsStore(private val context: Context) {
         p[IGNORED] = if (ignored && name.isNotBlank()) rest + name.trim() else rest
     }
 
-    fun channelCompat(channel: String): Flow<CompatMode?> =
-        prefs.map { p -> p[compatKey(channel)]?.let { CompatMode.parse(it) } }.distinctUntilChanged()
+    // ---- per channel, kept in a file of their own (see ChannelData) ----
 
-    suspend fun setChannelCompat(channel: String, v: CompatMode?) = save { p ->
-        if (v == null) p.remove(compatKey(channel)) else p[compatKey(channel)] = v.name
-    }
+    private val channels by lazy { ChannelData(context) }
+
+    fun channelCompat(channel: String): Flow<CompatMode?> = channels.compat(channel)
+
+    /** False when it couldn't be saved, and so didn't change. */
+    suspend fun setChannelCompat(channel: String, v: CompatMode?) = channels.setCompat(channel, v)
 
     /** The picture last shown behind this channel's top bar (see
      *  ChannelHeader), as ChannelBackground.encode() text: shown the moment
      *  the channel opens, before the channel has sent anything. Null when
      *  there's none yet. */
-    fun channelBackdrop(channel: String): Flow<String?> =
-        prefs.map { p -> p[backdropKey(channel)] }.distinctUntilChanged()
+    fun channelBackdrop(channel: String): Flow<String?> = channels.backdrop(channel)
 
-    suspend fun setChannelBackdrop(channel: String, v: String?) = save { p ->
-        if (v == null) p.remove(backdropKey(channel)) else p[backdropKey(channel)] = v
-    }
+    suspend fun setChannelBackdrop(channel: String, v: String?) = channels.setBackdrop(channel, v)
 
     private companion object {
         const val TAG = "CyTubeSettings"
@@ -248,11 +244,31 @@ class SettingsStore(private val context: Context) {
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")
-
-        fun compatKey(channel: String) = stringPreferencesKey("compat:$channel")
-        fun backdropKey(channel: String) = stringPreferencesKey("backdrop:$channel")
     }
 }
+
+/** The favourites as saved, as shown: each channel once, canonical, sorted. */
+internal fun favouritesOf(saved: Set<String>?): List<String> =
+    saved.orEmpty().map(::canonicalChannelName).distinct().sorted()
+
+/** The favourites [saved] with [channel] added, or taken out when it's
+ *  there in any spelling; every name canonical. */
+internal fun toggledFavourites(saved: Set<String>, channel: String): Set<String> {
+    val all = saved.mapTo(LinkedHashSet(), ::canonicalChannelName)
+    val wanted = canonicalChannelName(channel)
+    if (!all.remove(wanted)) all.add(wanted)
+    return all
+}
+
+/** The recent channels as saved (a line each, newest first), as shown:
+ *  each once, canonical. */
+internal fun recentsOf(saved: String?): List<String> =
+    saved.orEmpty().split('\n').filter { it.isNotBlank() }.map(::canonicalChannelName).distinct()
+
+/** The recent channels after a visit to [channel]: it first, then the rest
+ *  as they were, at most [max]. */
+internal fun recentsAfterVisit(saved: String?, channel: String, max: Int): String =
+    (listOf(canonicalChannelName(channel)) + recentsOf(saved)).distinct().take(max).joinToString("\n")
 
 /** The guest name as it's kept: no spaces at either end, at most 20
  *  characters. The Account screen compares with this to save only a real

@@ -65,7 +65,7 @@ object GoogleDriveResolver {
      * all for these formatStreamingData URLs — only the metadata lookup
      * carries a Referer. Matching that is what fixed it — confirmed live.
      * The blank User-Agent here means "don't send the app's browser-style
-     * one" (see NativePlayerHandle.cachedDataSourceFactory); OkHttp then
+     * one" (see NativePlayerHandle.dataSourceFactory); OkHttp then
      * sends its own default "okhttp/…" User-Agent.
      *
      * Used by both the player surface and ChannelViewModel's background load,

@@ -9,6 +9,7 @@ import android.util.Log
 import com.cytube.mobile.AppVisibility
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
 import com.cytube.mobile.data.CompatMode
+import com.cytube.mobile.data.canonicalChannelName
 import com.cytube.mobile.data.DEFAULT_LIGHTS_DOWN_DIM
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.RecentEmotesStore
@@ -31,6 +32,7 @@ import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.collections.immutable.toPersistentList
 import kotlinx.collections.immutable.toPersistentSet
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -569,7 +571,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      *  a long session can't grow this without limit. */
     private val seenChatFingerprints = LinkedHashSet<String>()
 
-    fun start(channel: String) {
+    fun start(requested: String) {
         if (joined) return
         // The channel name reaches here from user typing (Home's direct-entry
         // box already validates it) but ALSO from a cytu.be/r/<name> deep link
@@ -579,13 +581,17 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         // so an unvalidated name could path-traverse within cytu.be's own
         // routes. Reject anything outside CyTube's own channel-name charset
         // before it reaches a single network call.
-        if (!CHANNEL_NAME_REGEX.matches(channel)) {
+        if (!CHANNEL_NAME_REGEX.matches(requested)) {
             _state.value = _state.value.copy(
                 connection = ConnectionState.FAILED,
-                statusMessage = "\"$channel\" isn't a valid channel name"
+                statusMessage = "\"$requested\" isn't a valid channel name"
             )
             return
         }
+        // As the server has it, whatever spelling it was opened with, so
+        // everything kept for it (favourite, recents, its mode, picture and
+        // emotes, the poll votes) is kept once (see canonicalChannelName).
+        val channel = canonicalChannelName(requested)
         joined = true
         _state.value = _state.value.copy(channel = channel)
         restoreLeadMemory()
@@ -1815,6 +1821,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         (player as? NativePlayerHandle)?.setVideoEnabled(!background)
         if (background) {
             saveLeadMemory()   // the process may not come back
+            flushRecentEmotes()   // likewise
             loadWhileInBackground()
             return
         }
@@ -2131,9 +2138,44 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         if (used.isNotEmpty() && sent.channel.isNotEmpty()) {
-            val recent = _state.value.recentEmotes
-            viewModelScope.launch { recentEmotesStore.save(sent.channel, recent) }
+            saveRecentEmotesSoon(sent.channel, _state.value.recentEmotes)
         }
+    }
+
+    /** Recent emotes not saved yet, with their channel; see saveRecentEmotesSoon. */
+    private var unsavedRecentEmotes: Pair<String, List<String>>? = null
+    private var recentEmotesSaveJob: Job? = null
+
+    /**
+     * Saves the recent emotes a moment after the last change rather than
+     * with every message: someone chatting away with emotes changes them
+     * with every line, and each save writes the channel file again. Whatever
+     * is still unsaved is saved at once when the app goes out of sight or
+     * the channel is left (see flushRecentEmotes).
+     */
+    private fun saveRecentEmotesSoon(channel: String, names: List<String>) {
+        unsavedRecentEmotes = channel to names
+        recentEmotesSaveJob?.cancel()
+        recentEmotesSaveJob = viewModelScope.launch {
+            delay(RECENT_EMOTES_SAVE_DELAY_MS.milliseconds)
+            recentEmotesSaveJob = null
+            flushRecentEmotes()
+        }
+    }
+
+    /**
+     * Saves any recent emotes not saved yet, in the app's own scope, so the
+     * channel being left (this ViewModel going) doesn't cut it short.
+     * Started undispatched, so the save is handed to the store right here,
+     * in the order they were made: a later save can't overtake an earlier
+     * one on the way and leave the older list saved.
+     */
+    private fun flushRecentEmotes() {
+        val (channel, names) = unsavedRecentEmotes ?: return
+        unsavedRecentEmotes = null
+        recentEmotesSaveJob?.cancel()
+        recentEmotesSaveJob = null
+        Graph.appScope.launch(start = CoroutineStart.UNDISPATCHED) { recentEmotesStore.save(channel, names) }
     }
 
     // ---- private messages ----
@@ -2723,6 +2765,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         saveLeadMemory()
+        flushRecentEmotes()
         syncTicker?.cancel()
         syncJob?.cancel()
         leaderTicker?.cancel()
@@ -2733,6 +2776,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         /** See runChatPump. */
         const val CHAT_BATCH_INTERVAL_MS = 100L
+        /** See saveRecentEmotesSoon. */
+        const val RECENT_EMOTES_SAVE_DELAY_MS = 5_000L
         const val CHAT_BATCH_MAX = 200
         const val KEY_OPEN_LEADS = "open_leads"
         /** Once per process; see restoreLeadMemory. */

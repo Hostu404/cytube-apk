@@ -12,7 +12,6 @@ import coil.request.ImageResult
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.di.separate
 import com.cytube.mobile.player.BandwidthEstimate
-import com.cytube.mobile.player.YouTubeResolver
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -26,13 +25,19 @@ class CyTubeApp : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
-        // NewPipeExtractor is a singleton and must be initialised once, before
-        // any extraction, with an HTTP client it can use.
-        YouTubeResolver.init(Graph.http)
         // Starts listening for real bandwidth samples straight away, so the
         // first video's downloads count towards the next item's starting
         // quality (see ChannelViewModel.resolveInitialQualityIndex).
         BandwidthEstimate.init(this)
+        // Both of these in the background, so the first screen doesn't wait
+        // for them. The HTTP client: building it sets up TLS (a moment on a
+        // slow TV stick). The home screen only uses it off the main thread,
+        // and a channel, opened after that, finds it ready. (NewPipe, which
+        // used to be set up with it here, is now set up at the first YouTube
+        // lookup: see YouTubeResolver.init.) And this run's media cache,
+        // ready before the first video (see Graph.prepareMediaCache).
+        Graph.prepareHttp()
+        Graph.prepareMediaCache(this)
     }
 
     override fun newImageLoader(): ImageLoader {

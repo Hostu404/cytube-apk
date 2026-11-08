@@ -211,9 +211,7 @@ class CyTubeClient(
         s.on("cancelNeedPassword") { emit(CyTubeEvent.PasswordAccepted) }
         s.on("partitionChange") { emit(CyTubeEvent.PartitionChanged) }
         s.on("kick") { args ->
-            val reason = (args.firstOrNull() as? JSONObject)?.optString("reason")
-                ?: args.firstOrNull()?.toString() ?: "Kicked"
-            emit(CyTubeEvent.Kicked(reason))
+            emit(CyTubeEvent.Kicked(KickReason.of(args.firstOrNull())))
         }
         obj(s, "errorMsg") { CyTubeEvent.ErrorMessage(it.optString("msg", "Unknown error")) }
         obj(s, "validationError") { CyTubeEvent.ErrorMessage(it.optString("msg", "Validation error")) }

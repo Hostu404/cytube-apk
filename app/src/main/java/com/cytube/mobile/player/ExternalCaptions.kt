@@ -15,6 +15,7 @@ import com.cytube.mobile.di.Graph
 import com.cytube.mobile.net.TextTrackSource
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
@@ -165,7 +166,17 @@ internal class ExternalCaptions(
     }
 
     private fun fetch(track: TextTrackSource, gen: Int, attempt: Int) {
-        val request = Request.Builder().url(track.url)
+        // An address OkHttp can't take (a manifest's typo: a space in the
+        // host, a port out of range) goes the way of one that can't be
+        // fetched. Request.Builder.url(String) would throw instead, out of
+        // select() and, with CC on, out of the video's own load, which then
+        // never started.
+        val url = track.url.toHttpUrlOrNull()
+        if (url == null) {
+            failed(track, gen, attempt, "not a usable address", retryable = false)
+            return
+        }
+        val request = Request.Builder().url(url)
             .header("User-Agent", Graph.DEFAULT_USER_AGENT)
             .build()
         val newCall = subtitleHttp.newCall(request)

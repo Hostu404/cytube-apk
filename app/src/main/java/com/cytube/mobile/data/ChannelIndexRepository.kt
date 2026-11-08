@@ -26,9 +26,13 @@ import org.jsoup.Jsoup
  * what the CyTube homepage itself offers alongside the list.
  */
 class ChannelIndexRepository(
-    private val http: OkHttpClient,
+    /** Asked for only when the list is fetched, which is off the main
+     *  thread: the app's client may not be built yet (see Graph.channelIndex). */
+    private val http: () -> OkHttpClient,
     private val baseUrl: String
 ) {
+    constructor(http: OkHttpClient, baseUrl: String) : this({ http }, baseUrl)
+
     data class PublicChannel(
         val name: String,
         val pageTitle: String,
@@ -63,7 +67,7 @@ class ChannelIndexRepository(
                 }
 
                 try {
-                    http.newCall(reqBuilder.build()).execute().use { response ->
+                    http().newCall(reqBuilder.build()).execute().use { response ->
                         if (response.code == 304 && cache.isNotEmpty()) {
                             cachedAt = System.currentTimeMillis()
                             return@withContext cache

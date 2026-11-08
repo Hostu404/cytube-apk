@@ -8,19 +8,68 @@
 # message goes through (the socket connection, its HTML parser and the
 # chat list's collections). Media3 is left out: it's big, and only part of
 # it runs for any one video.
+#
+# The flags on a method: H, hot (compiled ahead of time); S, run while the
+# app starts; P, run after it has. Only the code that opens the app to its
+# home screen is S, and only its classes have lines of their own (L...;),
+# which has them loaded with the app. With everything marked as startup
+# code, as it once was here, Android can't keep the startup code together,
+# which is much of what this is for. What a channel runs is H and P:
+# compiled ahead of time all the same, so the first chat flood is as smooth
+# as the hundredth. Of the libraries, only the parts the app uses; and the
+# screens opened now and then (Settings, Account) are left to be compiled
+# as they're used.
 
-# The app itself.
-Lcom/cytube/mobile/**;
-HSPLcom/cytube/mobile/**->**(**)**
+# ---- Starting up: from launch to the home screen ----
+
+Lcom/cytube/mobile/CyTubeApp*;
+Lcom/cytube/mobile/MainActivity*;
+Lcom/cytube/mobile/AppVisibility*;
+Lcom/cytube/mobile/di/**;
+Lcom/cytube/mobile/data/**;
+Lcom/cytube/mobile/ui/*;
+Lcom/cytube/mobile/ui/theme/**;
+Lcom/cytube/mobile/ui/home/**;
+Lcom/cytube/mobile/player/BandwidthEstimate*;
+HSPLcom/cytube/mobile/CyTubeApp*->**(**)**
+HSPLcom/cytube/mobile/MainActivity*->**(**)**
+HSPLcom/cytube/mobile/AppVisibility*->**(**)**
+HSPLcom/cytube/mobile/di/**->**(**)**
+HSPLcom/cytube/mobile/data/**->**(**)**
+HSPLcom/cytube/mobile/ui/*->**(**)**
+HSPLcom/cytube/mobile/ui/theme/**->**(**)**
+HSPLcom/cytube/mobile/ui/home/**->**(**)**
+HSPLcom/cytube/mobile/player/BandwidthEstimate*->**(**)**
+
+# ---- A channel: its connection, chat and players ----
+
+HPLcom/cytube/mobile/net/**->**(**)**
+HPLcom/cytube/mobile/ui/channel/**->**(**)**
+HPLcom/cytube/mobile/player/**->**(**)**
+HPLcom/cytube/mobile/webview/**->**(**)**
+HPLcom/cytube/mobile/EmoteGifDecoder*->**(**)**
+HPLcom/cytube/mobile/GifFrames*->**(**)**
+HPLcom/cytube/mobile/OneFetchPerImage*->**(**)**
 
 # The chat connection.
-Lio/socket/**;
-HSPLio/socket/**->**(**)**
+HPLio/socket/**->**(**)**
 
-# Chat message HTML.
-Lorg/jsoup/**;
-HSPLorg/jsoup/**->**(**)**
+# HTML: chat messages, and the home page's channel list, through the parser
+# and its selectors. Not jsoup's HTTP client, Cleaner, W3C DOM or Re2j
+# support, none of which the app uses.
+HPLorg/jsoup/Jsoup*->**(**)**
+HPLorg/jsoup/parser/**->**(**)**
+HPLorg/jsoup/nodes/**->**(**)**
+HPLorg/jsoup/select/**->**(**)**
+HPLorg/jsoup/internal/**->**(**)**
+HPLorg/jsoup/helper/Validat*->**(**)**
+HPLorg/jsoup/helper/DataUtil*->**(**)**
+HPLorg/jsoup/helper/Regex*->**(**)**
 
-# The chat, user list and playlist collections.
-Lkotlinx/collections/immutable/**;
-HSPLkotlinx/collections/immutable/**->**(**)**
+# The chat, user list and playlist collections: lists, and the sets the
+# ignore list uses (which keep their order with a hash map).
+HPLkotlinx/collections/immutable/*->**(**)**
+HPLkotlinx/collections/immutable/implementations/immutableList/**->**(**)**
+HPLkotlinx/collections/immutable/implementations/persistentOrderedSet/**->**(**)**
+HPLkotlinx/collections/immutable/implementations/immutableMap/**->**(**)**
+HPLkotlinx/collections/immutable/internal/**->**(**)**

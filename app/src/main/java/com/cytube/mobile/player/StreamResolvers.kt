@@ -37,7 +37,22 @@ object StreamResolvers {
         else -> null
     }
 
-    suspend fun resolve(player: MediaTypes.Player, id: String): Result<ResolvedStream> = when (player) {
+    /** Lookups under way, by player and id; see [resolve]. */
+    private val lookups = SharedLookups<Pair<MediaTypes.Player, String>, Result<ResolvedStream>>(Graph.appScope)
+
+    /**
+     * [id]'s stream. One lookup at a time per item: asked again while it's
+     * being looked up (the player surface and ChannelViewModel's background
+     * load or look-ahead, both after the same item), the second caller gets
+     * the first lookup's answer rather than starting another (see
+     * SharedLookups).
+     */
+    suspend fun resolve(player: MediaTypes.Player, id: String): Result<ResolvedStream> {
+        if (player !in RESOLVED) return Result.failure(IllegalArgumentException("$player has no stream resolver"))
+        return lookups.get(player to id) { lookUp(player, id) }
+    }
+
+    private suspend fun lookUp(player: MediaTypes.Player, id: String): Result<ResolvedStream> = when (player) {
         MediaTypes.Player.NEWPIPE -> YouTubeResolver.resolve(id).map(::youTubeStream)
         MediaTypes.Player.GDRIVE -> GoogleDriveResolver.resolve(Graph.http, id).map { driveStream(it) }
         MediaTypes.Player.STREAMABLE -> StreamableResolver.resolve(Graph.http, id).map { ResolvedStream(it.url, it.mimeType, variant = it.label) }
@@ -47,8 +62,10 @@ object StreamResolvers {
 
     /** Drops a cached stream after playback of it failed, so the next
      *  attempt (rejoining, or the item coming round again) resolves a fresh
-     *  one instead of reusing the dead link until the cache expires. */
+     *  one instead of reusing the dead link until the cache expires. A
+     *  lookup still under way isn't joined either: the next one is new. */
     fun invalidate(player: MediaTypes.Player, id: String) {
+        lookups.forget(player to id)
         when (player) {
             MediaTypes.Player.NEWPIPE -> YouTubeResolver.invalidate(id)
             MediaTypes.Player.GDRIVE -> GoogleDriveResolver.invalidate(id)

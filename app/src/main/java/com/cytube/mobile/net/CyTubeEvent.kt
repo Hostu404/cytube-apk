@@ -1,5 +1,7 @@
 package com.cytube.mobile.net
 
+import org.json.JSONObject
+
 sealed interface CyTubeEvent {
     data object Connected : CyTubeEvent
     data object Disconnected : CyTubeEvent
@@ -100,5 +102,25 @@ object PlaylistPosition {
         is Number -> after.toInt()
         is String -> after.toIntOrNull() ?: END
         else -> END
+    }
+}
+
+/**
+ * What a "kick" frame says, as the notice shows it. The server sends
+ * {reason} (user.js kick), and a moderator's plain "/kick name" leaves the
+ * reason empty (kickban.js joins whatever follows the name): that gets a
+ * sentence of its own rather than an empty notice.
+ */
+internal object KickReason {
+    const val DEFAULT = "You were kicked from the channel."
+
+    fun of(arg: Any?): String {
+        val reason = when (arg) {
+            // isNull as well: Android's optString gives a JSON null as "null".
+            is JSONObject -> if (arg.isNull("reason")) null else arg.optString("reason")
+            null -> null
+            else -> arg.toString()
+        }
+        return reason?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT
     }
 }

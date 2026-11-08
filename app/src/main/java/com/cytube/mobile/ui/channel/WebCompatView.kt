@@ -94,7 +94,13 @@ fun WebCompatView(
                             val url = request.url
                             if (!request.isForMainFrame) return false
                             if (url.host == homeHost) return false
-                            openInBrowser(context, url.toString())
+                            // Only for a tap (a link in the page's chat, say),
+                            // as the embedded players do: the channel's own
+                            // script runs in this page, and a navigation it
+                            // made by itself threw the user out to the
+                            // browser, again and again if it kept at it (on
+                            // TV, closing the app). Either way the page stays.
+                            if (request.hasGesture()) openInBrowser(context, url.toString())
                             return true
                         }
 

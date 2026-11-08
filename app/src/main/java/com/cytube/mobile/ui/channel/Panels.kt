@@ -55,9 +55,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.lerp
@@ -504,24 +502,26 @@ fun ChatPanel(
             state = listState,
             modifier = Modifier.fillMaxSize()
                 // Messages scrolled up past the top edge fade out rather than
-                // ending in a hard cut, which left a sliver of one showing.
-                // Only while there's something above to scroll back to; the
-                // separate layer it needs exists only then.
-                .graphicsLayer {
-                    compositingStrategy = if (listState.canScrollBackward) {
-                        CompositingStrategy.Offscreen
-                    } else {
-                        CompositingStrategy.Auto
-                    }
-                }
+                // ending in a hard cut, which left a sliver of one showing:
+                // the list's own background colour laid over its top edge,
+                // fading to nothing. The chat sits on that colour (the
+                // channel page's, or the TV chat's Surface), so this looks
+                // just like fading the messages themselves out — which
+                // needed the whole list drawn into a layer of its own, again
+                // for every frame in which anything in it changed (each
+                // batch of chat, every frame of every animated emote). Only
+                // while there's something above to scroll back to.
                 .drawWithContent {
                     drawContent()
                     if (listState.canScrollBackward) {
                         val fade = CHAT_TOP_FADE.toPx()
                         drawRect(
-                            Brush.verticalGradient(0f to Color.Transparent, 1f to Color.Black, endY = fade),
-                            size = androidx.compose.ui.geometry.Size(size.width, fade),
-                            blendMode = BlendMode.DstIn
+                            Brush.verticalGradient(
+                                0f to listBackground,
+                                1f to listBackground.copy(alpha = 0f),
+                                endY = fade
+                            ),
+                            size = androidx.compose.ui.geometry.Size(size.width, fade)
                         )
                     }
                 }

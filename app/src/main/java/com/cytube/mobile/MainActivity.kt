@@ -35,6 +35,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.cytube.mobile.data.CHANNEL_NAME_REGEX
+import com.cytube.mobile.data.canonicalChannelName
 import com.cytube.mobile.data.Settings
 import com.cytube.mobile.data.SettingsStore
 import com.cytube.mobile.data.ThemeMode
@@ -151,7 +152,7 @@ class MainActivity : ComponentActivity() {
                         val isTv = remember { isTvDevice(context) }
                         val homeContent: @Composable () -> Unit = {
                             HomeScreen(
-                                onOpenChannel = { nav.navigate("channel/$it") },
+                                onOpenChannel = { nav.navigate("channel/${canonicalChannelName(it)}") },
                                 onOpenLogin = { nav.navigate("login") },
                                 onOpenSettings = { nav.navigate("settings") },
                                 showPrince = settings.cot
@@ -319,13 +320,14 @@ class MainActivity : ComponentActivity() {
     /** `https://cytu.be/r/<channel>` only; validated against CyTube's own
      *  channel-name charset before it's used for anything, the same rule
      *  HomeViewModel's direct-entry box and ChannelViewModel.start() apply —
-     *  this can arrive from any other installed app, not just from typing it. */
+     *  this can arrive from any other installed app, not just from typing it.
+     *  The name as the server has it (see canonicalChannelName). */
     private fun channelFromIntent(intent: Intent?): String? {
         val data = intent?.data ?: return null
         if (data.scheme?.lowercase() != "https" || data.host?.lowercase() != "cytu.be") return null
         val segments = data.pathSegments
         if (segments.size < 2 || segments[0] != "r") return null
-        return segments[1].takeIf { CHANNEL_NAME_REGEX.matches(it) }
+        return segments[1].takeIf { CHANNEL_NAME_REGEX.matches(it) }?.let(::canonicalChannelName)
     }
 
     private companion object {
