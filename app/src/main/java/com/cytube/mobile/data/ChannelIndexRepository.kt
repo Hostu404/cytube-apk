@@ -101,7 +101,9 @@ class ChannelIndexRepository(
                         }
 
                         if (parsed.isNotEmpty()) {
-                            cache = parsed.sortedByDescending { it.userCount }
+                            // Each channel once: the home page keys its list
+                            // on the name, and can't draw one listed twice.
+                            cache = parsed.distinctBy { it.name }.sortedByDescending { it.userCount }
                             cachedAt = System.currentTimeMillis()
                             lastEtag = response.header("ETag")
                             lastModified = response.header("Last-Modified")

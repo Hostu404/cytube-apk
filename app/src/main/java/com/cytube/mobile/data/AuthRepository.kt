@@ -1,11 +1,7 @@
 package com.cytube.mobile.data
 
 import android.content.Context
-import android.content.SharedPreferences
-import android.util.Log
 import android.webkit.CookieManager
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 import com.cytube.mobile.net.CyTubeClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -18,7 +14,6 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
-import java.security.KeyStore
 
 /**
  * Login strategy, and why it is this way.
@@ -35,48 +30,17 @@ import java.security.KeyStore
  * verifies it — no login frame at all.
  *
  * "Remember me" only controls whether the cookie survives a process
- * restart, via EncryptedSharedPreferences — a successful login always
+ * restart, kept encrypted by [AuthStore] — a successful login always
  * counts for the rest of THIS process's lifetime regardless (see
  * inMemorySession below); only the durable copy is conditional.
  */
 class AuthRepository(context: Context, private val http: OkHttpClient, private val baseUrl: String) {
 
-    /** Null only if encrypted storage can't be opened at all, even fresh:
-     *  logins then still work, they just aren't remembered. */
-    private val prefs: SharedPreferences? = openPrefs(context)
-
-    /**
-     * Opening EncryptedSharedPreferences throws when its Keystore key has
-     * gone or no longer matches the file (a Keystore reset, some OS updates,
-     * data restored onto another phone), which would otherwise crash every
-     * launch. The saved login can't be recovered in that state anyway, so
-     * start over with a fresh file and key; the user just logs in again.
-     */
-    private fun openPrefs(context: Context): SharedPreferences? {
-        fun open() = EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE,
-            MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-        return try {
-            open()
-        } catch (e: Exception) {
-            Log.w("CyTubeAuth", "saved login unreadable (${e.javaClass.simpleName}); starting afresh")
-            context.deleteSharedPreferences(PREFS_FILE)
-            runCatching {
-                KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-                    .deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
-            }
-            try {
-                open()
-            } catch (e2: Exception) {
-                Log.w("CyTubeAuth", "encrypted storage unavailable; logins won't be remembered")
-                null
-            }
-        }
-    }
+    /** The remembered login, encrypted with a key kept in the Android
+     *  Keystore. One that can't be read (a Keystore reset, say) reads as
+     *  none and the user logs in again, rather than crashing every launch.
+     *  Opening it can take a moment the first time: see Graph.auth. */
+    private val store: AuthStore = AuthStore.open(context)
 
     data class Session(val name: String, val authCookie: String)
 
@@ -110,19 +74,16 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
     fun savedSession(): Session? {
         inMemorySession?.let { return it }
         if (!persistedLoaded) {
-            val name = prefs?.getString(KEY_NAME, null)
-            val cookie = prefs?.getString(KEY_COOKIE, null)
-            persistedSession = if (name != null && cookie != null) Session(name, cookie) else null
+            persistedSession = store.load()
             persistedLoaded = true
         }
         return persistedSession
     }
 
-    /** Decrypted copy of the remembered session, read from
-     *  EncryptedSharedPreferences once rather than decrypted again on every
-     *  call (ChannelScreen asks for it during composition in Compatibility
-     *  View). Kept in step with prefs by [login] and [logout], the only
-     *  writers. */
+    /** Decrypted copy of the remembered session, read from [store] once
+     *  rather than decrypted again on every call (ChannelScreen asks for it
+     *  during composition in Compatibility View). Kept in step with the
+     *  store by [login] and [logout], the only writers. */
     @Volatile private var persistedSession: Session? = null
     @Volatile private var persistedLoaded = false
 
@@ -145,7 +106,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
         // All done here, not in the background job: a login straight after
         // must not have its new session wiped by this one's clean-up.
         inMemorySession = null
-        prefs?.edit()?.remove(KEY_NAME)?.remove(KEY_COOKIE)?.apply()
+        store.clear()
         persistedSession = null
         persistedLoaded = true
 
@@ -154,7 +115,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
             // WebCompatView shares the auth cookie into Android's WebView
             // CookieManager so the user isn't asked to log in twice there.
             // That store is process-wide and disk-persisted, separate from
-            // the prefs above — left alone, a logged-out user who had ever
+            // the app's own above — left alone, a logged-out user who had ever
             // opened Compatibility View would still be logged in there. Only
             // the auth cookie is expired: other sites' cookies (embedded
             // players) are none of logout's business. Both the host-only
@@ -211,8 +172,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
                     // comment for why the in-memory one can't also be gated on it.
                     inMemorySession = session
                     if (remember) {
-                        prefs?.edit()?.putString(KEY_NAME, username)
-                            ?.putString(KEY_COOKIE, auth)?.apply()
+                        store.save(session)
                         persistedSession = session
                         persistedLoaded = true
                     }
@@ -250,11 +210,5 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
         if (idx <= 0) return null
         if (first.substring(0, idx).trim() != name) return null
         return first.substring(idx + 1).takeIf { it.isNotBlank() }
-    }
-
-    private companion object {
-        const val PREFS_FILE = "cytube_auth"
-        const val KEY_NAME = "name"
-        const val KEY_COOKIE = "auth_cookie"
     }
 }

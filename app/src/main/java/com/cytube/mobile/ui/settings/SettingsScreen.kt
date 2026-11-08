@@ -50,7 +50,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     // explicit exceptions, hidden here: Appearance (the TV screens keep
     // their own dark palette — see MainActivity — and Prince is
     // phone only), PiP (no home-screen window to float into), grouped chat
-    // messages and the ignored users list.
+    // messages, the ignored users list and the Support links.
     val isTv = remember { isTvDevice(context) }
     var settings by remember { mutableStateOf(Settings(syncAccuracy = defaultSyncAccuracy(context))) }
 
@@ -230,11 +230,15 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
-            MaSectionLabel("Support")
+            // Phone only: on TV, leaving for a browser closes the app (see
+            // MainActivity.onStop), so these would only shut it.
+            if (!isTv) {
+                MaSectionLabel("Support")
 
-            // Plain rows that open the browser, not boxed buttons.
-            LinkRow("Buy Hostu a dunkaccino! ❤️") { openInBrowser(context, "https://ko-fi.com/hostu") }
-            LinkRow("View source on GitHub") { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") }
+                // Plain rows that open the browser, not boxed buttons.
+                LinkRow("Buy Hostu a dunkaccino! ❤️") { openInBrowser(context, "https://ko-fi.com/hostu") }
+                LinkRow("View source on GitHub") { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") }
+            }
 
             Spacer(Modifier.height(32.dp))
         }

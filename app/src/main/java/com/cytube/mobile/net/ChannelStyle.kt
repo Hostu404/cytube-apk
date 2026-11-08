@@ -1002,6 +1002,7 @@ private class CssReader(css: String, private val base: String?) {
             val first = shorthand.split(TOP_LEVEL_COMMA).first()
             for (token in ANIMATION_TOKEN.findAll(first).map { it.value }) {
                 val ms = time(token)
+                val tokenTiming = timing(token)
                 when {
                     ms != null -> if (duration == null) duration = ms else delay = ms
                     token == "infinite" -> iterations = Float.POSITIVE_INFINITY
@@ -1009,7 +1010,7 @@ private class CssReader(css: String, private val base: String?) {
                     token == "forwards" || token == "both" -> forwards = true
                     token == "alternate" || token == "alternate-reverse" -> alternate = true
                     token in IGNORED_ANIMATION_WORDS -> Unit
-                    timing(token) != null -> easing = timing(token)!!
+                    tokenTiming != null -> easing = tokenTiming
                     else -> name = token
                 }
             }

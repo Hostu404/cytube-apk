@@ -109,7 +109,7 @@ Your password is sent once, directly to your CyTube server, the same way the CyT
 
 Logging out removes the cookie from the app and from WebView. CyTube has no way for an app to end a session on the server, so a copy of the cookie stays valid until it expires or you change your password.
 
-Channels can style their page with their own CSS and scripts. The app reads a channel's CSS only for emote effects and name colours, as plain data: it never runs a channel's scripts and never loads anything the CSS links to.
+Channels can style their page with their own CSS and scripts. The app reads a channel's CSS as plain data, for emote effects, name colours, chat text styles and its background picture, and it never runs a channel's scripts (it only reads them for a background picture or the stylesheets they add). On a phone it also fetches the stylesheets a channel imports or links, and, with **Channel backgrounds** on in Settings (the default), loads the channel's background picture: the same requests the channel's own page makes in a browser. Nothing else the CSS links to is loaded.
 
 The full source code is in this repository for anyone to inspect.
 

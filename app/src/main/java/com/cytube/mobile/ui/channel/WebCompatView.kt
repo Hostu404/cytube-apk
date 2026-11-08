@@ -38,11 +38,14 @@ fun WebCompatView(
     baseUrl: String,
     channel: String,
     authCookie: String?,
+    /** A change loads the page afresh (tapping the channel name, which
+     *  outside this view rejoins the channel). */
+    reloadKey: Int = 0,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val homeHost = remember(baseUrl) { baseUrl.toUri().host }
-    var isLoaded by remember(baseUrl, channel) { mutableStateOf(false) }
+    var isLoaded by remember(baseUrl, channel, reloadKey) { mutableStateOf(false) }
     // Bumped when the WebView's renderer process dies, so key() below
     // builds a fresh WebView and reloads the page — before, the dead one
     // was just removed and nothing replaced it, leaving a black area until
@@ -54,7 +57,7 @@ fun WebCompatView(
         label = "webCompatAlpha"
     )
 
-    key(baseUrl, channel, rendererGeneration) {
+    key(baseUrl, channel, rendererGeneration, reloadKey) {
         AndroidView(
             modifier = modifier
                 .fillMaxSize()

@@ -64,7 +64,7 @@ class UpdateAlerts(private val context: Context) {
         .catch { if (it is IOException) emit(emptyList()) else throw it }
 
     /** [refreshIfDue], in the app's own scope rather than the page's: leaving the home page straight
-     *  away doesn't cut it short (and leave it marked done for 12 hours). */
+     *  away doesn't cut it short. */
     fun refreshInBackground() {
         Graph.appScope.launch { refreshIfDue() }
     }
@@ -76,11 +76,14 @@ class UpdateAlerts(private val context: Context) {
             if (now - (p[CHECKED_AT] ?: 0L) in 0 until CHECK_EVERY_MS) return
             // Let the home page's own loading (the channel list) go first.
             delay(START_DELAY_MS)
-            context.dataStore.edit { it[CHECKED_AT] = now }
             val nightly = AppAlerts.isNightly(BuildConfig.VERSION_NAME)
             val release = fetch(if (nightly) NIGHTLY_API else LATEST_API)
             val news = fetch(ALERTS_FILE)
-            if (release is Fetched.Failed && news is Fetched.Failed) return     // offline: keep what's there
+            // Offline: keep what's there, and don't count this as a check — it
+            // used to be marked done before fetching, so opening the app
+            // offline put off the next look for 12 hours. (Failing fast as
+            // they do offline, a few tries more cost nothing.)
+            if (release is Fetched.Failed && news is Fetched.Failed) return
             val before = AppAlerts.decode(p[FOUND])
             val update = when (release) {
                 is Fetched.Body -> listOfNotNull(release.json?.let { AppAlerts.updateFrom(it, installedAt(), nightly) })
@@ -94,6 +97,7 @@ class UpdateAlerts(private val context: Context) {
             }
             val found = update + messages
             context.dataStore.edit {
+                it[CHECKED_AT] = now
                 it[FOUND] = AppAlerts.encode(found)
                 // Only what's still about stays dismissed, so the list never grows.
                 it[DISMISSED] = it[DISMISSED].orEmpty().filterTo(HashSet()) { id -> found.any { a -> a.id == id } }

@@ -13,6 +13,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.SettingsStore
+import com.cytube.mobile.data.guestNameToSave
 import com.cytube.mobile.di.Graph
 import com.cytube.mobile.ui.theme.CyTubePageTheme
 import com.cytube.mobile.ui.theme.Ma
@@ -54,27 +55,35 @@ fun LoginScreen(onBack: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
 
     var guestName by remember { mutableStateOf("") }
-    var guestNameLoaded by remember { mutableStateOf(false) }
+    // What's saved, as saved (see guestNameToSave); null until it's been
+    // read. Only a real change is written: each write wakes everything
+    // watching the settings, and this used to write the name back on every
+    // visit, unchanged, twice.
+    var savedGuestName by remember { mutableStateOf<String?>(null) }
     val guestPlaceholder = remember { "Guest" + (1000..9999).random() }
     LaunchedEffect(Unit) {
-        guestName = settingsStore.settings.first().guestName
-        guestNameLoaded = true
+        val loaded = settingsStore.settings.first().guestName
+        guestName = loaded
+        savedGuestName = loaded
     }
     // Debounced save: write after typing settles rather than on every
-    // keystroke, but skip the write that fires from the initial load above.
-    LaunchedEffect(guestName, guestNameLoaded) {
-        if (!guestNameLoaded) return@LaunchedEffect
+    // keystroke.
+    LaunchedEffect(guestName, savedGuestName) {
+        val saved = savedGuestName ?: return@LaunchedEffect
+        val wanted = guestNameToSave(guestName)
+        if (wanted == saved) return@LaunchedEffect
         delay(500)
-        settingsStore.setGuestName(guestName)
+        if (settingsStore.setGuestName(guestName)) savedGuestName = wanted
     }
     // Leaving within the debounce cancels the save above; finish it on the
     // way out instead, on a scope that outlives this screen.
     val latestGuestName by rememberUpdatedState(guestName)
-    val latestGuestNameLoaded by rememberUpdatedState(guestNameLoaded)
+    val latestSavedGuestName by rememberUpdatedState(savedGuestName)
     DisposableEffect(Unit) {
         onDispose {
-            if (latestGuestNameLoaded) {
-                val name = latestGuestName
+            val saved = latestSavedGuestName
+            val name = latestGuestName
+            if (saved != null && guestNameToSave(name) != saved) {
                 Graph.appScope.launch { settingsStore.setGuestName(name) }
             }
         }

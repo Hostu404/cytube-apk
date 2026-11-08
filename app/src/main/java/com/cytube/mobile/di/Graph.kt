@@ -65,16 +65,16 @@ object Graph {
     val mediaHttp: OkHttpClient by lazy {
         http.newBuilder()
             .readTimeout(60, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
             .connectionPool(ConnectionPool(8, 2, TimeUnit.MINUTES))
             .build()
     }
 
     @Volatile private var authRepo: AuthRepository? = null
 
-    /** First call builds EncryptedSharedPreferences (a Keystore round-trip,
-     *  slow on low-end TV sticks), so callers make that first call off the
-     *  main thread (see HomeViewModel, ChannelViewModel, LoginScreen).
+    /** First call opens the saved login (AuthStore: a Keystore round-trip,
+     *  slow on low-end TV sticks, and once, moving an earlier version's
+     *  login), so callers make that first call off the main thread (see
+     *  HomeViewModel, ChannelViewModel, LoginScreen).
      *  Synchronized so two first calls on different threads can't build two
      *  instances over the same prefs file. */
     fun auth(context: Context): AuthRepository =

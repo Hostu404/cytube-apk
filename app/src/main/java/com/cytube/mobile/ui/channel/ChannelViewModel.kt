@@ -112,6 +112,14 @@ private object AnnouncementMemory {
  *  creation timestamp). */
 private fun pollVoteKey(channel: String, poll: Poll) = "$channel|${poll.timestamp}|${poll.title}"
 
+/** These items with each uid once (the first of any repeats), as the
+ *  playlist panels key their rows on it. Items without a uid (-1) are all
+ *  kept: the panels key those on their place in the list instead. */
+internal fun List<PlaylistItem>.withUniqueUids(): List<PlaylistItem> {
+    val seen = HashSet<Int>()
+    return filter { it.uid < 0 || seen.add(it.uid) }
+}
+
 /** Private messages received that haven't been seen yet — see
  *  ChannelViewModel.markPmsRead. Counted per sender, so reading or ignoring
  *  one person's takes away exactly theirs. */
@@ -672,7 +680,16 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             launch(Dispatchers.Default) { runChatPump() }
             startSyncTicker()
 
-            connect(channel)
+            if (_state.value.effectiveMode == CompatMode.WEB) {
+                // Opened in Compatibility View: the channel's own page joins
+                // by itself, so no connection of ours. Both at once is two
+                // sessions: logged in, the server kicks one of them with
+                // "Duplicate login" (see setMode). The page is shown straight
+                // away; nothing of ours will say what's playing.
+                update { it.copy(player = MediaTypes.Player.WEB, connection = ConnectionState.DISCONNECTED) }
+            } else {
+                connect(channel)
+            }
         }
     }
 
@@ -964,13 +981,20 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     onTimeUpdate(event.update, event.receivedAtMs)
                 }
 
-                is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.toPersistentList()) }
+                // Each uid once: the playlist panels key their rows on it,
+                // and a list with one twice can't be drawn at all.
+                is CyTubeEvent.PlaylistReplaced -> update { it.copy(playlist = event.items.withUniqueUids().toPersistentList()) }
                 // Sent every time an item starts, including a one-item
                 // playlist starting over, which changeMedia alone doesn't
                 // show (same id) but which resets the server's skip vote.
                 is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid, votedSkip = false) }
                 is CyTubeEvent.ItemQueued -> {
-                    update { s -> s.copy(playlist = insertAfter(s.playlist, event.item, event.afterUid)) }
+                    // An item already listed under the same uid is replaced
+                    // rather than shown twice (see PlaylistReplaced).
+                    update { s ->
+                        val rest = if (event.item.uid < 0) s.playlist else s.playlist.removingAll { it.uid == event.item.uid }
+                        s.copy(playlist = insertAfter(rest, event.item, event.afterUid))
+                    }
                     // Our own add landing. Matched on who queued it rather
                     // than the media id: a YouTube playlist link arrives as
                     // many items, none with the playlist's id.
@@ -1115,15 +1139,22 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     val key = "${event.title}|${event.html}"
                     if (key != lastAnnouncementKey) {
                         lastAnnouncementKey = key
-                        if (AnnouncementMemory.firstSighting(getApplication(), key)) appendLocalNotice(
-                            ChatMessage(
-                                username = "",
-                                html = "<strong>${escapeHtml(event.title.ifBlank { "Announcement" })}</strong>: ${event.html}",
-                                timestamp = System.currentTimeMillis(),
-                                addClass = null,
-                                shadow = false
-                            )
+                        val notice = ChatMessage(
+                            username = "",
+                            html = "<strong>${escapeHtml(event.title.ifBlank { "Announcement" })}</strong>: ${event.html}",
+                            timestamp = System.currentTimeMillis(),
+                            addClass = null,
+                            shadow = false
                         )
+                        // Its record of what's been shown is on disk: looked
+                        // at off the main thread, and without holding up
+                        // the events behind this one.
+                        viewModelScope.launch {
+                            val first = withContext(Dispatchers.IO) {
+                                AnnouncementMemory.firstSighting(getApplication(), key)
+                            }
+                            if (first) appendLocalNotice(notice)
+                        }
                     }
                 }
             }
@@ -1146,14 +1177,32 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      * edit straight after the full list can't be overtaken by it. The
      * channel's CSS may arrive meanwhile (see ChannelCss), so its effects are
      * put back on at the end rather than taken from before.
+     *
+     * Like refreshTextStyles, the newest messages are drawn with the new set
+     * first, off the main thread, so chat finds them done when it switches
+     * over. Otherwise every chat row on screen was parsed again on the main
+     * thread at once, just after joining: the backlog arrives (and is drawn)
+     * before a big emote list has finished being built.
      */
     private fun changeEmotes(change: (EmoteSet) -> EmoteSet) {
         val previous = emoteJob
         emoteJob = viewModelScope.launch {
             previous?.join()
             val base = _state.value.emotes
-            val next = withContext(Dispatchers.Default) { change(base) }
-            update { s -> s.copy(emotes = next.withEffects(s.emotes.effects)) }
+            val built = withContext(Dispatchers.Default) { change(base) }
+            val shown = _state.value
+            val effects = shown.emotes.effects
+            val next = built.withEffects(effects)
+            val recent = shown.messages.takeLast(RESTYLE_PREWARM_COUNT)
+            withContext(Dispatchers.Default) {
+                for (msg in recent) {
+                    runCatching {
+                        ChatHtml.prewarm(msg.html, msg.addClass == "greentext", shown.showEmotes, next, revealSpoilers = isTv)
+                    }
+                }
+            }
+            // The CSS changed meanwhile: these emotes with its newest effects.
+            update { s -> s.copy(emotes = if (s.emotes.effects === effects) next else next.withEffects(s.emotes.effects)) }
         }
     }
 
@@ -1424,7 +1473,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     update = update,
                     newMediaId = s.media?.id,
                     accuracySeconds = settings.syncAccuracy,
-                    withinGracePeriod = withinGrace
+                    withinGracePeriod = withinGrace,
+                    // The time since the phone started, not the clock on the
+                    // wall: setting that back would leave SyncEngine's
+                    // cooldowns waiting on a time still to come, and no
+                    // correction made until it had.
+                    nowMs = now
                 )
                 saveLeadMemoryIfLearned()
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1978,6 +2032,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun refresh() {
         if (_state.value.refreshing) return
+        // In Compatibility View the page is the channel's session: joining
+        // again here would be a second one, and the server would kick the
+        // page with "Duplicate login". (The channel screen reloads the page
+        // instead.)
+        if (_state.value.effectiveMode == CompatMode.WEB) return
         val now = SystemClock.elapsedRealtime()
         if (now - lastRefreshAtMs < REFRESH_COOLDOWN_MS) return
         lastRefreshAtMs = now
@@ -2032,11 +2091,19 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 client.disconnect()
                 update { it.copy(player = MediaTypes.Player.WEB, connection = ConnectionState.DISCONNECTED) }
             } else {
-                if (_state.value.connection != ConnectionState.CONNECTED) connect(_state.value.channel)
-                _state.value.media?.let { m ->
+                // Off the page first, so its session has ended before ours
+                // joins (two at once is a "Duplicate login" kick, as above).
+                // With nothing known to be playing yet — the channel was
+                // opened in Compatibility View, so nothing of ours has heard
+                // — the player waits for the item the join brings.
+                val m = _state.value.media
+                if (m != null) {
                     val (chosen, offer) = choosePlayerAndOffer(m)
                     update { it.copy(player = chosen, compatOffer = offer) }
+                } else if (_state.value.player == MediaTypes.Player.WEB) {
+                    update { it.copy(player = MediaTypes.Player.NATIVE) }
                 }
+                if (_state.value.connection != ConnectionState.CONNECTED) connect(_state.value.channel)
             }
         }
     }
@@ -2296,8 +2363,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     fun toggleFavourite() {
         viewModelScope.launch {
-            settingsStore.toggleFavourite(_state.value.channel)
-            update { it.copy(isFavourite = !it.isFavourite) }
+            // The star only changes when the change was kept.
+            if (settingsStore.toggleFavourite(_state.value.channel)) {
+                update { it.copy(isFavourite = !it.isFavourite) }
+            }
         }
     }
 
@@ -2340,8 +2409,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         return saved.ifBlank { "Guest" + (1000..9999).random() }
     }
 
-    /** Graph.auth() may still be building EncryptedSharedPreferences on a
-     *  cold start (deep link straight into a channel), so never on Main. */
+    /** Graph.auth() may still be opening the saved login (the Keystore) on
+     *  a cold start (deep link straight into a channel), so never on Main. */
     private suspend fun savedCredential(): CyTubeClient.Credential? =
         withContext(Dispatchers.IO) { Graph.auth(getApplication()).credentialForSession() }
 

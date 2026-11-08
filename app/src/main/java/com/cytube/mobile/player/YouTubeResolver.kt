@@ -215,27 +215,43 @@ object YouTubeResolver {
         }
     }
 
-    /** Simple in-memory cookie storage to persist YouTube session data (like visitorData). */
-    private class SessionCookieJar : CookieJar {
-        private val cookieStore = ConcurrentHashMap<String, List<Cookie>>()
+}
 
-        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-            cookieStore[url.host] = cookies
-        }
+/**
+ * Simple in-memory cookie storage to persist YouTube session data (like
+ * visitorData), per host, kept the way a browser keeps cookies: a response's
+ * cookie replaces the one with the same name, domain and path and leaves the
+ * rest, and one that has expired (which is also how a server deletes one) is
+ * dropped. It used to keep only the latest response's cookies, losing the
+ * others whenever a response set any.
+ */
+internal class SessionCookieJar(private val nowMs: () -> Long = System::currentTimeMillis) : CookieJar {
+    private val cookieStore = ConcurrentHashMap<String, List<Cookie>>()
 
-        override fun loadForRequest(url: HttpUrl): List<Cookie> {
-            val cookies = cookieStore[url.host] ?: emptyList()
-            // Seed with a consent cookie if missing to bypass common YouTube walls
-            if (cookies.none { it.name == "CONSENT" }) {
-                val consentCookie = Cookie.Builder()
-                    .name("CONSENT")
-                    .value("YES+cb.20210328-17-p0.en+FX+417")
-                    .domain(url.host)
-                    .path("/")
-                    .build()
-                return cookies + consentCookie
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        if (cookies.isEmpty()) return
+        val now = nowMs()
+        cookieStore.compute(url.host) { _, kept ->
+            val others = kept.orEmpty().filterNot { old ->
+                cookies.any { it.name == old.name && it.domain == old.domain && it.path == old.path }
             }
-            return cookies
+            (others + cookies).filter { it.expiresAt > now }
         }
+    }
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        val now = nowMs()
+        val cookies = cookieStore[url.host].orEmpty().filter { it.expiresAt > now && it.matches(url) }
+        // Seed with a consent cookie if missing to bypass common YouTube walls
+        if (cookies.none { it.name == "CONSENT" }) {
+            val consentCookie = Cookie.Builder()
+                .name("CONSENT")
+                .value("YES+cb.20210328-17-p0.en+FX+417")
+                .domain(url.host)
+                .path("/")
+                .build()
+            return cookies + consentCookie
+        }
+        return cookies
     }
 }

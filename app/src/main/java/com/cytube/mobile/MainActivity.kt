@@ -132,7 +132,7 @@ class MainActivity : ComponentActivity() {
                 // user the server kicks one as a duplicate login.
                 val pending = pendingChannel
                 if (pending != null) {
-                    androidx.compose.runtime.LaunchedEffect(pending) {
+                    LaunchedEffect(pending) {
                         nav.navigate("channel/$pending") { popUpTo("home") }
                         pendingChannel = null
                     }

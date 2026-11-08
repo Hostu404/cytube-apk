@@ -129,4 +129,27 @@ class ChannelIndexRepositoryTest {
 
         assertTrue(channels.isEmpty())
     }
+
+    // The home page keys its list on the channel's name.
+    @Test
+    fun `a channel listed twice is kept once`() = runBlocking {
+        val html = sampleHtml.replace(
+            "</tbody>",
+            """<tr><td><a href="/r/chillhop">Chillhop Radio (chillhop)</a></td><td>42</td><td>Again</td></tr></tbody>"""
+        )
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(html.toResponseBody("text/html".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val channels = ChannelIndexRepository(client, "https://cytu.be").publicChannels(forceRefresh = true)
+        assertEquals(listOf("chillhop", "anime_club"), channels.map { it.name })
+    }
 }

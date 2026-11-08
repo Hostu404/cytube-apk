@@ -32,7 +32,7 @@ android {
         versionName = "classless"
         // Nightly builds (.github/workflows/nightly.yml) pass
         // -PnightlyBuild=<the night>, so the home screen shows which night an
-        // APK is from, e.g. "apustaja nightly 4 Nov". (Its commit is in the
+        // APK is from, e.g. "classless nightly 4 Nov". (Its commit is in the
         // nightly release's notes.)
         providers.gradleProperty("nightlyBuild").orNull?.let { versionName = "$versionName nightly $it" }
     }
@@ -148,6 +148,9 @@ dependencies {
     implementation(libs.nextlib.media3ext)
 
     implementation(libs.androidx.datastore.preferences)
+    // Deprecated, and no longer how a login is kept (see AuthStore): only
+    // to move one an earlier version saved with it (LegacyAuthPrefs). Remove
+    // the two together once everyone has updated past that.
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.webkit)
 

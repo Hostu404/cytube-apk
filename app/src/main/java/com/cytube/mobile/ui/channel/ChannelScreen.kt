@@ -82,6 +82,7 @@ import coil.request.ImageRequest
 import androidx.compose.animation.core.snap
 import coil.decode.DataSource
 import kotlinx.collections.immutable.PersistentList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlin.math.ceil
@@ -195,7 +196,16 @@ fun ChannelScreen(
     onPlaybackHostChange: (PlaybackHost?) -> Unit = {},
     vm: ChannelViewModel = viewModel()
 ) {
-    val state by vm.state.collectAsStateWithLifecycle()
+    // The channel's state in two parts. Chat changes many times a second in
+    // a busy channel, and most of this screen doesn't show it: [state] is
+    // everything but the chat, so a new message doesn't run this whole screen
+    // again (the top bar, the panel bar, all round the player) — only the
+    // places that show chat, which read [messages] (inside WithMessages) and
+    // [unreadPm] themselves.
+    val uiState = vm.state.collectAsStateWithLifecycle()
+    val state by remember(uiState) { derivedStateOf(structuralEqualityPolicy()) { uiState.value.withoutChat() } }
+    val messages = remember(uiState) { derivedStateOf(referentialEqualityPolicy()) { uiState.value.messages } }
+    val unreadPm by remember(uiState) { derivedStateOf(structuralEqualityPolicy()) { uiState.value.unreadPm } }
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val activity = context as? Activity
@@ -236,7 +246,7 @@ fun ChannelScreen(
     // leaves composition. No timers, nothing to leak.
     val view = LocalView.current
     DisposableEffect(state.playing, state.player) {
-        val awake = state.playing || state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
+        val awake = state.playing || state.player == MediaTypes.Player.WEB
         view.keepScreenOn = awake
         onDispose { view.keepScreenOn = false }
     }
@@ -312,8 +322,8 @@ fun ChannelScreen(
                 pipEnabled = state.pipEnabled,
                 // Only Media3-played items: EMBED and WEB are web pages,
                 // whose players and controls aren't set up for a PiP window.
-                canPip = state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
-                    state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED &&
+                canPip = state.player != MediaTypes.Player.WEB &&
+                    state.player != MediaTypes.Player.EMBED &&
                     state.media != null,
                 isPlaying = state.playing,
                 onTogglePlayPause = onTogglePlayPause,
@@ -454,7 +464,7 @@ fun ChannelScreen(
         val previous = lastOrientation
         lastOrientation = configuration.orientation
         if (previous == configuration.orientation) return@LaunchedEffect
-        if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) return@LaunchedEffect
+        if (state.player == MediaTypes.Player.WEB) return@LaunchedEffect
         when (configuration.orientation) {
             Configuration.ORIENTATION_LANDSCAPE -> fullscreen = true
             Configuration.ORIENTATION_PORTRAIT -> fullscreen = false
@@ -604,7 +614,7 @@ fun ChannelScreen(
                         }
                     }
             ) {
-                if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
+                if (state.player == MediaTypes.Player.WEB) {
                     // Left running when the app goes to the background,
                     // like the other players.
                     WebCompatView(
@@ -625,14 +635,20 @@ fun ChannelScreen(
                 // forth between video and chat must never turn it off by
                 // itself — only the explicit toggle in TvChatView does.
                 if (chatOverlayOn) {
-                    NekoChatOverlay(
-                        messages = state.messages,
-                        showEmotes = state.showEmotes,
-                        emotes = state.emotes,
-                        state = nekoState,
-                        emotesOnly = state.nicoEmotesOnly,
-                        speed = state.nicoSpeed
-                    )
+                    WithMessages(messages) { msgs ->
+                        NekoChatOverlay(
+                            messages = msgs,
+                            showEmotes = state.showEmotes,
+                            emotes = state.emotes,
+                            state = nekoState,
+                            emotesOnly = state.nicoEmotesOnly,
+                            speed = state.nicoSpeed,
+                            // Spoilers shown, as TV chat shows them (there's
+                            // no tap to reveal one with) — which is also how
+                            // each message was drawn ahead as it arrived.
+                            revealSpoilers = true
+                        )
+                    }
                 }
 
                 // No Column to slot this into on TV like the phone layout has —
@@ -650,24 +666,26 @@ fun ChannelScreen(
             // screen — chat genuinely becomes the visible view, not a panel
             // squeezed in alongside a still-showing video.
             if (tvShowingChat) {
-                TvChatView(
-                    channel = state.channel,
-                    connection = state.connection,
-                    emotes = state.emotes,
-                    localUser = state.localUser,
-                    messages = state.messages,
-                    nameColors = state.nameColors,
-                    player = state.player,
-                    showEmotes = state.showEmotes,
-                    subtitles = state.subtitles,
-                    users = state.users,
-                    onSendChat = onSendChat,
-                    chatOverlayOn = chatOverlayOn,
-                    onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
-                    onSelectSubtitle = vm::selectSubtitle,
-                    onExit = { tvShowingChat = false },
-                    modifier = Modifier.fillMaxSize()
-                )
+                WithMessages(messages) { msgs ->
+                    TvChatView(
+                        channel = state.channel,
+                        connection = state.connection,
+                        emotes = state.emotes,
+                        localUser = state.localUser,
+                        messages = msgs,
+                        nameColors = state.nameColors,
+                        player = state.player,
+                        showEmotes = state.showEmotes,
+                        subtitles = state.subtitles,
+                        users = state.users,
+                        onSendChat = onSendChat,
+                        chatOverlayOn = chatOverlayOn,
+                        onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
+                        onSelectSubtitle = vm::selectSubtitle,
+                        onExit = { tvShowingChat = false },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
             if (tvShowingPlaylist) {
                 TvPlaylistView(
@@ -711,12 +729,12 @@ fun ChannelScreen(
             inPip = isInPictureInPicture,
             emotes = state.emotes,
             media = state.media,
-            messages = state.messages,
+            messages = messages,
             nicoEmotesOnly = state.nicoEmotesOnly,
             nicoSpeed = state.nicoSpeed,
             player = state.player,
             showEmotes = state.showEmotes,
-            unreadPm = state.unreadPm,
+            unreadPm = unreadPm,
             controlsVisible = controlsVisible,
             onToggleControls = { controlsVisible = !controlsVisible },
             onExit = { fullscreen = false },
@@ -726,7 +744,7 @@ fun ChannelScreen(
             // Chat isn't on screen in fullscreen, so a new PM gets a pill;
             // tapping it drops back to the windowed layout ready to reply.
             onOpenPm = {
-                state.unreadPm?.from?.let(onStartPm)
+                unreadPm?.from?.let(onStartPm)
                 vm.markPmsRead()
                 fullscreen = false
             }
@@ -736,15 +754,19 @@ fun ChannelScreen(
 
     // Windowed phone layout: chat is right there below the video, so a PM
     // that arrives now is seen as it lands.
-    LaunchedEffect(state.unreadPm) {
-        if (state.unreadPm != null) vm.markPmsRead()
+    LaunchedEffect(unreadPm) {
+        if (unreadPm != null) vm.markPmsRead()
     }
 
     // The system bars' real size, not Compose's animated copy — see
     // rememberSystemBarInsets.
     val barInsets = rememberSystemBarInsets()
 
-    val webMode = state.player == com.cytube.mobile.net.MediaTypes.Player.WEB
+    val webMode = state.player == MediaTypes.Player.WEB
+    // Bumped by tapping the channel name in Compatibility View: the page is
+    // loaded again (see WebCompatView), where elsewhere that tap rejoins
+    // (ChannelViewModel.refresh) — which here would be a second session.
+    var webReloads by remember { mutableIntStateOf(0) }
     // Video the windowed layout can dim around: not Compatibility View,
     // which is the whole page rather than a video.
     val canDimAround = !webMode && state.media != null
@@ -858,9 +880,10 @@ fun ChannelScreen(
                     // scrolling chat, and ChannelViewModel.refresh() has its
                     // own cooldown (see there) so repeated taps can't be
                     // turned into a request flood against the channel server.
+                    // In Compatibility View it loads the page again instead.
                     Column(
                         Modifier
-                            .clickable(onClick = vm::refresh)
+                            .clickable { if (webMode) webReloads++ else vm.refresh() }
                             .semantics { contentDescription = "Refresh channel" }
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -896,7 +919,7 @@ fun ChannelScreen(
                         if (state.canVoteskip && !state.personalPickActive &&
                             state.channelCurrentMedia != null &&
                             state.connection == ConnectionState.CONNECTED &&
-                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                            state.player != MediaTypes.Player.WEB
                         ) {
                             VoteskipButton(
                                 voted = state.votedSkip,
@@ -909,7 +932,7 @@ fun ChannelScreen(
                         // captions, or ones inside the stream itself. Left of
                         // the mute toggle.
                         if (state.subtitles.available &&
-                            state.player != com.cytube.mobile.net.MediaTypes.Player.WEB
+                            state.player != MediaTypes.Player.WEB
                         ) {
                             SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
                         }
@@ -921,8 +944,8 @@ fun ChannelScreen(
                         // playback. EMBED/WEB have no PlayerHandle to mute (see
                         // PlayerSurface), so the button is hidden rather than
                         // shown greyed-out doing nothing.
-                        if (state.player != com.cytube.mobile.net.MediaTypes.Player.WEB &&
-                            state.player != com.cytube.mobile.net.MediaTypes.Player.EMBED
+                        if (state.player != MediaTypes.Player.WEB &&
+                            state.player != MediaTypes.Player.EMBED
                         ) {
                             IconButton(onClick = vm::toggleMute, modifier = TopBarButton) {
                                 Icon(
@@ -1059,7 +1082,10 @@ fun ChannelScreen(
             Box(
                 Modifier.fillMaxWidth()
                     .then(
-                        if (webMode) Modifier.weight(1f)
+                        // The page takes all the room there is (it has its own
+                        // chat), and stops at the keyboard, so the page's own
+                        // message box stays in sight while it's typed in.
+                        if (webMode) Modifier.weight(1f).imePadding()
                         else Modifier.aspectRatio(16f / 9f)
                     )
                     .onGloballyPositioned { videoInRoot = it.boundsInRoot() }
@@ -1079,7 +1105,7 @@ fun ChannelScreen(
                         }
                     )
             ) {
-                if (state.player == com.cytube.mobile.net.MediaTypes.Player.WEB) {
+                if (webMode) {
                     // Compatibility View is the whole CyTube page again, not a
                     // player surface. It owns the channel entirely while it is up.
                     // Left running when the app goes to the background,
@@ -1088,6 +1114,7 @@ fun ChannelScreen(
                         baseUrl = Graph.BASE_URL,
                         channel = channel,
                         authCookie = Graph.auth(context).savedSession()?.authCookie,
+                        reloadKey = webReloads,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
@@ -1106,9 +1133,12 @@ fun ChannelScreen(
                 }
             }
 
-            state.media?.let { NowPlayingBar(it.title, state.leader) }
+            // In Compatibility View the page shows all of this itself, and
+            // ours stopped updating when its connection was closed for the
+            // page's (see ChannelViewModel.setMode): only the page is shown.
+            if (!webMode) state.media?.let { NowPlayingBar(it.title, state.leader) }
 
-            if (state.motd.isNotBlank()) {
+            if (!webMode && state.motd.isNotBlank()) {
                 MotdSection(
                     html = state.motd,
                     emotes = state.emotes,
@@ -1127,11 +1157,15 @@ fun ChannelScreen(
             // In portrait the chat gets whatever is left below the video, which
             // is the panel people actually keep open. Its animated emotes hold
             // still while the lights are down: behind the dark layer, moving
-            // them would only cost battery.
-            CompositionLocalProvider(LocalEmotesStill provides lightsAreDown) {
+            // them would only cost battery. Not in Compatibility View, whose
+            // page has its own chat (see above).
+            if (!webMode) CompositionLocalProvider(LocalEmotesStill provides lightsAreDown) {
             ChatPanel(
-                messages = state.messages,
+                // Read here, so new chat recomposes the chat alone (see
+                // [state] at the top).
+                messages = messages.value,
                 canSend = state.connection == ConnectionState.CONNECTED,
+                disabledHint = chatUnavailableHint(state.connection),
                 showEmotes = state.showEmotes,
                 emotes = state.emotes,
                 onSend = onSendChat,
@@ -1189,14 +1223,16 @@ fun ChannelScreen(
                 }
             }
         ) {
-            NekoChatOverlay(
-                messages = state.messages,
-                showEmotes = state.showEmotes,
-                emotes = state.emotes,
-                state = nekoState,
-                emotesOnly = state.nicoEmotesOnly,
-                speed = state.nicoSpeed
-            )
+            WithMessages(messages) { msgs ->
+                NekoChatOverlay(
+                    messages = msgs,
+                    showEmotes = state.showEmotes,
+                    emotes = state.emotes,
+                    state = nekoState,
+                    emotesOnly = state.nicoEmotesOnly,
+                    speed = state.nicoSpeed
+                )
+            }
         }
     }
     }
@@ -1369,16 +1405,49 @@ private fun WindowedFullscreenButton(visible: Boolean, onClick: () -> Unit, modi
 
 @Composable
 private fun ConnectionLine(state: ChannelUiState) {
-    val (text, color) = when (state.connection) {
-        ConnectionState.CONNECTED ->
-            (state.statusMessage ?: "${state.userCount} connected") to
-                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-        ConnectionState.CONNECTING -> "Connecting…" to MaterialTheme.colorScheme.onSurfaceVariant
-        ConnectionState.RECONNECTING -> "Reconnecting…" to MaterialTheme.colorScheme.tertiary
-        ConnectionState.DISCONNECTED -> "Disconnected" to MaterialTheme.colorScheme.error
-        ConnectionState.FAILED -> (state.statusMessage ?: "Could not connect") to MaterialTheme.colorScheme.error
+    val (text, color) = when {
+        // The page is connected by itself; "Disconnected" (ours, closed
+        // for it) would read as something wrong.
+        state.player == MediaTypes.Player.WEB ->
+            "Compatibility View" to MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+        else -> when (state.connection) {
+            ConnectionState.CONNECTED ->
+                (state.statusMessage ?: "${state.userCount} connected") to
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+            ConnectionState.CONNECTING -> "Connecting…" to MaterialTheme.colorScheme.onSurfaceVariant
+            ConnectionState.RECONNECTING -> "Reconnecting…" to MaterialTheme.colorScheme.tertiary
+            ConnectionState.DISCONNECTED -> "Disconnected" to MaterialTheme.colorScheme.error
+            ConnectionState.FAILED -> (state.statusMessage ?: "Could not connect") to MaterialTheme.colorScheme.error
+        }
     }
     Text(text, style = MaterialTheme.typography.labelSmall, color = color, maxLines = 1)
+}
+
+/** What the chat box says while it can't send: why, rather than "Log in to
+ *  chat", which was shown for every reason (reconnecting while logged in,
+ *  say) and isn't one at all — a guest can chat. */
+private fun chatUnavailableHint(connection: ConnectionState): String = when (connection) {
+    ConnectionState.CONNECTING -> "Connecting…"
+    ConnectionState.RECONNECTING -> "Reconnecting…"
+    else -> "Not connected"
+}
+
+/** This state without its chat (the messages, the unread PMs): what
+ *  ChannelScreen's [state] holds, so new chat doesn't change it. */
+private fun ChannelUiState.withoutChat(): ChannelUiState =
+    if (messages.isEmpty() && unreadPm == null) this else copy(messages = persistentListOf(), unreadPm = null)
+
+/**
+ * Reads [messages] here, in a scope of its own, and hands them to
+ * [content]: new chat then recomposes [content] alone, not the screen around
+ * it (see ChannelScreen's [state]).
+ */
+@Composable
+private fun WithMessages(
+    messages: State<PersistentList<ChatMessage>>,
+    content: @Composable (PersistentList<ChatMessage>) -> Unit
+) {
+    content(messages.value)
 }
 
 /**
@@ -1564,19 +1633,13 @@ private const val MAX_BACKDROP_TILES = 256
 @Composable
 private fun MotdSection(
     html: String,
-    emotes: com.cytube.mobile.net.EmoteSet,
+    emotes: EmoteSet,
     expanded: Boolean,
     onToggle: () -> Unit,
     underTitle: Boolean = false
 ) {
     val linkColor = MaterialTheme.colorScheme.primary
     val context = LocalContext.current
-    val rendered = remember(html, emotes) {
-        ChatHtml.render(
-            html, greentext = false, linkColor = linkColor,
-            showImages = false, emotes = emotes, dropImages = true
-        )
-    }
     Column(
         Modifier
             .fillMaxWidth()
@@ -1601,6 +1664,16 @@ private fun MotdSection(
             )
         }
         if (expanded) {
+            // Only drawn once it's opened: the whole notice (emote codes and
+            // all) parsed on the main thread, as the channel opens and again
+            // with every change to its emotes, for a notice most people
+            // leave closed.
+            val rendered = remember(html, emotes, linkColor) {
+                ChatHtml.render(
+                    html, greentext = false, linkColor = linkColor,
+                    showImages = false, emotes = emotes, dropImages = true
+                )
+            }
             Spacer(Modifier.height(6.dp))
             var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
             Text(
@@ -1982,18 +2055,18 @@ private fun ModeOption(title: String, body: String, selected: Boolean, onClick: 
 
 private fun backendNote(state: ChannelUiState): String {
     val media = state.media ?: return "Nothing is playing yet."
-    val label = com.cytube.mobile.net.MediaTypes.label(media.type)
+    val label = MediaTypes.label(media.type)
     return when (state.player) {
-        com.cytube.mobile.net.MediaTypes.Player.NATIVE -> "Playing $label natively."
-        com.cytube.mobile.net.MediaTypes.Player.NEWPIPE -> "Playing $label natively via NewPipe."
-        com.cytube.mobile.net.MediaTypes.Player.GDRIVE -> "Playing $label natively via Google Drive."
+        MediaTypes.Player.NATIVE -> "Playing $label natively."
+        MediaTypes.Player.NEWPIPE -> "Playing $label natively via NewPipe."
+        MediaTypes.Player.GDRIVE -> "Playing $label natively via Google Drive."
         MediaTypes.Player.STREAMABLE -> "Playing $label natively via Streamable."
         MediaTypes.Player.PEERTUBE -> "Playing $label natively via PeerTube."
-        com.cytube.mobile.net.MediaTypes.Player.EMBED ->
+        MediaTypes.Player.EMBED ->
             "$label plays via the provider's own embed. Chat, playlist and sync stay native."
-        com.cytube.mobile.net.MediaTypes.Player.WEB ->
+        MediaTypes.Player.WEB ->
             "$label needs Compatibility View. Chat and playlist come from the page."
-        com.cytube.mobile.net.MediaTypes.Player.UNAVAILABLE ->
+        MediaTypes.Player.UNAVAILABLE ->
             "$label can't play natively. Choose Web mode below to load it."
     }
 }
@@ -2040,7 +2113,7 @@ private fun TvChatView(
     var nicoFocused by remember { mutableStateOf(false) }
     var ccFocused by remember { mutableStateOf(false) }
     val ccAvailable = subtitles.available &&
-        player != com.cytube.mobile.net.MediaTypes.Player.WEB
+        player != MediaTypes.Player.WEB
     // Whether CC is where focus is (or its menu, opened from it): set when
     // it gains focus, cleared only when Nico or the chat bar does, so that
     // focus moving into the menu, or the button's removal clearing focus,
@@ -2215,6 +2288,7 @@ private fun TvChatView(
         ChatPanel(
             messages = messages,
             canSend = connection == ConnectionState.CONNECTED,
+            disabledHint = chatUnavailableHint(connection),
             showEmotes = showEmotes,
             emotes = emotes,
             onSend = onSendChat,
@@ -2353,7 +2427,7 @@ private fun TvSubtitleButton(
 private fun TvPlaylistView(
     personalPickUid: Int,
     playlist: PersistentList<PlaylistItem>,
-    onPersonalPick: (com.cytube.mobile.net.PlaylistItem) -> Unit,
+    onPersonalPick: (PlaylistItem) -> Unit,
     onExit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -2494,7 +2568,7 @@ private fun TvPlaylistView(
                 // (losing the focus highlight) on every playlist mutation.
                 itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { idx, item ->
                     val personallyResolvable =
-                        com.cytube.mobile.net.MediaTypes.canResolveIndependently(item.type)
+                        MediaTypes.canResolveIndependently(item.type)
                     val isPick = item.uid == personalPickUid
                     var rowFocused by remember { mutableStateOf(false) }
                     Row(
@@ -2546,7 +2620,7 @@ private fun TvPlaylistView(
                                 buildString {
                                     append(item.duration)
                                     append(" · ")
-                                    append(com.cytube.mobile.net.MediaTypes.label(item.type))
+                                    append(MediaTypes.label(item.type))
                                     if (!personallyResolvable) append(" · unavailable unsynced")
                                 },
                                 style = MaterialTheme.typography.labelSmall,
@@ -2566,7 +2640,8 @@ private fun FullscreenPlayer(
     inPip: Boolean,
     emotes: EmoteSet,
     media: MediaFrame?,
-    messages: PersistentList<ChatMessage>,
+    /** Read only where the overlay shows it (see WithMessages). */
+    messages: State<PersistentList<ChatMessage>>,
     nicoEmotesOnly: Boolean,
     nicoSpeed: Float,
     player: MediaTypes.Player,
@@ -2583,7 +2658,7 @@ private fun FullscreenPlayer(
     Box(
         Modifier.fillMaxSize().background(Color.Black)
             .pointerInput(player) {
-                if (player == com.cytube.mobile.net.MediaTypes.Player.EMBED) {
+                if (player == MediaTypes.Player.EMBED) {
                     // EmbedSurface's WebView handles touch across its whole
                     // surface for its own scrolling/zoom/link taps, the same
                     // way PlayerView's controller owns part of its area — see
@@ -2617,14 +2692,16 @@ private fun FullscreenPlayer(
             // ChannelScreen and shared with the windowed player's own call
             // site — this has no on/off control of its own; that lives
             // solely in the TopAppBar, above the video.
-            NekoChatOverlay(
-                messages = messages,
-                showEmotes = showEmotes,
-                emotes = emotes,
-                state = nekoState,
-                emotesOnly = nicoEmotesOnly,
-                speed = nicoSpeed
-            )
+            WithMessages(messages) { msgs ->
+                NekoChatOverlay(
+                    messages = msgs,
+                    showEmotes = showEmotes,
+                    emotes = emotes,
+                    state = nekoState,
+                    emotesOnly = nicoEmotesOnly,
+                    speed = nicoSpeed
+                )
+            }
         }
 
         AnimatedVisibility(visible = controlsVisible && !inPip, enter = fadeIn(), exit = fadeOut()) {

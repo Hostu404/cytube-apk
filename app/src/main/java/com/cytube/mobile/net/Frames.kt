@@ -438,7 +438,9 @@ fun unwrapImageTags(text: String): String = IMAGE_TAG.replace(text) { it.groupVa
 fun imageTagUrls(text: String): List<String> = IMAGE_TAG.findAll(text).map { it.groupValues[1] }.toList()
 
 /** [text] with its `[img](...)` tags removed (they're shown as pictures instead). */
-fun removeImageTags(text: String): String = IMAGE_TAG.replace(text, " ").replace(Regex("\\s+"), " ").trim()
+fun removeImageTags(text: String): String = IMAGE_TAG.replace(text, " ").replace(WHITESPACE_RUN, " ").trim()
+
+private val WHITESPACE_RUN = Regex("\\s+")
 
 /**
  * newPoll / updatePoll — src/poll.js packUpdate(). counts is parallel to

@@ -117,9 +117,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { settings.clearRecents() }
     }
 
-    /** Off the main thread: the first Graph.auth() call builds
-     *  EncryptedSharedPreferences (a Keystore round-trip), and this is the
-     *  first thing to make it on a cold start — see Graph.auth. */
+    /** Off the main thread: the first Graph.auth() call opens the saved
+     *  login (a Keystore round-trip), and this is the first thing to make
+     *  it on a cold start — see Graph.auth. */
     fun refreshSession() {
         viewModelScope.launch {
             val name = withContext(Dispatchers.IO) {

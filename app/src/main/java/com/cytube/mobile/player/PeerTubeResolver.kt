@@ -183,10 +183,15 @@ object PeerTubeResolver {
         return obj.optInt("resolution", 0)
     }
 
+    /** A whole https address. Plain http is asked for over https, as the
+     *  app does everywhere else (cleartext is off, see
+     *  network_security_config): an instance that reports http addresses
+     *  for its files would otherwise fail to play at all. */
     private fun normalizeUrl(rawUrl: String, domain: String): String {
         return when {
             rawUrl.startsWith("//") -> "https:$rawUrl"
             rawUrl.startsWith("/") -> "https://$domain$rawUrl"
+            rawUrl.startsWith("http://", ignoreCase = true) -> "https://" + rawUrl.substring("http://".length)
             else -> rawUrl
         }
     }

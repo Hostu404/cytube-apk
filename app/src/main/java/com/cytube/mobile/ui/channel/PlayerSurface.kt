@@ -73,6 +73,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.media3.exoplayer.upstream.DefaultAllocator
+import com.cytube.mobile.BuildConfig
 import com.cytube.mobile.R
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.webview.BLANK_EMBED_HTML
@@ -988,11 +989,16 @@ private fun ExoSurface(
         val audio = runCatching { exo.audioFormat?.bitrate }.getOrNull() ?: -1
         return video.toLong() + audio.coerceAtLeast(0)
     }
-    LaunchedEffect(exo) {
-        while (true) {
-            delay(1.seconds)
-            val buffered = runCatching { exo.bufferedPosition }.getOrDefault(0L)
-            downloadWatch.sample(SystemClock.elapsedRealtime(), MediaBytes.total(), buffered)
+    // Debug builds only: its reports go only to the info log, which release
+    // builds leave out (see proguard-rules.pro), so there it would wake the
+    // main thread every second for nothing.
+    if (BuildConfig.DEBUG) {
+        LaunchedEffect(exo) {
+            while (true) {
+                delay(1.seconds)
+                val buffered = runCatching { exo.bufferedPosition }.getOrDefault(0L)
+                downloadWatch.sample(SystemClock.elapsedRealtime(), MediaBytes.total(), buffered)
+            }
         }
     }
     DisposableEffect(exo) {

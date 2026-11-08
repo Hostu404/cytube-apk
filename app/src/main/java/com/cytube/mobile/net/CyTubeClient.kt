@@ -418,8 +418,8 @@ class CyTubeClient(
         socket?.let {
             it.off()
             it.io().off()
+            // disconnect() is close() in socket.io-client: once is enough.
             it.disconnect()
-            it.close()
         }
         socket = null
         leaderName = null

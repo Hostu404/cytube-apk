@@ -136,4 +136,34 @@ class PeerTubeResolverTest {
         // Invalid video ID
         assertTrue(PeerTubeResolver.resolve(mockClient, "peertube.example.com;abc/../../def").isFailure)
     }
+
+    @Test
+    fun upgradesPlainHttpAddressesToHttps() = runBlocking {
+        // Cleartext is off app-wide, so an http address could never play.
+        val sampleJson = """
+            {
+              "streamingPlaylists": [],
+              "files": [
+                {
+                  "resolution": { "id": 720, "label": "720p" },
+                  "fileUrl": "http://peertube.example.com/static/web-videos/uuid-720.mp4"
+                }
+              ]
+            }
+        """.trimIndent()
+        val mockClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(sampleJson.toResponseBody("application/json".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val result = PeerTubeResolver.resolve(mockClient, "peertube.example.com;plainhttp720")
+        assertEquals("https://peertube.example.com/static/web-videos/uuid-720.mp4", result.getOrNull()?.url)
+    }
 }

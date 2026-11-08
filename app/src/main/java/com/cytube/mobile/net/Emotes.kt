@@ -213,13 +213,22 @@ class EmoteSet private constructor(
         private val WHITESPACE = Regex("\\s+")
 
         fun from(emotes: List<Emote>, effects: EmoteEffects = EmoteEffects.NONE): EmoteSet {
-            if (emotes.isEmpty()) return if (effects === EmoteEffects.NONE) EMPTY else EmoteSet(emptyList(), emptyMap(), emptyList(), effects)
+            // Each name once, and only emotes that can be shown. CyTube's
+            // "import emotes" takes a channel's list as given, so the same
+            // emote can be in it twice, and the emote sheet (which keys its
+            // tiles on them) couldn't be opened. The later one of a name wins
+            // (in the earlier's place), as it does for chat below. One with
+            // no name, or whose image address was refused (see
+            // resolveMediaUrl), has nothing to show.
+            val byName = LinkedHashMap<String, Emote>(emotes.size)
+            for (e in emotes) if (e.name.isNotBlank() && e.image.isNotBlank()) byName[e.name] = e
+            if (byName.isEmpty()) return if (effects === EmoteEffects.NONE) EMPTY else EmoteSet(emptyList(), emptyMap(), emptyList(), effects)
+            val all = byName.values.toList()
 
-            val hashed = HashMap<String, Emote>(emotes.size)
+            val hashed = HashMap<String, Emote>(all.size)
             val spaced = ArrayList<Pair<Regex, Emote>>()
 
-            for (e in emotes) {
-                if (e.name.isBlank() || e.image.isBlank()) continue
+            for (e in all) {
                 if (e.name.contains(WHITESPACE)) {
                     // Cannot be hashmapped; compile its source pattern instead.
                     val compiled = runCatching {
@@ -233,7 +242,7 @@ class EmoteSet private constructor(
                     hashed[sanitize(e.name)] = e
                 }
             }
-            return EmoteSet(emotes, hashed, spaced, effects)
+            return EmoteSet(all, hashed, spaced, effects)
         }
 
         /** Matches loadEmotes()'s sanitizeText, so map keys line up with the

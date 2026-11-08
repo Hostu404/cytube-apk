@@ -1,18 +1,33 @@
 package com.cytube.mobile.data
 
 import android.content.Context
+import android.util.Log
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.cytube.mobile.ui.defaultSyncAccuracy
+import java.io.IOException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
-val Context.dataStore by preferencesDataStore("cytube_settings")
+/** A settings file that can't be read any more (spoilt on disk) is started
+ *  afresh, with every setting back at its default, rather than throwing on
+ *  every read — which, with the settings read as the app starts, would
+ *  crash it on every launch. */
+val Context.dataStore by preferencesDataStore(
+    "cytube_settings",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() }
+)
 
 /** Automatic / Native / Web, per the brief's compatibility toggle. */
 enum class CompatMode { AUTOMATIC, NATIVE, WEB;
@@ -85,10 +100,40 @@ val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
 
 class SettingsStore(private val context: Context) {
 
-    val settings: Flow<Settings> = context.dataStore.data.map { p ->
+    /**
+     * Everything saved, as it changes. A disk that can't be read reads as
+     * nothing saved (every setting at its default) rather than throwing at
+     * whatever is collecting: never a crash over a settings file.
+     */
+    private val prefs: Flow<Preferences> = context.dataStore.data.catch { e ->
+        if (e !is IOException) throw e
+        Log.w(TAG, "settings couldn't be read; using the defaults", e)
+        emit(emptyPreferences())
+    }
+
+    /** Worked out once: whether this is a TV doesn't change, and finding out
+     *  asks the system, which used to happen on every write to the store. */
+    private val defaultAccuracy by lazy { defaultSyncAccuracy(context) }
+
+    /**
+     * Saves [change]; false when it couldn't be (a full disk, say). Nothing
+     * that saves a setting needs to handle that itself: a setting that wasn't
+     * kept just reads back as it was.
+     */
+    private suspend fun save(change: (MutablePreferences) -> Unit): Boolean = try {
+        context.dataStore.edit { change(it) }
+        true
+    } catch (e: IOException) {
+        Log.w(TAG, "settings couldn't be saved", e)
+        false
+    }
+
+    // Each only when its own value changes, not on every write to the store
+    // (a channel's recent emotes, its background, a visit...).
+    val settings: Flow<Settings> = prefs.map { p ->
         Settings(
             syncEnabled = p[SYNC] ?: true,
-            syncAccuracy = p[ACCURACY] ?: defaultSyncAccuracy(context),
+            syncAccuracy = p[ACCURACY] ?: defaultAccuracy,
             compatMode = CompatMode.parse(p[COMPAT]),
             showEmotes = p[EMOTES] ?: true,
             pipEnabled = p[PIP] ?: false,
@@ -102,53 +147,53 @@ class SettingsStore(private val context: Context) {
             lightsDownDim = (p[LIGHTS_DOWN_DIM] ?: DEFAULT_LIGHTS_DOWN_DIM).coerceIn(LIGHTS_DOWN_DIM_RANGE),
             messageRecall = p[MESSAGE_RECALL] ?: true
         )
-    }
+    }.distinctUntilChanged()
 
-    suspend fun setSync(v: Boolean) = context.dataStore.edit { it[SYNC] = v }.let {}
-    suspend fun setAccuracy(v: Double) = context.dataStore.edit { it[ACCURACY] = v }.let {}
-    suspend fun setCompat(v: CompatMode) = context.dataStore.edit { it[COMPAT] = v.name }.let {}
-    suspend fun setEmotes(v: Boolean) = context.dataStore.edit { it[EMOTES] = v }.let {}
-    suspend fun setPip(v: Boolean) = context.dataStore.edit { it[PIP] = v }.let {}
-    suspend fun setGroupChat(v: Boolean) = context.dataStore.edit { it[GROUP_CHAT] = v }.let {}
-    suspend fun setChannelBackgrounds(v: Boolean) = context.dataStore.edit { it[CHANNEL_BACKGROUNDS] = v }.let {}
-    suspend fun setNicoEmotesOnly(v: Boolean) = context.dataStore.edit { it[NICO_EMOTES_ONLY] = v }.let {}
-    suspend fun setGuestName(v: String) =
-        context.dataStore.edit { it[GUEST_NAME] = v.trim().take(20) }.let {}
-    suspend fun setThemeMode(v: ThemeMode) = context.dataStore.edit { p ->
+    suspend fun setSync(v: Boolean) = save { it[SYNC] = v }
+    suspend fun setAccuracy(v: Double) = save { it[ACCURACY] = v }
+    suspend fun setCompat(v: CompatMode) = save { it[COMPAT] = v.name }
+    suspend fun setEmotes(v: Boolean) = save { it[EMOTES] = v }
+    suspend fun setPip(v: Boolean) = save { it[PIP] = v }
+    suspend fun setGroupChat(v: Boolean) = save { it[GROUP_CHAT] = v }
+    suspend fun setChannelBackgrounds(v: Boolean) = save { it[CHANNEL_BACKGROUNDS] = v }
+    suspend fun setNicoEmotesOnly(v: Boolean) = save { it[NICO_EMOTES_ONLY] = v }
+    suspend fun setGuestName(v: String) = save { it[GUEST_NAME] = guestNameToSave(v) }
+    suspend fun setThemeMode(v: ThemeMode) = save { p ->
         // Replacing an old cot theme: Prince stays, on the cot switch.
         if (p[COT] == null && ThemeMode.wasCot(p[THEME_MODE])) p[COT] = true
         p[THEME_MODE] = v.name
-    }.let {}
-    suspend fun setCot(v: Boolean) = context.dataStore.edit { it[COT] = v }.let {}
-    suspend fun setNicoSpeed(v: Float) = context.dataStore.edit { it[NICO_SPEED] = v.coerceIn(NICO_SPEED_RANGE) }.let {}
-    suspend fun setLightsDownDim(v: Float) = context.dataStore.edit { it[LIGHTS_DOWN_DIM] = v.coerceIn(LIGHTS_DOWN_DIM_RANGE) }.let {}
-    suspend fun setMessageRecall(v: Boolean) = context.dataStore.edit { it[MESSAGE_RECALL] = v }.let {}
+    }
+    suspend fun setCot(v: Boolean) = save { it[COT] = v }
+    suspend fun setNicoSpeed(v: Float) = save { it[NICO_SPEED] = v.coerceIn(NICO_SPEED_RANGE) }
+    suspend fun setLightsDownDim(v: Float) = save { it[LIGHTS_DOWN_DIM] = v.coerceIn(LIGHTS_DOWN_DIM_RANGE) }
+    suspend fun setMessageRecall(v: Boolean) = save { it[MESSAGE_RECALL] = v }
 
     // ---- per-channel state ----
 
     val favourites: Flow<List<String>> =
-        context.dataStore.data.map { (it[FAVOURITES] ?: emptySet()).sorted() }
+        prefs.map { (it[FAVOURITES] ?: emptySet()).sorted() }.distinctUntilChanged()
 
     val recents: Flow<List<String>> =
-        context.dataStore.data.map { p ->
+        prefs.map { p ->
             (p[RECENTS] ?: "").split('\n').filter { it.isNotBlank() }
-        }
+        }.distinctUntilChanged()
 
-    suspend fun toggleFavourite(channel: String) = context.dataStore.edit { p ->
+    /** False when it couldn't be saved, and so didn't change. */
+    suspend fun toggleFavourite(channel: String) = save { p ->
         val cur = (p[FAVOURITES] ?: emptySet()).toMutableSet()
         if (!cur.add(channel)) cur.remove(channel)
         p[FAVOURITES] = cur
-    }.let {}
+    }
 
     /** Waterfall: joining a channel bumps it to the front, and the list is
      *  capped at [MAX_RECENTS] — the oldest entry falls off the end rather
      *  than the list growing without bound. */
-    suspend fun noteVisit(channel: String) = context.dataStore.edit { p ->
+    suspend fun noteVisit(channel: String) = save { p ->
         val cur = (p[RECENTS] ?: "").split('\n').filter { it.isNotBlank() && it != channel }
         p[RECENTS] = (listOf(channel) + cur).take(MAX_RECENTS).joinToString("\n")
-    }.let {}
+    }
 
-    suspend fun clearRecents() = context.dataStore.edit { p -> p[RECENTS] = "" }.let {}
+    suspend fun clearRecents() = save { p -> p[RECENTS] = "" }
 
     // ---- ignored users ----
 
@@ -157,34 +202,33 @@ class SettingsStore(private val context: Context) {
      *  channel. Kept as first written; CyTube names match ignoring case, so
      *  compare with [isIgnoredName]. */
     val ignoredUsers: Flow<Set<String>> =
-        context.dataStore.data.map { it[IGNORED] ?: emptySet() }
+        prefs.map { it[IGNORED] ?: emptySet() }.distinctUntilChanged()
 
-    suspend fun setIgnored(name: String, ignored: Boolean) = context.dataStore.edit { p ->
+    suspend fun setIgnored(name: String, ignored: Boolean) = save { p ->
         val rest = (p[IGNORED] ?: emptySet()).filterNot { it.equals(name, ignoreCase = true) }.toSet()
         p[IGNORED] = if (ignored && name.isNotBlank()) rest + name.trim() else rest
-    }.let {}
+    }
 
     fun channelCompat(channel: String): Flow<CompatMode?> =
-        context.dataStore.data.map { p -> p[compatKey(channel)]?.let { CompatMode.parse(it) } }
+        prefs.map { p -> p[compatKey(channel)]?.let { CompatMode.parse(it) } }.distinctUntilChanged()
 
-    suspend fun setChannelCompat(channel: String, v: CompatMode?) =
-        context.dataStore.edit { p ->
-            if (v == null) p.remove(compatKey(channel)) else p[compatKey(channel)] = v.name
-        }.let {}
+    suspend fun setChannelCompat(channel: String, v: CompatMode?) = save { p ->
+        if (v == null) p.remove(compatKey(channel)) else p[compatKey(channel)] = v.name
+    }
 
     /** The picture last shown behind this channel's top bar (see
      *  ChannelHeader), as ChannelBackground.encode() text: shown the moment
      *  the channel opens, before the channel has sent anything. Null when
      *  there's none yet. */
     fun channelBackdrop(channel: String): Flow<String?> =
-        context.dataStore.data.map { p -> p[backdropKey(channel)] }
+        prefs.map { p -> p[backdropKey(channel)] }.distinctUntilChanged()
 
-    suspend fun setChannelBackdrop(channel: String, v: String?) =
-        context.dataStore.edit { p ->
-            if (v == null) p.remove(backdropKey(channel)) else p[backdropKey(channel)] = v
-        }.let {}
+    suspend fun setChannelBackdrop(channel: String, v: String?) = save { p ->
+        if (v == null) p.remove(backdropKey(channel)) else p[backdropKey(channel)] = v
+    }
 
     private companion object {
+        const val TAG = "CyTubeSettings"
         const val MAX_RECENTS = 4
 
         val SYNC = booleanPreferencesKey("sync_enabled")
@@ -209,6 +253,11 @@ class SettingsStore(private val context: Context) {
         fun backdropKey(channel: String) = stringPreferencesKey("backdrop:$channel")
     }
 }
+
+/** The guest name as it's kept: no spaces at either end, at most 20
+ *  characters. The Account screen compares with this to save only a real
+ *  change. */
+fun guestNameToSave(name: String): String = name.trim().take(20)
 
 /** True when [name] is in [ignoredLower] (names already lowercased), the
  *  way CyTube matches names: ignoring case. */
