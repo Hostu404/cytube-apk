@@ -100,6 +100,60 @@ class SyncEngineTest {
         assertTrue(player.isPaused)
     }
 
+    // A leader moving the video while the room is paused: a paused player
+    // follows, as CyTube's own player does. It used to stay where it was.
+    @Test fun followsTheRoomWhilePaused() {
+        player.isPaused = true
+        player.position = 50.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0)
+        assertEquals(listOf(120.0), player.seeks)
+        assertTrue(player.isPaused)
+        assertEquals(0, player.plays)
+    }
+
+    @Test fun aPausedPlayerWithinToleranceIsLeftAlone() {
+        player.isPaused = true
+        player.position = 119.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0)   // 1 s off; tolerance 2 s
+        player.position = 122.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 5_000)
+        assertEquals(emptyList<Double>(), player.seeks)
+    }
+
+    @Test fun pausedCorrectionsAreSpacedOut() {
+        player.isPaused = true
+        player.position = 50.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0)
+        player.position = 50.0                                   // the seek didn't take
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 1_000)
+        assertEquals(1, player.seeks.size)
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 3_500)
+        assertEquals(listOf(120.0, 120.0), player.seeks)
+    }
+
+    @Test fun noPausedCorrectionDuringGraceOrForLiveMedia() {
+        player.isPaused = true
+        player.position = 50.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0, grace = true)
+        assertEquals(emptyList<Double>(), player.seeks)
+        player.mediaLengthSeconds = 0
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 10_000)
+        assertEquals(emptyList<Double>(), player.seeks)
+    }
+
+    @Test fun embedsFollowWhilePausedWithTheirOwnCooldown() {
+        player.native = false
+        player.isPaused = true
+        player.position = 50.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0)
+        assertEquals(listOf(120.0), player.seeks)
+        player.position = 50.0
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 4_000)   // within its 5 s
+        assertEquals(1, player.seeks.size)
+        apply(serverTime = 120.0, paused = true, nowMs = T0 + 5_500)
+        assertEquals(2, player.seeks.size)
+    }
+
     @Test fun resumesWhenServerPlays() {
         player.isPaused = true
         player.position = 10.0

@@ -24,6 +24,35 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+/**
+ * The saved login as Compatibility View hands it to Android's WebView: the
+ * Set-Cookie values to give CookieManager for [forLogin]'s base address, in
+ * order.
+ *
+ * For the whole site (Domain=cytu.be), not just the host the page is on:
+ * the page's chat runs over a Socket.IO connection to another host
+ * (cytu.be's socketconfig names one such as zip.cytu.be or bigapple.cytu.be,
+ * depending on the channel), and a cookie for cytu.be alone
+ * isn't sent there, so the page showed logged in while its chat joined
+ * anonymously. CyTube sets the cookie the same way for the same reason
+ * (webserver.js setAuthCookie: domain http.root-domain-dotted). Before it,
+ * any host-only copy an earlier version left is taken away, so only the one
+ * cookie is sent. Logging out takes both forms away (AuthRepository.logout).
+ */
+internal object CompatCookies {
+    private const val ATTRIBUTES = "Path=/; Secure; HttpOnly; SameSite=Lax"
+
+    fun forLogin(baseUrl: String, authCookie: String): List<String> {
+        val host = baseUrl.toHttpUrlOrNull()?.host ?: return listOf("auth=$authCookie; $ATTRIBUTES")
+        return listOf(
+            "auth=; $ATTRIBUTES; Max-Age=0",
+            "auth=$authCookie; Domain=$host; $ATTRIBUTES"
+        )
+    }
+}
+
 /**
  * Compatibility View: the real CyTube channel page, whole.
  *
@@ -65,7 +94,8 @@ fun WebCompatView(
             factory = { ctx ->
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
-                    authCookie?.let { setCookie(baseUrl, "auth=$it; Path=/; Secure; HttpOnly; SameSite=Lax") }
+                    // In order: see CompatCookies.forLogin.
+                    authCookie?.let { cookie -> CompatCookies.forLogin(baseUrl, cookie).forEach { setCookie(baseUrl, it) } }
                 }
 
                 WebView(ctx).apply {

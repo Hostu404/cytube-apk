@@ -270,6 +270,12 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
     override val isPlaying: Boolean
         get() = if (isReleased) false else runCatching { exo.isPlaying }.getOrDefault(false)
 
+    /** Only for an item this handle loaded: the empty player stop() leaves
+     *  "ends" its empty playlist at once on a play command. */
+    override val hasEnded: Boolean
+        get() = !isReleased && loadedKey != null &&
+            runCatching { exo.playbackState == Player.STATE_ENDED }.getOrDefault(false)
+
     override val isNative: Boolean get() = true
 
     /**

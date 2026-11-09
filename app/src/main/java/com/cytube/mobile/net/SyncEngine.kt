@@ -228,6 +228,8 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 log("room paused: pausing at ${currentTime.s1()}s")
                 player.seekTo(currentTime)
                 player.pause()
+            } else if (!withinGracePeriod) {
+                followWhilePaused(player, currentTime, safeAccuracy, nowMs)
             }
             return
         }
@@ -449,6 +451,38 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 "playing at ${(if (diff > 0) 1.0 + magnitude else 1.0 - magnitude).s2()}x")
         }
         nudging = true
+    }
+
+    /**
+     * The room is paused and so is [player]: keep it on the room's frame
+     * anyway. CyTube's own player does (update.coffee runs its drift check
+     * whether or not the room is paused), and it matters when a leader moves
+     * the video while it's paused: without this the player stayed where it
+     * was, then played the wrong part when the room went on, until the
+     * drift check caught it a couple of seconds later and jumped.
+     *
+     * Exactly to the room's time, not ahead of it as a playing correction
+     * goes (nothing is moving), past the same tolerance and with the same
+     * spacing between corrections as when playing. Not for live media,
+     * whose position isn't the room's clock (see apply). A hold or a pending
+     * lead measurement belonged to the old position and goes with it.
+     */
+    private suspend fun followWhilePaused(player: PlayerHandle, roomTime: Double, accuracy: Double, nowMs: Long) {
+        if (player.mediaLengthSeconds <= 0) return
+        val here = player.currentTimeSeconds()
+        if (here.isNaN() || here.isInfinite() || abs(roomTime - here) <= accuracy) return
+        if (player.isNative) {
+            if (nowMs - lastNativeCorrectionMs < NATIVE_CORRECTION_COOLDOWN_MS) return
+            lastNativeCorrectionMs = nowMs
+        } else {
+            if (nowMs - lastNonNativeCorrectionMs < NON_NATIVE_CORRECTION_COOLDOWN_MS) return
+            lastNonNativeCorrectionMs = nowMs
+        }
+        holdAt = null
+        pendingLeadCheck = false
+        playingSinceMs = 0L
+        log("room paused at ${roomTime.s1()}s, player paused at ${here.s1()}s: moving it there")
+        player.seekTo(roomTime)
     }
 
     /** Ends any rate nudge in progress. Also called by ChannelViewModel when it

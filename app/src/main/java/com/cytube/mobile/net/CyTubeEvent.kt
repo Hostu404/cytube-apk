@@ -44,6 +44,14 @@ sealed interface CyTubeEvent {
 
     data class Chat(val message: ChatMessage) : CyTubeEvent
     data object ChatCleared : CyTubeEvent
+    /** The server didn't pass on a message of ours, and [message] says why
+     *  (see ChatRefusal): its spam filter ("spamFiltered"), or we're muted
+     *  ("noflood"). The website shows these; before, the message just
+     *  vanished. */
+    data class ChatRefused(val message: String) : CyTubeEvent
+    /** The server dropped a message of ours for coming too fast ("cooldown")
+     *  and won't take another for about [waitMs]. */
+    data class ChatCooldown(val waitMs: Long) : CyTubeEvent
 
     data class UserListReplaced(val users: List<ChannelUser>) : CyTubeEvent
     data class UserJoined(val user: ChannelUser) : CyTubeEvent
@@ -123,4 +131,40 @@ internal object KickReason {
         }
         return reason?.trim()?.takeIf { it.isNotEmpty() } ?: DEFAULT
     }
+}
+
+/**
+ * What to tell someone whose chat message (or private message) the server
+ * turned away without passing it on (src/channel/chat.js), worded as the
+ * website words it (www/js/callbacks.js), for a guest as much as an account.
+ */
+internal object ChatRefusal {
+    /** "spamFiltered": the channel's minimum account/connection age to
+     *  chat ("new_user_chat_delay") or to post links ("…_link_delay"). */
+    fun spamFiltered(reason: String?): String = when (reason) {
+        "NEW_USER_CHAT" -> "You're too new to chat in this channel, so that message wasn't sent. " +
+            "Please wait a while and try again."
+        "NEW_USER_CHAT_LINK" -> "You're too new to post links in this channel, so that message wasn't sent. " +
+            "Please wait a while and try again."
+        else -> "The channel's spam filter stopped that message."
+    }
+
+    /** "noflood": {action, msg}, e.g. "You have been muted on this channel." */
+    fun noflood(msg: String?): String =
+        msg?.trim()?.takeIf { it.isNotEmpty() && it != "null" } ?: "That message wasn't sent."
+
+    /** What a cooldown is told, the one time it's said: the message is gone. */
+    const val COOLDOWN = "You're sending messages too quickly, so that one wasn't sent. " +
+        "Wait a moment, then send it again."
+
+    /** "cooldown": how long until the server takes another message, in ms
+     *  (it sends 1000 / its allowed rate; the website waits 200 ms more).
+     *  Kept within reason should the server send something odd. */
+    fun cooldownMs(arg: Any?): Long {
+        val ms = (arg as? Number)?.toDouble() ?: return DEFAULT_COOLDOWN_MS
+        if (ms.isNaN() || ms.isInfinite()) return DEFAULT_COOLDOWN_MS
+        return (ms.toLong() + 200).coerceIn(200, 10_000)
+    }
+
+    private const val DEFAULT_COOLDOWN_MS = 1_200L
 }

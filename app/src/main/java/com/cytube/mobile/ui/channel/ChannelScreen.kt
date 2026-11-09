@@ -687,7 +687,8 @@ fun ChannelScreen(
                         onToggleChatOverlay = { chatOverlayOn = !chatOverlayOn },
                         onSelectSubtitle = vm::selectSubtitle,
                         onExit = { tvShowingChat = false },
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        chatCoolingDown = state.chatCoolingDown
                     )
                 }
             }
@@ -1187,6 +1188,7 @@ fun ChannelScreen(
                 groupMessages = state.groupChat,
                 sentChat = if (state.messageRecall) state.sentChat else SentChat.EMPTY,
                 recentEmotes = state.recentEmotes,
+                coolingDown = state.chatCoolingDown,
                 modifier = Modifier.weight(1f)
             )
             }
@@ -1253,7 +1255,9 @@ fun ChannelScreen(
                 Panel.PLAYLIST -> PlaylistPanel(
                     items = state.playlist,
                     currentUid = state.currentUid,
-                    canControl = state.localRank >= 2,
+                    // The channel's own permissions, as the server checks them.
+                    canJump = state.canJump,
+                    canDelete = state.canDelete,
                     onJumpTo = onJumpTo,
                     onDelete = onDeleteItem,
                     syncEnabled = state.syncEnabled,
@@ -2134,7 +2138,9 @@ private fun TvChatView(
     onToggleChatOverlay: () -> Unit,
     onSelectSubtitle: (Int?, String) -> Unit,
     onExit: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** See ChannelUiState.chatCoolingDown. */
+    chatCoolingDown: Boolean = false
 ) {
     val nicoFocusRequester = remember { FocusRequester() }
     val ccFocusRequester = remember { FocusRequester() }
@@ -2335,7 +2341,8 @@ private fun TvChatView(
             // No touch to pick an emote with on TV, and the picker's grid
             // is its own separate focus surface this screen isn't built to
             // host — see ChatPanel's doc comment on the parameter.
-            showEmotePickerButton = false
+            showEmotePickerButton = false,
+            coolingDown = chatCoolingDown
             // Spoiler reveal is handled inside ChatRow itself, keyed off
             // messagesFocusable (false here) — see its own comment. No
             // separate flag needed at this level.

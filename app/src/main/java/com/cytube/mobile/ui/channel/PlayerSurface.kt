@@ -283,12 +283,26 @@ private class EmbedPlayerHandle(
     private var volume: Float = 1f
     private var volumeAppliedWhilePlaying = false
 
+    /** The page said its video ended (EMBED_ENDED_SENTINEL), and it hasn't
+     *  played or been moved since; see PlayerHandle.hasEnded. */
+    @Volatile
+    private var ended = false
+
+    override val hasEnded: Boolean
+        get() = ended && webView != null
+
+    /** Called when the page says its video ended. */
+    fun onEnded() {
+        ended = true
+    }
+
     /** Called with each state report from the page. */
     fun onStateReport(paused: Boolean, currentTime: Double, buffering: Boolean) {
         isPaused = paused
         lastCurrentTime = currentTime
         lastTimeAtMs = SystemClock.elapsedRealtime()
         isBuffering = buffering
+        if (!paused) ended = false
         if (!paused && !volumeAppliedWhilePlaying) {
             volumeAppliedWhilePlaying = true
             applyVolume()
@@ -318,6 +332,7 @@ private class EmbedPlayerHandle(
     }
 
     override fun seekTo(seconds: Double) {
+        ended = false
         lastCurrentTime = seconds
         lastTimeAtMs = SystemClock.elapsedRealtime()
         webView?.evaluateJavascript(
@@ -626,6 +641,7 @@ private fun EmbedSurface(
                     override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                         val msg = consoleMessage.message()
                         if (msg == EMBED_ENDED_SENTINEL) {
+                            handle.onEnded()
                             currentOnEnded?.invoke()
                             return true
                         }

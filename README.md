@@ -105,9 +105,11 @@ There's no Play Store or Amazon Appstore listing — this is a hobby project, di
 
 ## Privacy & Security
 
-Your password is sent once, directly to your CyTube server, the same way the CyTube website logs in — it is never written to disk. The app keeps only the signed session cookie the server returns: if you choose to stay logged in it's saved encrypted on your device, otherwise it's kept in memory until the app closes. If you open Compatibility View, the cookie is also given to Android's WebView so the CyTube page there is logged in too; WebView keeps it in its own cookie store.
+Your password is sent once, directly to your CyTube server, the same way the CyTube website logs in — it is never written to disk. Of your login, the app keeps only the signed session cookie the server returns: if you choose to stay logged in it's saved encrypted on your device, otherwise it's kept in memory until the app closes. If you open Compatibility View, the cookie is also given to Android's WebView so the CyTube page there (and its chat) is logged in too; WebView keeps it in its own cookie store.
 
 Logging out removes the cookie from the app and from WebView. CyTube has no way for an app to end a session on the server, so a copy of the cookie stays valid until it expires or you change your password.
+
+The app also keeps the `ip-session` cookie CyTube gives anyone who opens a channel page: your IP address and when the server first saw it, signed by the server. The app shows it when joining a channel, so a channel that makes new visitors wait before they can chat or post links counts that wait from your first visit, instead of starting it again on every reconnect. It isn't tied to your account, so it stays when you log out.
 
 Channels can style their page with their own CSS and scripts. The app reads a channel's CSS as plain data, for emote effects, name colours, chat text styles and its background picture, and it never runs a channel's scripts (it only reads them for a background picture or the stylesheets they add). On a phone it also fetches the stylesheets a channel imports or links, and, with **Channel backgrounds** on in Settings (the default), loads the channel's background picture: the same requests the channel's own page makes in a browser. Nothing else the CSS links to is loaded.
 
@@ -152,7 +154,7 @@ Built with Kotlin 2.4, Jetpack Compose (BOM 2026.09) and Media3 1.11, on Android
 git clone https://github.com/Hostu404/CyTube-APK.git
 ```
 
-Open the project in Android Studio (Quail 2 / 2026.1.2 or newer, for Android Gradle plugin 9.3) and let Gradle sync, or build from the command line with `./gradlew assembleRelease` (`.\gradlew assembleRelease` on Windows). Building needs JDK 17 or newer and the Android SDK platform for API 37.
+Open the project in Android Studio (Quail 2 / 2026.1.2 or newer, for Android Gradle plugin 9.3) and let Gradle sync, or build from the command line with `./gradlew assembleRelease` (`.\gradlew assembleRelease` on Windows). Building needs JDK 17 or newer and the Android SDK platform for API 37. The build itself runs on JDK 17: if that machine has only a newer one, Gradle downloads a JDK 17 the first time (into its own folder, `~/.gradle/jdks`).
 
 Release builds are signed only if you add a `keystore.properties` file (see `keystore.properties.example`); without one, the project still builds unsigned.
 

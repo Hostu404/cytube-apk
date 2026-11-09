@@ -77,6 +77,38 @@ class UpdateAlertsTest {
         assertNull(news[0].link)
     }
 
+    // The home page keys its list on the id: one listed twice can't be drawn,
+    // and would crash it at every launch while the alert is kept.
+    @Test fun eachIdOnceTheFirstWins() {
+        val news = AppAlerts.newsFrom(JSONObject("""{"alerts": [
+            {"id": "maint", "text": "Maintenance tonight"},
+            {"id": "maint", "text": "Maintenance tonight (corrected)"},
+            {"id": "other", "text": "Something else"},
+            {"id": " maint ", "text": "Same id with spaces round it"}
+        ]}"""), today, versionCode = 23)
+        assertEquals(listOf("news:maint", "news:other"), news.map { it.id })
+        assertEquals("Maintenance tonight", news[0].text)
+    }
+
+    @Test fun aRepeatedIdDoesNotUseUpTheRoomForNews() {
+        val json = JSONObject().put("alerts", org.json.JSONArray().apply {
+            repeat(4) { put(JSONObject().put("id", "same").put("text", "Same $it")) }
+            put(JSONObject().put("id", "next").put("text", "Next"))
+        })
+        assertEquals(listOf("news:same", "news:next"), AppAlerts.newsFrom(json, today, versionCode = 23).map { it.id })
+    }
+
+    @Test fun aKeptListWithAnIdTwiceReadsBackWithItOnce() {
+        val saved = """[
+            {"id": "news:maint", "text": "One", "update": false},
+            {"id": "news:maint", "text": "Two", "update": false},
+            {"id": "update:2026-11-07T03:10:00Z", "text": "New nightly", "update": true}
+        ]"""
+        val alerts = AppAlerts.decode(saved)
+        assertEquals(listOf("news:maint", "update:2026-11-07T03:10:00Z"), alerts.map { it.id })
+        assertEquals("One", alerts[0].text)
+    }
+
     @Test fun keptAndReadBack() {
         val alerts = listOf(
             AppAlert("update:2026-11-07T03:10:00Z", "New nightly: 7 Nov 2026", AppAlerts.NIGHTLY_PAGE, update = true),

@@ -3,8 +3,10 @@ package com.cytube.mobile.net
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.merge
@@ -29,13 +31,17 @@ import java.util.concurrent.TimeUnit
  */
 class CyTubeClient(
     private val http: OkHttpClient,
-    private val baseUrl: String = DEFAULT_BASE_URL
+    private val baseUrl: String = DEFAULT_BASE_URL,
+    /** Where CyTube's ip-session cookie is kept between connections (see
+     *  IpSessionCookies); the app's own keeps it between runs too. */
+    ipSessionStore: IpSessionStore = InMemoryIpSessionStore()
 ) {
     companion object {
         const val DEFAULT_BASE_URL = "https://cytu.be"
     }
 
     private val resolver = SocketConfigResolver(http, baseUrl)
+    private val ipSessions = IpSessionCookies(http, baseUrl, ipSessionStore)
 
     /** What the socket connects with: the app's own HTTP client, rather
      *  than the separate one the library makes for itself otherwise, so the
@@ -105,8 +111,13 @@ class CyTubeClient(
         channelPassword = password
         this.credential = credential
 
-        val serverUrl = try {
-            resolver.resolve(channel)
+        // The ip-session cookie is looked up alongside the server address, so
+        // the connection waits for neither one after the other.
+        val (serverUrl, ipSession) = try {
+            coroutineScope {
+                val ipSession = async { ipSessions.forChannel(channel) }
+                resolver.resolve(channel) to ipSession.await()
+            }
         } catch (e: Exception) {
             // Overtaken meanwhile: the newer connect decides what's shown,
             // not this one's failure.
@@ -136,8 +147,11 @@ class CyTubeClient(
             randomizationFactor = 0.5
             reconnectionAttempts = 20
             timeout = 20_000
-            (credential as? Credential.Cookie)?.let {
-                extraHeaders = mapOf("Cookie" to listOf("auth=${it.authCookie}"))
+            // The login cookie (when signed in) and the ip-session cookie,
+            // only ever to a server SocketConfigResolver has checked is this
+            // site's own.
+            IpSessionCookie.forHandshake((credential as? Credential.Cookie)?.authCookie, ipSession)?.let {
+                extraHeaders = mapOf("Cookie" to listOf(it))
             }
         }
 
@@ -251,6 +265,12 @@ class CyTubeClient(
         obj(s, "chatMsg") { CyTubeEvent.Chat(ChatMessage.from(it)) }
         obj(s, "pm") { CyTubeEvent.Chat(ChatMessage.from(it, isPm = true)) }
         s.on("clearchat") { emit(CyTubeEvent.ChatCleared) }
+        // A message of ours the server didn't pass on (chat.js), each with
+        // the website's own wording (see ChatRefusal): too new to chat or to
+        // post links here, muted, or sending too fast.
+        obj(s, "spamFiltered") { CyTubeEvent.ChatRefused(ChatRefusal.spamFiltered(it.optString("reason"))) }
+        obj(s, "noflood") { CyTubeEvent.ChatRefused(ChatRefusal.noflood(if (it.isNull("msg")) null else it.optString("msg"))) }
+        s.on("cooldown") { args -> emit(CyTubeEvent.ChatCooldown(ChatRefusal.cooldownMs(args.firstOrNull()))) }
 
         arr(s, "userlist") { CyTubeEvent.UserListReplaced(ChannelUser.listFrom(it)) }
         obj(s, "addUser") { CyTubeEvent.UserJoined(ChannelUser.from(it)) }
@@ -382,6 +402,14 @@ class CyTubeClient(
     fun requestPlaylist() { socket?.emit("requestPlaylist") }
     fun vote(option: Int) { socket?.emit("vote", JSONObject().put("option", option)) }
     fun jumpTo(uid: Int) { socket?.emit("jumpTo", uid) }
+    /**
+     * The leader's video ended: move the channel on. While a channel has a
+     * leader the server runs no clock of its own and never moves on by
+     * itself (playlist.js starts its timer only without one); the website's
+     * player sends this when the leader's video ends (player/videojs.coffee,
+     * youtube.coffee). Needs "playlistjump", which a leader has by default.
+     */
+    fun playNext() { socket?.emit("playNext") }
     /** One vote to skip the current item. The server counts one vote per IP
      *  and quietly ignores it if voteskip is off or our rank can't vote. */
     fun voteSkip() { socket?.emit("voteskip") }

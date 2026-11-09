@@ -118,9 +118,9 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
             // the app's own above — left alone, a logged-out user who had ever
             // opened Compatibility View would still be logged in there. Only
             // the auth cookie is expired: other sites' cookies (embedded
-            // players) are none of logout's business. Both the host-only
-            // form WebCompatView sets and a domain-wide one the site itself
-            // may have set.
+            // players) are none of logout's business. Both the domain-wide
+            // form WebCompatView sets (as the site itself does; see
+            // CompatCookies) and the host-only one older versions set.
             runCatching {
                 CookieManager.getInstance().apply {
                     val expired = "auth=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax"

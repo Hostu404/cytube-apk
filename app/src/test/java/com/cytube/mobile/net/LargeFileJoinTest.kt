@@ -190,6 +190,18 @@ class SyncEngineHoldTest {
         assertTrue(engine.isHolding && player.isPaused)
     }
 
+    @Test fun theRoomPausingElsewhereEndsTheHold() {
+        holdAhead()                                          // held at 6006 for the room
+        val block: suspend () -> Unit = {
+            // The leader moved back to 5900 and paused there.
+            engine.apply(player, TimeUpdate(5900.0, true), player.mediaId, 2.0, false, t0 + 5_000)
+        }
+        block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+        assertEquals(listOf(5900.0), player.seeks)
+        assertFalse(engine.isHolding)
+        assertTrue(player.isPaused)
+    }
+
     @Test fun standingDownReleasesAHeldPlayer() {
         // Becoming leader or turning sync off mid-hold must not leave it
         // paused (a leader's paused player pauses the whole room).

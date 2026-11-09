@@ -31,6 +31,13 @@ interface PlayerHandle {
      *  can't tell. SyncEngine won't speed-nudge a player that's nearly dry. */
     val bufferedAheadSeconds: Double get() = Double.NaN
 
+    /** True while the item has played to its end and stopped there (until
+     *  it's moved or played again). ChannelViewModel restarts such a player
+     *  when the channel starts the same item over (a one-item playlist going
+     *  round again), which sync on its own can't: a stopped-at-the-end player
+     *  is neither playing nor buffering, so SyncEngine leaves it be. */
+    val hasEnded: Boolean get() = false
+
     /** Small playback-rate adjustment SyncEngine uses to close moderate drift
      *  without a seek. Backends that can't do it just ignore it. */
     fun setPlaybackRate(rate: Float) {}

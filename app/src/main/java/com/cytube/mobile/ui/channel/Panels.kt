@@ -310,7 +310,11 @@ fun ChatPanel(
     sentChat: SentChat = SentChat.EMPTY,
     /** The emotes you've used here lately, newest first, for the top of the
      *  emote sheet (phone only; see RecentEmotes). */
-    recentEmotes: ImmutableList<String> = persistentListOf()
+    recentEmotes: ImmutableList<String> = persistentListOf(),
+    /** The server just dropped a message for coming too fast
+     *  (ChannelUiState.chatCoolingDown): for that moment the box keeps what's
+     *  typed rather than sending it to be dropped too. */
+    coolingDown: Boolean = false
 ) {
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
@@ -685,7 +689,8 @@ fun ChatPanel(
             }
             OutlinedTextField(
                 value = draft,
-                onValueChange = { draft = it },
+                // No longer than the server lets a message be (see ChatDraft).
+                onValueChange = { draft = it.withinChatLimit(draft) },
                 placeholder = {
                     Text(
                         when {
@@ -731,7 +736,8 @@ fun ChatPanel(
                 },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = {
-                    onSend(draft.text); draft = TextFieldValue(""); recalled = null
+                    // Held while the server isn't taking messages; kept typed.
+                    if (!coolingDown) { onSend(draft.text); draft = TextFieldValue(""); recalled = null }
                 }),
                 modifier = Modifier.weight(1f)
                     .focusRequester(inputFocus)
@@ -749,7 +755,7 @@ fun ChatPanel(
             )
             FilledIconButton(
                 onClick = { onSend(draft.text); draft = TextFieldValue(""); recalled = null },
-                enabled = canSend && draft.text.isNotBlank(),
+                enabled = canSend && !coolingDown && draft.text.isNotBlank(),
                 modifier = Modifier.size(48.dp)
             ) {
                 Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
@@ -792,8 +798,14 @@ private fun TextFieldValue.insertAtCursor(fragment: String): TextFieldValue {
     val insert = (if (needsSpace) " " else "") + fragment
     val next = text.substring(0, at) + insert + text.substring(at)
     val caret = at + insert.length
-    return TextFieldValue(next, TextRange(caret))
+    return TextFieldValue(next, TextRange(caret)).withinChatLimit(this)
 }
+
+/** This edit of [before] as the chat box takes it: no longer than a
+ *  message may be, keeping as much of what was put in as fits (see
+ *  ChatDraft.fit). */
+private fun TextFieldValue.withinChatLimit(before: TextFieldValue): TextFieldValue =
+    ChatDraft.fit(before.text, text)?.let { (fitted, cursor) -> TextFieldValue(fitted, TextRange(cursor)) } ?: this
 
 /**
  * Links always leave the app. The in-app WebView is for players only.
@@ -1584,7 +1596,10 @@ private fun ChatRow(
 fun PlaylistPanel(
     items: ImmutableList<PlaylistItem>,
     currentUid: Int,
-    canControl: Boolean,
+    /** May start an item for everyone (ChannelUiState.canJump). */
+    canJump: Boolean,
+    /** May remove items (ChannelUiState.canDelete). */
+    canDelete: Boolean,
     onJumpTo: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     modifier: Modifier = Modifier,
@@ -1699,7 +1714,7 @@ fun PlaylistPanel(
                 itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { _, item ->
                     val personallyResolvable = MediaTypes.canResolveIndependently(item.type)
                     val isCurrent = if (syncEnabled) item.uid == currentUid else item.uid == personalPickUid
-                    val rowEnabled = if (syncEnabled) canControl else personallyResolvable
+                    val rowEnabled = if (syncEnabled) canJump else personallyResolvable
                     Row(
                         Modifier.fillMaxWidth()
                             .background(
@@ -1755,7 +1770,7 @@ fun PlaylistPanel(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        if (canControl) {
+                        if (canDelete) {
                             IconButton(onClick = { onDelete(item.uid) }) {
                                 Icon(Icons.Default.Delete, contentDescription = "Remove",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -3,6 +3,7 @@ package com.cytube.mobile.di
 import android.content.Context
 import android.util.Log
 import androidx.annotation.OptIn
+import androidx.core.content.edit
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.Cache
@@ -11,6 +12,7 @@ import androidx.media3.datasource.cache.SimpleCache
 import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.ChannelIndexRepository
 import com.cytube.mobile.net.CyTubeClient
+import com.cytube.mobile.net.IpSessionStore
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,7 +101,15 @@ object Graph {
         appScope.launch(Dispatchers.IO) { http.dispatcher }
     }
 
-    fun newClient(): CyTubeClient = CyTubeClient(http, BASE_URL)
+    fun newClient(context: Context): CyTubeClient = CyTubeClient(http, BASE_URL, savedIpSession(context))
+
+    /** CyTube's ip-session cookie, kept between runs (see IpSessionCookies). */
+    @Volatile private var ipSessionStore: IpSessionStore? = null
+
+    private fun savedIpSession(context: Context): IpSessionStore =
+        ipSessionStore ?: synchronized(this) {
+            ipSessionStore ?: SavedIpSession(context.applicationContext).also { ipSessionStore = it }
+        }
 
     /** For small jobs that must finish even if the screen that started them
      *  goes away (e.g. saving a setting as the user leaves). */
@@ -168,6 +178,19 @@ object Graph {
 
     private const val TAG = "CyTubeGraph"
     private const val MEDIA_CACHE_DIR = "media"
+}
+
+/**
+ * CyTube's ip-session cookie (see IpSessionCookies) in a preferences file of
+ * its own, so a channel's wait for new visitors counts from the first visit,
+ * not from each run of the app, as a browser keeps it. Read and written only
+ * off the main thread (IpSessionCookies does both on an IO thread).
+ */
+private class SavedIpSession(private val context: Context) : IpSessionStore {
+    private val prefs by lazy { context.getSharedPreferences("cytube_ip_session", Context.MODE_PRIVATE) }
+    override fun load(): String? = prefs.getString(KEY, null)
+    override fun save(value: String) { prefs.edit { putString(KEY, value) } }
+    private companion object { const val KEY = "cookie" }
 }
 
 /** The most the media cache keeps on a phone or tablet. */

@@ -160,6 +160,33 @@ class FramesTest {
         assertFalse("unknown permission is never allowed", p.allows("nosuchthing", 5.0))
     }
 
+    // Jumping and removing go by the channel's own "playlistjump" and
+    // "playlistdelete" (with their open-playlist variants), as the server
+    // checks them — not a fixed "moderator or above" any more.
+    @Test fun jumpAndDeleteFollowTheChannelsPermissions() {
+        // CyTube's defaults (permissions.js DEFAULT_PERMISSIONS).
+        val defaults = Permissions(json(
+            """{"playlistjump":1.5,"oplaylistjump":1.5,"playlistdelete":2,"oplaylistdelete":2}"""
+        ))
+        // A leader (rank 1.5 while leading) may jump but not remove.
+        assertTrue(defaults.allowsPlaylistAction("playlistjump", 1.5, playlistOpen = false))
+        assertFalse(defaults.allowsPlaylistAction("playlistdelete", 1.5, playlistOpen = false))
+        // An ordinary registered user may do neither; a moderator both.
+        assertFalse(defaults.allowsPlaylistAction("playlistjump", 1.0, playlistOpen = false))
+        assertTrue(defaults.allowsPlaylistAction("playlistjump", 2.0, playlistOpen = false))
+        assertTrue(defaults.allowsPlaylistAction("playlistdelete", 2.0, playlistOpen = false))
+
+        // A channel that lets registered users jump, and keeps removing to admins.
+        val relaxed = Permissions(json("""{"playlistjump":1,"oplaylistjump":1,"playlistdelete":3,"oplaylistdelete":3}"""))
+        assertTrue(relaxed.allowsPlaylistAction("playlistjump", 1.0, playlistOpen = false))
+        assertFalse(relaxed.allowsPlaylistAction("playlistdelete", 2.0, playlistOpen = false))
+
+        // An open (unlocked) playlist can let anyone jump.
+        val open = Permissions(json("""{"playlistjump":2,"oplaylistjump":0}"""))
+        assertTrue(open.allowsPlaylistAction("playlistjump", 0.0, playlistOpen = true))
+        assertFalse(open.allowsPlaylistAction("playlistjump", 0.0, playlistOpen = false))
+    }
+
     @Test fun playlistPositions() {
         assertEquals(PlaylistPosition.START, PlaylistPosition.parse("prepend"))
         assertEquals(PlaylistPosition.END, PlaylistPosition.parse("append"))

@@ -291,6 +291,13 @@ data class ChannelUiState(
      *  box is only shown when this is true. */
     val canQueue: Boolean = false,
     val canQueueNext: Boolean = false,
+    /** Whether this user may start another playlist item for everyone
+     *  ("playlistjump", which leaders have by default) and remove items
+     *  ("playlistdelete"), as the server decides it — the channel's own
+     *  permissions, not a fixed rank (see refreshPermissions). The server
+     *  silently ignores either from anyone else. */
+    val canJump: Boolean = false,
+    val canDelete: Boolean = false,
     /** Whether the channel allows vote skipping and our rank may vote (the
      *  server ignores a vote otherwise, so the button is hidden). */
     val canVoteskip: Boolean = false,
@@ -316,7 +323,11 @@ data class ChannelUiState(
     val recentEmotes: PersistentList<String> = persistentListOf(),
     /** The playing item's subtitles, for the CC button; see
      *  NativePlayerHandle.onSubtitlesChanged. */
-    val subtitles: SubtitleOptions = SubtitleOptions.NONE
+    val subtitles: SubtitleOptions = SubtitleOptions.NONE,
+    /** The server just dropped a message for coming too fast and won't take
+     *  another for a moment: the chat box holds on to what's typed instead
+     *  of sending it into the void, as the website's does (see onChatCooldown). */
+    val chatCoolingDown: Boolean = false
 ) {
     val isLeader: Boolean get() = leader != null && leader == localUser
 }
@@ -331,7 +342,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private val settingsStore = SettingsStore(app)
     private val recentEmotesStore = RecentEmotesStore(app)
-    private val client = Graph.newClient()
+    private val client = Graph.newClient(app)
     private val sync = SyncEngine().apply { log = { Log.i(SYNC_TAG, it) } }
     /** TV chat shows spoilers revealed (no tap to reveal them with). */
     private val isTv = isTvDevice(app)
@@ -706,6 +717,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         guestLoginRetryJob?.cancel()
         refusedRetryJob?.cancel()
         refusedRetryJob = null
+        sessionRetryJob?.cancel()
+        sessionRetryJob = null
         val credential = savedCredential() ?: CyTubeClient.Credential.Guest(guestName())
         try {
             // The channel password too, so the app's own reconnects (refresh,
@@ -724,8 +737,13 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
     /** The channel password the user entered this visit, for rejoining. */
     private var channelPassword: String? = null
 
-    /** The saved login was refused once already; see SessionExpired. */
-    private var loginRefusedOnce = false
+    /** How many times in a row the saved login has been refused and tried
+     *  again; see onSavedLoginRefused. */
+    private var loginRefusals = 0
+
+    /** Trying the saved login again after the server refused it; see
+     *  onSavedLoginRefused. connect() cancels it, like [refusedRetryJob]. */
+    private var sessionRetryJob: Job? = null
 
     /** Waiting out the server's one-guest-login-a-minute limit; see LoginResult. */
     private var guestLoginRetryJob: Job? = null
@@ -778,6 +796,55 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
             client.disconnect()
             connect(s.channel)
         }
+    }
+
+    /**
+     * The saved login cookie was refused, so the server treats us as
+     * anonymous — shown as logged in, chat silently ignored. The server says
+     * the same for an expired cookie, a changed password, and a passing
+     * database error (its auth check then lets the connection on without a
+     * user), so unless the cookie has visibly expired it's tried again, a
+     * little later each time ([SESSION_RETRY_DELAYS_MS]), before it's given
+     * up on: forgetting it signs the user out of the app altogether, which a
+     * few seconds of server trouble shouldn't do. Each try waits in a job of
+     * its own, not in the event loop, so nothing else waits behind it.
+     */
+    private suspend fun onSavedLoginRefused() {
+        val cookie = (savedCredential() as? CyTubeClient.Credential.Cookie)?.authCookie
+        val expired = cookie != null && SessionCookie.isExpired(cookie, System.currentTimeMillis())
+        val wait = if (expired) null else SESSION_RETRY_DELAYS_MS.getOrNull(loginRefusals)
+        if (wait != null) {
+            loginRefusals++
+            Log.i(TAG, "saved login was refused; trying it again in ${wait}ms (try $loginRefusals)")
+            client.disconnect()
+            update { it.copy(connection = ConnectionState.RECONNECTING, statusMessage = "Signing in again…") }
+            sessionRetryJob?.cancel()
+            sessionRetryJob = viewModelScope.launch {
+                delay(wait.milliseconds)
+                // Cleared first: connect() cancels a pending retry, and this is it.
+                sessionRetryJob = null
+                val s = _state.value
+                // Moved to Compatibility View or kicked meanwhile: stay away.
+                if (s.effectiveMode == CompatMode.WEB || s.kicked != null) return@launch
+                connect(s.channel)
+            }
+            return
+        }
+        // Refused for good: forget it and rejoin as a guest.
+        Log.i(TAG, "saved login was refused${if (expired) " (expired)" else ""}; rejoining as a guest")
+        withContext(Dispatchers.IO) { runCatching { Graph.auth(getApplication()).logout() } }
+        client.disconnect()
+        connect(_state.value.channel)
+        appendLocalNotice(
+            ChatMessage(
+                username = "",
+                html = "Your login has expired, so you've joined as a guest. " +
+                    "Log in again from Account to chat as yourself.",
+                timestamp = System.currentTimeMillis(),
+                addClass = null,
+                shadow = false
+            )
+        )
     }
 
     private suspend fun observeEvents() {
@@ -879,7 +946,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     if (event.success) {
                         guestRetries = 0
-                        loginRefusedOnce = false
+                        loginRefusals = 0
                     } else if (savedCredential() == null) {
                         // Only guests are retried (an account's saved login
                         // either works or is dealt with by SessionExpired).
@@ -908,39 +975,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
 
-                is CyTubeEvent.SessionExpired -> {
-                    // The saved login cookie was refused, so the server treats
-                    // us as anonymous — shown as logged in, chat silently
-                    // ignored. The server says the same for an expired cookie,
-                    // a changed password, and a passing database error, so
-                    // unless the cookie has visibly expired, try it once more
-                    // before giving up on it.
-                    val cookie = (savedCredential() as? CyTubeClient.Credential.Cookie)?.authCookie
-                    val expired = cookie != null && SessionCookie.isExpired(cookie, System.currentTimeMillis())
-                    if (!expired && !loginRefusedOnce) {
-                        loginRefusedOnce = true
-                        Log.i(TAG, "saved login was refused; retrying once")
-                        client.disconnect()
-                        delay(2.seconds)
-                        connect(_state.value.channel)
-                        return@collect
-                    }
-                    // Refused for good: forget it and rejoin as a guest.
-                    Log.i(TAG, "saved login was refused; rejoining as a guest")
-                    withContext(Dispatchers.IO) { runCatching { Graph.auth(getApplication()).logout() } }
-                    client.disconnect()
-                    connect(_state.value.channel)
-                    appendLocalNotice(
-                        ChatMessage(
-                            username = "",
-                            html = "Your login has expired, so you've joined as a guest. " +
-                                "Log in again from Account to chat as yourself.",
-                            timestamp = System.currentTimeMillis(),
-                            addClass = null,
-                            shadow = false
-                        )
-                    )
-                }
+                is CyTubeEvent.SessionExpired -> onSavedLoginRefused()
                 is CyTubeEvent.VoteskipVoteCleared -> update { it.copy(votedSkip = false) }
 
                 is CyTubeEvent.RankChanged -> {
@@ -993,7 +1028,12 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 // Sent every time an item starts, including a one-item
                 // playlist starting over, which changeMedia alone doesn't
                 // show (same id) but which resets the server's skip vote.
-                is CyTubeEvent.CurrentItemChanged -> update { it.copy(currentUid = event.uid, votedSkip = false) }
+                is CyTubeEvent.CurrentItemChanged -> {
+                    // An item starting (again, for a one-item playlist): its
+                    // end may move the channel on once more (see advanceAsLeader).
+                    playNextSentFor = null
+                    update { it.copy(currentUid = event.uid, votedSkip = false) }
+                }
                 is CyTubeEvent.ItemQueued -> {
                     // An item already listed under the same uid is replaced
                     // rather than shown twice (see PlaylistReplaced).
@@ -1026,6 +1066,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 // Through the pipeline too, so it lands after the messages
                 // that came before it, not before.
                 is CyTubeEvent.ChatCleared -> chatInbox.trySend(ChatInboxItem.Clear)
+                is CyTubeEvent.ChatRefused -> noteRefusal(event.message)
+                is CyTubeEvent.ChatCooldown -> onChatCooldown(event.waitMs)
 
                 is CyTubeEvent.UserListReplaced -> update { it.copy(users = event.users.toPersistentList()) }
                 is CyTubeEvent.UserJoined -> update { s ->
@@ -1251,6 +1293,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                     playing = if (pausedByUser) it.playing else !media.paused
                 )
             }
+            restartIfEnded(media)
             evaluateSync()
             return
         }
@@ -2124,7 +2167,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         if (text.isBlank()) return
         val sent = _state.value
         val target = sent.pmTarget
-        val line = text.trim()
+        // The chat box already stops at this length (see ChatDraft); cut here
+        // too so nothing longer is ever sent for the server to cut.
+        val line = ChatDraft.clip(text.trim())
         if (target != null) client.sendPm(target, line)
         else client.sendChat(line)
         // Kept for the chat box's ↑ (see SentChat), and its emotes for the
@@ -2356,12 +2401,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * Wired to PlayerSurface's onEnded unconditionally (see ChannelScreen) —
-     * fires whenever ANY item finishes on its own, synced or not. Ignored
-     * outright unless a personal pick is actually active: normal synced
-     * playback is the server's job to advance, and this also has to cover a
-     * stray onEnded firing from a player instance that was mid-teardown
-     * right as sync got switched back on.
-     * Walks forward from the current pick's playlist position to the next
+     * fires whenever ANY item finishes on its own, synced or not. Without a
+     * personal pick, it's the server's job to move the channel on — except
+     * while we lead it, when the server waits for our player (see
+     * advanceAsLeader). With one, the pick moves on by itself:
+     * walks forward from the current pick's playlist position to the next
      * item canResolveIndependently allows — same rule PlaylistPanel greys
      * rows out with — so auto-advance can never land on something that
      * would need server meta a personal pick doesn't have. If nothing
@@ -2370,12 +2414,68 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun onPlaybackEnded() {
         val s = _state.value
-        if (!s.personalPickActive) return
+        if (!s.personalPickActive) {
+            advanceAsLeader(s)
+            return
+        }
         val idx = s.playlist.indexOfFirst { it.uid == s.personalPickUid }
         val startIdx = if (idx >= 0) idx + 1 else 0
         val next = s.playlist.asSequence().drop(startIdx)
             .firstOrNull { MediaTypes.canResolveIndependently(it.type) }
         if (next != null) pickPersonal(next) else update { it.copy(playing = false) }
+    }
+
+    /** The item (playlist uid, type and id) whose end has already moved the
+     *  channel on; cleared as each item starts. */
+    private var playNextSentFor: String? = null
+
+    /**
+     * Our player reached the end of the channel's item while we lead it:
+     * tell the server to move on (CyTubeClient.playNext), as the website's
+     * player does — with a leader the server never moves on by itself, so
+     * without this the whole room sat on the finished video. Once per item
+     * (see ItemEnd.leaderShouldPlayNext for when).
+     */
+    private fun advanceAsLeader(s: ChannelUiState) {
+        val item = s.channelCurrentMedia ?: return
+        val p = player
+        val should = ItemEnd.leaderShouldPlayNext(
+            isLeader = s.isLeader,
+            personalPick = s.personalPickActive,
+            webMode = s.effectiveMode == CompatMode.WEB,
+            connected = s.connection == ConnectionState.CONNECTED,
+            playerHasEnded = p?.hasEnded == true,
+            playerMediaId = p?.mediaId,
+            playerMediaType = p?.mediaType,
+            channelItem = item
+        )
+        if (!should) return
+        val key = "${s.currentUid}:${item.type}:${item.id}"
+        if (key == playNextSentFor) return
+        playNextSentFor = key
+        Log.i(TAG, "leading, and our ${item.type}:${item.id} ended: moving the channel on")
+        client.playNext()
+    }
+
+    /**
+     * The channel started over the item our player had finished (see
+     * ItemEnd.isSameItemRestart): start the player over too. Nothing else
+     * would: the item didn't change, so the player surface doesn't load it
+     * again, and SyncEngine leaves a player stopped at its end alone (and
+     * doesn't run at all while leading, or with sync off). Not while the user
+     * has playback stopped from picture-in-picture, nor during a personal pick.
+     */
+    private fun restartIfEnded(media: MediaFrame) {
+        if (_state.value.personalPickActive || pausedByUser) return
+        val p = player ?: return
+        val holds = p.mediaId == media.id && p.mediaType == media.type
+        if (!ItemEnd.isSameItemRestart(p.hasEnded, holds, media.currentTime, media.seconds)) return
+        val start = (roomTimeNow(media.seconds) ?: media.currentTime).coerceAtLeast(0.0)
+        Log.i(TAG, "channel started ${media.type}:${media.id} over; so does the player, at ${start}s")
+        // A moment's grace for SyncEngine, as for a freshly loaded item.
+        playerAttachedAtMs = SystemClock.elapsedRealtime()
+        p.seekTo(start)
+        if (media.paused) p.pause() else p.play()
     }
 
     /**
@@ -2458,6 +2558,48 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     private var transientStatusJob: Job? = null
 
+    // ---- messages the server turned away ----
+
+    /** The last refusal put in chat, and when (elapsedRealtime). */
+    private var lastRefusal: String? = null
+    private var lastRefusalAtMs = 0L
+
+    /**
+     * Puts why the server didn't pass a message of ours on (see
+     * CyTubeEvent.ChatRefused) into chat, where the message would have been,
+     * as the website does. The same reason again within [REFUSAL_REPEAT_MS]
+     * isn't repeated: someone muted, say, gets told once, not once for every
+     * line they try.
+     */
+    private fun noteRefusal(text: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (text == lastRefusal && now - lastRefusalAtMs < REFUSAL_REPEAT_MS) return
+        lastRefusal = text
+        lastRefusalAtMs = now
+        appendLocalNotice(
+            ChatMessage(username = "", html = escapeHtml(text), timestamp = System.currentTimeMillis(), addClass = null, shadow = false)
+        )
+    }
+
+    private var chatCooldownJob: Job? = null
+
+    /**
+     * The server dropped a message of ours for coming too fast (see
+     * CyTubeEvent.ChatCooldown): say so, and hold the chat box back for as
+     * long as the server asked (ChannelUiState.chatCoolingDown), so the next
+     * message isn't sent only to be dropped too. The website does the same:
+     * its chat line turns red and won't send until then.
+     */
+    private fun onChatCooldown(waitMs: Long) {
+        noteRefusal(ChatRefusal.COOLDOWN)
+        update { if (it.chatCoolingDown) it else it.copy(chatCoolingDown = true) }
+        chatCooldownJob?.cancel()
+        chatCooldownJob = viewModelScope.launch {
+            delay(waitMs.milliseconds)
+            update { if (it.chatCoolingDown) it.copy(chatCoolingDown = false) else it }
+        }
+    }
+
     // ---- adding videos ----
 
     private var channelPermissions: Permissions? = null
@@ -2475,14 +2617,22 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         val rank = _state.value.localRank
         val canAdd = perms?.allowsPlaylistAction("playlistadd", rank, playlistOpen) == true
         val canNext = canAdd && perms.allowsPlaylistAction("playlistnext", rank, playlistOpen)
+        // What the server checks for jumpTo (permissions.js canSkipVideo)
+        // and delete (canDeleteVideo). A leader's rank counts as 1.5 while
+        // leading (the server sends it as our rank), which jumping needs by
+        // default.
+        val canJump = perms?.allowsPlaylistAction("playlistjump", rank, playlistOpen) == true
+        val canDelete = perms?.allowsPlaylistAction("playlistdelete", rank, playlistOpen) == true
         val canVote = perms?.allows("pollvote", rank) ?: true
         val canSkip = voteskipAllowed && perms?.allows("voteskip", rank) == true
         update {
             if (it.canQueue == canAdd && it.canQueueNext == canNext &&
+                it.canJump == canJump && it.canDelete == canDelete &&
                 it.canVotePoll == canVote && it.canVoteskip == canSkip
             ) it
             else it.copy(
                 canQueue = canAdd, canQueueNext = canNext,
+                canJump = canJump, canDelete = canDelete,
                 canVotePoll = canVote, canVoteskip = canSkip
             )
         }
@@ -2653,15 +2803,26 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Where [url] ends up after its redirects, or null if that couldn't be
      *  found out (offline, timeout...) — the caller then uses the link as is.
-     *  HEAD, so no page or file body is downloaded; OkHttp follows the
-     *  redirects itself and the final request's address is the answer. */
-    private fun finalUrlAfterRedirects(url: String): String? = runCatching {
-        val request = Request.Builder().url(url).head().build()
-        redirectHttp.newCall(request).execute().use { it.request.url.toString() }
-    }.getOrNull()
+     *  HEAD, so no page or file body is downloaded. The redirects are
+     *  followed one at a time (see ShortLinks), so one to a plain http
+     *  address — which this client refuses — doesn't lose the answer. */
+    private fun finalUrlAfterRedirects(url: String): String? = ShortLinks.follow(url, head = { asked, timeoutMs ->
+        runCatching {
+            val request = Request.Builder().url(asked).head().build()
+            redirectHttp.newCall(request)
+                .apply { timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS) }
+                .execute()
+                .use { ShortLinks.Answer(it.code, it.header("Location")) }
+        }.getOrNull()
+    })
 
+    /** Asks for one address at a time: ShortLinks follows the redirects,
+     *  and gives each request what's left of its time (ShortLinks.BUDGET_MS). */
     private val redirectHttp by lazy {
-        Graph.http.newBuilder().callTimeout(8, TimeUnit.SECONDS).build()
+        Graph.http.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
     }
 
     private fun submitQueue(parsed: MediaLink.Parsed, playNext: Boolean) {
@@ -2804,6 +2965,10 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  showTransientStatus. */
         const val TRANSIENT_STATUS_MS = 6_000L
 
+        /** The same refusal isn't put in chat again within this; see
+         *  noteRefusal. */
+        const val REFUSAL_REPEAT_MS = 10_000L
+
         /** See queueLink. The server normally answers within a second or two
          *  (YouTube lookups included). */
         const val QUEUE_TIMEOUT_MS = 12_000L
@@ -2821,6 +2986,11 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
          *  just over the 10 s CyTube takes to give an IP address another
          *  connection (see onConnectionRefused). */
         const val REFUSED_RETRY_MS = 11_000L
+
+        /** How long to wait before each try of a refused saved login (see
+         *  onSavedLoginRefused): three tries in all over about ten seconds,
+         *  within CyTube's allowance of connections per address. */
+        val SESSION_RETRY_DELAYS_MS = longArrayOf(2_000L, 8_000L)
 
         /** How long after a new item or player SyncEngine holds off on all
          *  position correction (seeks and speed nudges) — see

@@ -194,6 +194,10 @@ internal object AppAlerts {
      * [id] and [text] are needed (a new id shows again to those who dismissed the old one); the rest
      * are optional: a link to open (http or https only), the last day it's shown, and the versions
      * (versionCode) it's for. Text is plain, at most [MAX_TEXT] characters.
+     *
+     * Each id once (the first entry with it wins): the home page keys its list on the id, and a list
+     * with one id twice can't be drawn at all — it would crash the home page on every launch, with
+     * the alerts kept on the phone and not looked for again for hours.
      */
     fun newsFrom(json: JSONObject, today: LocalDate, versionCode: Int): List<AppAlert> {
         val list = json.optJSONArray("alerts") ?: return emptyList()
@@ -208,7 +212,7 @@ internal object AppAlerts {
             if (until != null && today.isAfter(until)) return@mapNotNull null
             val link = a.text("link").trim().takeIf { it.startsWith("https://", true) || it.startsWith("http://", true) }
             AppAlert("news:$id", text, link, until = until)
-        }.take(MAX_NEWS)
+        }.distinctBy { it.id }.take(MAX_NEWS)
     }
 
     /** [key]'s text; "" for one that's missing or null. (Android's optString gives a null as the
@@ -223,6 +227,8 @@ internal object AppAlerts {
         })
     }.toString()
 
+    /** What [encode] kept, each id once (see [newsFrom]): a list saved by an earlier version could
+     *  still have one twice. */
     fun decode(s: String?): List<AppAlert> {
         if (s.isNullOrBlank()) return emptyList()
         val list = runCatching { JSONArray(s) }.getOrNull() ?: return emptyList()
@@ -233,6 +239,6 @@ internal object AppAlerts {
                 link = a.text("link").takeIf { it.isNotBlank() }, update = a.optBoolean("update"),
                 until = a.text("until").takeIf { it.isNotBlank() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
             )
-        }
+        }.distinctBy { it.id }
     }
 }
