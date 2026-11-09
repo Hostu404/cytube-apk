@@ -113,6 +113,8 @@ The app also keeps the `ip-session` cookie CyTube gives anyone who opens a chann
 
 Channels can style their page with their own CSS and scripts. The app reads a channel's CSS as plain data, for emote effects, name colours, chat text styles and its background picture, and it never runs a channel's scripts (it only reads them for a background picture or the stylesheets they add). On a phone it also fetches the stylesheets a channel imports or links, and, with **Channel backgrounds** on in Settings (the default), loads the channel's background picture: the same requests the channel's own page makes in a browser. Nothing else the CSS links to is loaded.
 
+Nothing a channel links to can make the app connect to your own network: videos (and wherever they redirect), PeerTube instances, emotes, stylesheets and embedded players are all refused if they point at your router, a NAS, another device at home, or the phone itself. A proxy your phone is set to use still works wherever it is. This also means a video on a server in your own home network won't play in the app.
+
 The full source code is in this repository for anyone to inspect.
 
 ---

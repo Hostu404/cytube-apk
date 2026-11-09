@@ -120,11 +120,25 @@ object MediaTypes {
      *  that gets loaded in a WebView, so anything that isn't unambiguously a
      *  hostname (an "@" that would smuggle in userinfo, a "/" that would
      *  smuggle in a path, a scheme, etc.) must be rejected outright rather
-     *  than passed through. */
-    // internal, not private: PeerTubeResolver validates a "domain;shortUUID" pt
-    // id against this same pattern before building a request URL from it.
+     *  than passed through. Used through [isPublicHostname], which
+     *  PeerTubeResolver and MediaLink also check a pt id's domain with. */
     internal val HOSTNAME_REGEX =
         Regex("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+    /**
+     * A PeerTube instance the app may go to: a bare hostname
+     * ([HOSTNAME_REGEX]) on the public internet. Its last part has to start
+     * with a letter, as every real top-level domain does, which rules out an
+     * IP address in any of its spellings (192.168.1.1, 0x7f.0.0.1...); and a
+     * name that's local by itself ("nas.local", "localhost.localdomain") is
+     * out too (see LocalNetwork). Otherwise a pt item could point the app at
+     * a device on the user's own network. A name that only resolves to one is
+     * stopped when connecting instead (LocalNetwork.guard).
+     */
+    fun isPublicHostname(host: String): Boolean =
+        HOSTNAME_REGEX.matches(host) &&
+            host.substringAfterLast('.').first().isLetter() &&
+            !LocalNetwork.isLocalName(host)
 
     /** A PeerTube video id: the short form (base58-ish, letters and digits)
      *  or the full UUID (hex with hyphens) — CyTube's link parser keeps
@@ -205,7 +219,7 @@ object MediaTypes {
             val domain = parts.getOrNull(0)
             val shortId = parts.getOrNull(1)
             if (parts.size == 2 && domain != null && shortId != null &&
-                HOSTNAME_REGEX.matches(domain) && PEERTUBE_SHORT_ID_REGEX.matches(shortId)
+                isPublicHostname(domain) && PEERTUBE_SHORT_ID_REGEX.matches(shortId)
             ) {
                 "https://$domain/videos/embed/$shortId"
             } else null

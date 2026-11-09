@@ -36,6 +36,14 @@ class MediaTypesAndEmotesTest {
         assertNull(MediaTypes.knownEmbedUrl("pt", "no-separator"))
     }
 
+    // Nothing on the user's own network: no IP address, no local name.
+    @Test fun peertubeEmbedUrlRejectsLocalHosts() {
+        assertNull(MediaTypes.knownEmbedUrl("pt", "192.168.1.1;abc"))
+        assertNull(MediaTypes.knownEmbedUrl("pt", "127.0.0.1;abc"))
+        assertNull(MediaTypes.knownEmbedUrl("pt", "nas.local;abc"))
+        assertNull(MediaTypes.knownEmbedUrl("pt", "router;abc"))
+    }
+
     @Test fun whatAPersonalPickCanPlay() {
         assertTrue(MediaTypes.canResolveIndependently("yt"))
         assertTrue(MediaTypes.canResolveIndependently("fi"))

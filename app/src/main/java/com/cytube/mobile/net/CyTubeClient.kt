@@ -3,6 +3,8 @@ package com.cytube.mobile.net
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
+import io.socket.engineio.client.transports.Polling
+import io.socket.engineio.client.transports.WebSocket
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -38,6 +40,49 @@ class CyTubeClient(
 ) {
     companion object {
         const val DEFAULT_BASE_URL = "https://cytu.be"
+
+        /**
+         * How the socket connects (see connect()), over [http], sending
+         * [cookieHeader] if there is one. Apart for testing.
+         */
+        internal fun socketOptions(http: OkHttpClient, cookieHeader: String?): IO.Options = IO.Options().apply {
+            // A connection manager of its own every time. Otherwise the
+            // library keeps the first one for each server in a static map
+            // for good, and with it the reconnect listeners wired below,
+            // holding on to this client after it's done with.
+            forceNew = true
+            callFactory = http
+            webSocketFactory = http
+            // HTTP long-polling first, moved onto a WebSocket as soon as one
+            // gets through: what CyTube's own page does (it's Socket.IO's
+            // default). This library only ever tries the first transport
+            // listed and never falls back to the next, so with "websocket"
+            // first the app couldn't connect at all on networks that block
+            // WebSockets (some school, work and hotel Wi-Fi). Polling is
+            // ordinary HTTPS requests, which those let through. Where
+            // WebSockets work, the connection moves onto one a moment after
+            // it opens; where they don't, it carries on over polling.
+            transports = arrayOf(Polling.NAME, WebSocket.NAME)
+            upgrade = true
+            // And every connection starts that way, rather than going
+            // straight for a WebSocket because one worked last time: the
+            // phone may since have moved to a network that blocks them.
+            rememberUpgrade = false
+            reconnection = true
+            // Waits between retries double from 1 s but stop at 10 s: that's
+            // how often CyTube gives an IP address a connection back once
+            // it's used up its allowance (see ConnectionRefused). A longer
+            // wait only left the app sitting idle after the server would
+            // have accepted it again. 20 attempts at up to 10 s is still a
+            // few minutes of trying before it gives up.
+            reconnectionDelay = 1_000L
+            reconnectionDelayMax = 10_000L
+            randomizationFactor = 0.5
+            reconnectionAttempts = 20
+            timeout = 20_000
+            // Sent with the handshake, over either transport.
+            cookieHeader?.let { extraHeaders = mapOf("Cookie" to listOf(it)) }
+        }
     }
 
     private val resolver = SocketConfigResolver(http, baseUrl)
@@ -126,34 +171,13 @@ class CyTubeClient(
         }
         if (gen != generation) return
 
-        val opts = IO.Options().apply {
-            // A connection manager of its own every time. Otherwise the
-            // library keeps the first one for each server in a static map
-            // for good, and with it the reconnect listeners wired below,
-            // holding on to this client after it's done with.
-            forceNew = true
-            callFactory = socketHttp
-            webSocketFactory = socketHttp
-            transports = arrayOf("websocket", "polling")
-            reconnection = true
-            // Waits between retries double from 1 s but stop at 10 s: that's
-            // how often CyTube gives an IP address a connection back once
-            // it's used up its allowance (see ConnectionRefused). A longer
-            // wait only left the app sitting idle after the server would
-            // have accepted it again. 20 attempts at up to 10 s is still a
-            // few minutes of trying before it gives up.
-            reconnectionDelay = 1_000L
-            reconnectionDelayMax = 10_000L
-            randomizationFactor = 0.5
-            reconnectionAttempts = 20
-            timeout = 20_000
+        val opts = socketOptions(
+            socketHttp,
             // The login cookie (when signed in) and the ip-session cookie,
             // only ever to a server SocketConfigResolver has checked is this
             // site's own.
-            IpSessionCookie.forHandshake((credential as? Credential.Cookie)?.authCookie, ipSession)?.let {
-                extraHeaders = mapOf("Cookie" to listOf(it))
-            }
-        }
+            IpSessionCookie.forHandshake((credential as? Credential.Cookie)?.authCookie, ipSession)
+        )
 
         val s = IO.socket(URI.create(serverUrl), opts)
         socket = s

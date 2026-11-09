@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -24,6 +25,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
+import com.cytube.mobile.webview.WebLocalNetwork
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
@@ -117,6 +119,15 @@ fun WebCompatView(
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                     webViewClient = object : WebViewClient() {
+                        // Nothing on the user's own network, whatever the
+                        // channel's page asks for: its scripts, CSS and
+                        // embedded players run here (see LocalNetwork).
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? =
+                            if (WebLocalNetwork.refuses(request)) WebLocalNetwork.refusal() else null
+
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: WebResourceRequest

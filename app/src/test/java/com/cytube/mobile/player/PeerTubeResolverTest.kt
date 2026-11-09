@@ -137,6 +137,17 @@ class PeerTubeResolverTest {
         assertTrue(PeerTubeResolver.resolve(mockClient, "peertube.example.com;abc/../../def").isFailure)
     }
 
+    // An instance on the user's own network is never asked at all.
+    @Test
+    fun rejectsLocalInstancesWithoutAskingThem() = runBlocking {
+        var asked = 0
+        val counting = OkHttpClient.Builder().addInterceptor { asked++; it.proceed(it.request()) }.build()
+        for (id in listOf("192.168.1.1;abc", "10.0.0.2;abc", "127.0.0.1;abc", "nas.local;abc", "localhost.localdomain;abc")) {
+            assertTrue(id, PeerTubeResolver.resolve(counting, id).isFailure)
+        }
+        assertEquals(0, asked)
+    }
+
     @Test
     fun upgradesPlainHttpAddressesToHttps() = runBlocking {
         // Cleartext is off app-wide, so an http address could never play.

@@ -15,6 +15,13 @@ class PlaybackFailuresTest {
         assertTrue(PlaybackFailures.isBrokenSource("ERROR_CODE_IO_FILE_NOT_FOUND"))
     }
 
+    // Refused for being on the user's own network: never retried, and
+    // another quality (which may be elsewhere) is worth a try.
+    @Test fun aLocalNetworkAddressIsBrokenNotTransient() {
+        assertTrue(PlaybackFailures.isBrokenSource(PlaybackFailures.LOCAL_NETWORK_REASON))
+        assertFalse(PlaybackFailures.isTransient(PlaybackFailures.LOCAL_NETWORK_REASON))
+    }
+
     @Test fun unplayableFormatsAreBroken() {
         assertTrue(PlaybackFailures.isBrokenSource("ERROR_CODE_DECODING_FORMAT_UNSUPPORTED"))
         assertTrue(PlaybackFailures.isBrokenSource("ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED"))

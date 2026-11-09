@@ -14,7 +14,16 @@ package com.cytube.mobile.player
  */
 object PlaybackFailures {
 
+    /** A source the app wouldn't connect to: its address is on the user's
+     *  own network (see LocalNetwork). Never worth trying again, so it's a
+     *  broken source: another quality of the item may still be fine. */
+    const val LOCAL_NETWORK = "LOCAL_NETWORK_REFUSED"
+
+    /** [LOCAL_NETWORK] as the reason given. */
+    const val LOCAL_NETWORK_REASON = "$LOCAL_NETWORK (its address is on your local network, so the app won't connect to it)"
+
     private val brokenSourceCodes = setOf(
+        LOCAL_NETWORK,
         "ERROR_CODE_IO_FILE_NOT_FOUND",
         "ERROR_CODE_IO_NO_PERMISSION",
         "ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED",

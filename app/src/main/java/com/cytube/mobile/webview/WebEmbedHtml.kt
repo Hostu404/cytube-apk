@@ -1,5 +1,7 @@
 package com.cytube.mobile.webview
 
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
 /** Injected into every frame of an embed page: a getCookie stub some embed
  *  scripts expect, and logging of uncaught page errors (they still reach
  *  the page as normal; this only makes them visible in Logcat). */
@@ -523,12 +525,26 @@ fun streamableSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Bool
     """.trimIndent()
 }
 
+/**
+ * Whether two hosts are one site: the same host, or the same registered
+ * name under a public suffix (geo.dailymotion.com and www.dailymotion.com).
+ * The suffix comes from the public suffix list OkHttp ships, so two sites
+ * under a multi-part suffix (bbc.co.uk and evil.co.uk, or two github.io
+ * pages) aren't taken for one, as comparing the last two parts did. An IP
+ * address, or a host that is itself a public suffix, is only ever the same
+ * site as itself.
+ */
 fun sameSite(navigatingHost: String?, embedHost: String?): Boolean {
     if (navigatingHost == null || embedHost == null) return false
     if (navigatingHost.equals(embedHost, ignoreCase = true)) return true
-    fun registrableDomain(host: String): String {
-        val labels = host.split(".")
-        return if (labels.size >= 2) labels.takeLast(2).joinToString(".") else host
-    }
-    return registrableDomain(navigatingHost).equals(registrableDomain(embedHost), ignoreCase = true)
+    val a = registrableDomain(navigatingHost) ?: return false
+    val b = registrableDomain(embedHost) ?: return false
+    return a == b
 }
+
+/** [host]'s name one level under its public suffix (see sameSite), or null
+ *  for an IP address, a public suffix itself, or something that isn't a
+ *  host. */
+private fun registrableDomain(host: String): String? =
+    if (host.any { it in "/@?#\\:" }) null
+    else "https://$host/".toHttpUrlOrNull()?.topPrivateDomain()

@@ -58,7 +58,7 @@ object MediaLink {
             "tc" -> "https://clips.twitch.tv/$id"
             "sc", "rt", "fi", "hl", "cm" -> id
             "cu" -> embed?.src
-            "pt" -> embed?.takeIf { MediaTypes.HOSTNAME_REGEX.matches(it.domain) }?.let { e ->
+            "pt" -> embed?.takeIf { MediaTypes.isPublicHostname(it.domain) }?.let { e ->
                 if (e.onlyLong) e.uuid.takeIf(PAGE_ID::matches)?.let { "https://${e.domain}/videos/watch/$it" }
                 else e.short.takeIf(PAGE_ID::matches)?.let { "https://${e.domain}/w/$it" }
             }

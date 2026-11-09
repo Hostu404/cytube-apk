@@ -14,6 +14,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -60,6 +61,7 @@ import androidx.media3.ui.PlayerView
 import androidx.webkit.WebViewCompat
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 import androidx.webkit.WebViewFeature
+import com.cytube.mobile.net.LocalAddressRefused
 import com.cytube.mobile.net.MediaFrame
 import com.cytube.mobile.net.MediaTypes
 import com.cytube.mobile.player.DownloadWatch
@@ -83,6 +85,7 @@ import com.cytube.mobile.webview.EMBED_ERROR_SENTINEL
 import com.cytube.mobile.webview.EMBED_PAGE_ORIGIN
 import com.cytube.mobile.webview.EMBED_STATE_SENTINEL
 import com.cytube.mobile.webview.PROVIDER_EMBED_TYPES
+import com.cytube.mobile.webview.WebLocalNetwork
 import com.cytube.mobile.webview.dailymotionSdkHtml
 import com.cytube.mobile.webview.peertubeSdkHtml
 import com.cytube.mobile.webview.sameSite
@@ -95,6 +98,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Layer 4: player implementations.
@@ -470,7 +474,24 @@ private fun EmbedSurface(
                         setOf("*")
                     )
                 }
+                // Set (on a WebView thread) when the page itself was refused
+                // for being on the local network, so the failure says why.
+                val refusedMainFrame = AtomicBoolean(false)
                 webViewClient = object : WebViewClient() {
+                    // Nothing on the user's own network (see LocalNetwork): a
+                    // custom embed's own address, or anything its page asks
+                    // for. A refused page is reported as such straight away.
+                    override fun shouldInterceptRequest(
+                        view: WebView,
+                        request: WebResourceRequest
+                    ): WebResourceResponse? {
+                        if (!WebLocalNetwork.refuses(request)) return null
+                        if (request.isForMainFrame && refusedMainFrame.compareAndSet(false, true)) {
+                            view.post { reportFailure(PlaybackFailures.LOCAL_NETWORK_REASON) }
+                        }
+                        return WebLocalNetwork.refusal()
+                    }
+
                     override fun shouldOverrideUrlLoading(
                         view: WebView,
                         request: WebResourceRequest
@@ -513,7 +534,10 @@ private fun EmbedSurface(
                         errorResponse: android.webkit.WebResourceResponse
                     ) {
                         if (request.isForMainFrame) {
-                            reportFailure("Embed failed to load (HTTP ${errorResponse.statusCode})")
+                            reportFailure(
+                                if (refusedMainFrame.get()) PlaybackFailures.LOCAL_NETWORK_REASON
+                                else "Embed failed to load (HTTP ${errorResponse.statusCode})"
+                            )
                         }
                     }
 
@@ -1090,10 +1114,14 @@ private fun ExoSurface(
                 val http = generateSequence(error as Throwable) { it.cause }
                     .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>()
                     .firstOrNull()
-                val detail = if (http != null) {
-                    "${error.errorCodeName} (HTTP ${http.responseCode})"
-                } else {
-                    error.errorCodeName
+                // The app wouldn't connect: an address on the user's own
+                // network (see LocalNetwork). Said so, and not retried as
+                // the connection trouble it would otherwise look like.
+                val refused = generateSequence(error as Throwable) { it.cause }.any { it is LocalAddressRefused }
+                val detail = when {
+                    refused -> PlaybackFailures.LOCAL_NETWORK_REASON
+                    http != null -> "${error.errorCodeName} (HTTP ${http.responseCode})"
+                    else -> error.errorCodeName
                 }
                 // Header/body VALUES are deliberately never logged here — a
                 // CDN error response could carry a Set-Cookie or other

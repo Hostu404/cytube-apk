@@ -13,6 +13,7 @@ import com.cytube.mobile.data.AuthRepository
 import com.cytube.mobile.data.ChannelIndexRepository
 import com.cytube.mobile.net.CyTubeClient
 import com.cytube.mobile.net.IpSessionStore
+import com.cytube.mobile.net.LocalNetwork
 import com.cytube.mobile.ui.isTvDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +21,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -43,7 +45,12 @@ object Graph {
         "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
     val http: OkHttpClient by lazy {
-        OkHttpClient.Builder()
+        // Nothing a channel chooses (a video, a PeerTube instance, an emote,
+        // a stylesheet, or where any of them redirects) can make the app
+        // connect to the user's own network: see LocalNetwork. Set here, it
+        // carries over to every client built from this one, which is all of
+        // them.
+        LocalNetwork.guard(OkHttpClient.Builder())
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
@@ -98,7 +105,12 @@ object Graph {
     /** Builds [http] in the background, so it's ready by the time the first
      *  screen's requests (made off the main thread) want it; see CyTubeApp. */
     fun prepareHttp() {
-        appScope.launch(Dispatchers.IO) { http.dispatcher }
+        appScope.launch(Dispatchers.IO) {
+            http.dispatcher
+            // OkHttp's public suffix list, read on first use (see sameSite),
+            // which would otherwise be on the main thread.
+            runCatching { "https://www.example.com/".toHttpUrl().topPrivateDomain() }
+        }
     }
 
     fun newClient(context: Context): CyTubeClient = CyTubeClient(http, BASE_URL, savedIpSession(context))

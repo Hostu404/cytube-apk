@@ -54,7 +54,9 @@ object PeerTubeResolver {
         }
         val domain = parts[0]
         val videoId = parts[1]
-        if (!MediaTypes.HOSTNAME_REGEX.matches(domain) || !SAFE_ID_REGEX.matches(videoId)) {
+        // A public hostname only: never an IP address or a local name, which
+        // would send this request into the user's own network.
+        if (!MediaTypes.isPublicHostname(domain) || !SAFE_ID_REGEX.matches(videoId)) {
             Log.w(TAG, "rejected malformed PeerTube video id ($id)")
             return@withContext Result.failure(IllegalArgumentException("Invalid PeerTube domain or video id"))
         }

@@ -58,4 +58,18 @@ class WebEmbedHtmlTest {
         assertFalse(sameSite(null, "dailymotion.com"))
         assertFalse(sameSite("dailymotion.com", null))
     }
+
+    // By the public suffix list: two sites under one multi-part suffix
+    // aren't one site, as comparing the last two parts made them.
+    @Test
+    fun sameSite_knowsMultiPartPublicSuffixes() {
+        assertTrue(sameSite("www.bbc.co.uk", "news.bbc.co.uk"))
+        assertFalse(sameSite("evil.co.uk", "bbc.co.uk"))
+        assertFalse(sameSite("alice.github.io", "bob.github.io"))
+        assertTrue(sameSite("WWW.Dailymotion.com", "geo.dailymotion.com"))
+        // An IP address is only ever the same site as itself.
+        assertTrue(sameSite("10.0.0.1", "10.0.0.1"))
+        assertFalse(sameSite("10.0.0.1", "10.0.0.2"))
+        assertFalse(sameSite("1.2.3.4", "5.6.3.4"))
+    }
 }
