@@ -15,6 +15,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import java.io.IOException
+import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -71,6 +72,14 @@ data class Settings(
     /** The Niconico overlay flies only each message's emotes (messages
      *  without any don't fly). Off by default. */
     val nicoEmotesOnly: Boolean = false,
+    /** The opposite: the Niconico overlay flies only each message's text,
+     *  its emotes left out (a message that's only emotes doesn't fly). Off
+     *  by default, and never on with [nicoEmotesOnly] (see
+     *  nicoTextOnlyOf), as in CyTube Plus. */
+    val nicoTextOnly: Boolean = false,
+    /** How solid the Niconico overlay's emotes are: 0.1 (barely there) to
+     *  1 (solid, the default). Its text is always solid. */
+    val nicoEmoteOpacity: Float = 1f,
     /** Display name used to join chat as a guest, set on the Account
      *  screen. Blank means "not chosen": each connection then uses a fresh
      *  random GuestNNNN name, which isn't saved. */
@@ -97,6 +106,21 @@ data class Settings(
 const val DEFAULT_LIGHTS_DOWN_DIM = 0.85f
 val NICO_SPEED_RANGE = 0.5f..2f
 val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
+/** 10% to 100%, as CyTube Plus offers it. */
+val NICO_EMOTE_OPACITY_RANGE = 0.1f..1f
+
+/** Whether the Niconico overlay is text only, from what's saved: never
+ *  together with emotes only, which wins should both somehow be saved on
+ *  (as in CyTube Plus, whose emotes only is checked first). */
+internal fun nicoTextOnlyOf(textOnly: Boolean?, emotesOnly: Boolean?): Boolean =
+    textOnly == true && emotesOnly != true
+
+/** The Niconico overlay's emote opacity as kept: within range, on the
+ *  slider's 5% steps (no 0.35000002 from a dragged slider). */
+internal fun nicoEmoteOpacityOf(value: Float?): Float {
+    val v = value?.takeIf { !it.isNaN() } ?: 1f
+    return ((v.coerceIn(NICO_EMOTE_OPACITY_RANGE) * 20f).roundToInt() / 20f).coerceIn(NICO_EMOTE_OPACITY_RANGE)
+}
 
 class SettingsStore(private val context: Context) {
 
@@ -140,6 +164,8 @@ class SettingsStore(private val context: Context) {
             groupChat = p[GROUP_CHAT] ?: false,
             channelBackgrounds = p[CHANNEL_BACKGROUNDS] ?: true,
             nicoEmotesOnly = p[NICO_EMOTES_ONLY] ?: false,
+            nicoTextOnly = nicoTextOnlyOf(p[NICO_TEXT_ONLY], p[NICO_EMOTES_ONLY]),
+            nicoEmoteOpacity = nicoEmoteOpacityOf(p[NICO_EMOTE_OPACITY]),
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE]),
             cot = p[COT] ?: ThemeMode.wasCot(p[THEME_MODE]),
@@ -156,7 +182,17 @@ class SettingsStore(private val context: Context) {
     suspend fun setPip(v: Boolean) = save { it[PIP] = v }
     suspend fun setGroupChat(v: Boolean) = save { it[GROUP_CHAT] = v }
     suspend fun setChannelBackgrounds(v: Boolean) = save { it[CHANNEL_BACKGROUNDS] = v }
-    suspend fun setNicoEmotesOnly(v: Boolean) = save { it[NICO_EMOTES_ONLY] = v }
+    // Emotes only and text only can't both be on: turning one on turns the
+    // other off, as in CyTube Plus.
+    suspend fun setNicoEmotesOnly(v: Boolean) = save {
+        it[NICO_EMOTES_ONLY] = v
+        if (v) it[NICO_TEXT_ONLY] = false
+    }
+    suspend fun setNicoTextOnly(v: Boolean) = save {
+        it[NICO_TEXT_ONLY] = v
+        if (v) it[NICO_EMOTES_ONLY] = false
+    }
+    suspend fun setNicoEmoteOpacity(v: Float) = save { it[NICO_EMOTE_OPACITY] = nicoEmoteOpacityOf(v) }
     suspend fun setGuestName(v: String) = save { it[GUEST_NAME] = guestNameToSave(v) }
     suspend fun setThemeMode(v: ThemeMode) = save { p ->
         // Replacing an old cot theme: Prince stays, on the cot switch.
@@ -235,6 +271,8 @@ class SettingsStore(private val context: Context) {
         val GROUP_CHAT = booleanPreferencesKey("group_chat")
         val CHANNEL_BACKGROUNDS = booleanPreferencesKey("channel_backgrounds")
         val NICO_EMOTES_ONLY = booleanPreferencesKey("nico_emotes_only")
+        val NICO_TEXT_ONLY = booleanPreferencesKey("nico_text_only")
+        val NICO_EMOTE_OPACITY = floatPreferencesKey("nico_emote_opacity")
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val COT = booleanPreferencesKey("cot")

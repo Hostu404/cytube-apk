@@ -211,6 +211,10 @@ data class ChannelUiState(
     val channelBackgrounds: Boolean = true,
     /** See Settings.nicoEmotesOnly. */
     val nicoEmotesOnly: Boolean = false,
+    /** See Settings.nicoTextOnly. */
+    val nicoTextOnly: Boolean = false,
+    /** See Settings.nicoEmoteOpacity. */
+    val nicoEmoteOpacity: Float = 1f,
     /** See Settings.nicoSpeed. */
     val nicoSpeed: Float = 1f,
     /** See Settings.lightsDownDim. */
@@ -632,6 +636,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 groupChat = settings.groupChat,
                 channelBackgrounds = settings.channelBackgrounds,
                 nicoEmotesOnly = settings.nicoEmotesOnly,
+                nicoTextOnly = settings.nicoTextOnly,
+                nicoEmoteOpacity = settings.nicoEmoteOpacity,
                 nicoSpeed = settings.nicoSpeed,
                 lightsDownDim = settings.lightsDownDim,
                 messageRecall = settings.messageRecall,
@@ -664,6 +670,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             it.groupChat == s.groupChat &&
                             it.channelBackgrounds == s.channelBackgrounds &&
                             it.nicoEmotesOnly == s.nicoEmotesOnly &&
+                            it.nicoTextOnly == s.nicoTextOnly &&
+                            it.nicoEmoteOpacity == s.nicoEmoteOpacity &&
                             it.nicoSpeed == s.nicoSpeed && it.lightsDownDim == s.lightsDownDim &&
                             it.messageRecall == s.messageRecall &&
                             it.syncEnabled == s.syncEnabled
@@ -674,6 +682,8 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             groupChat = it.groupChat,
                             channelBackgrounds = it.channelBackgrounds,
                             nicoEmotesOnly = it.nicoEmotesOnly,
+                            nicoTextOnly = it.nicoTextOnly,
+                            nicoEmoteOpacity = it.nicoEmoteOpacity,
                             nicoSpeed = it.nicoSpeed,
                             lightsDownDim = it.lightsDownDim,
                             messageRecall = it.messageRecall,

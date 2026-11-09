@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -36,6 +37,7 @@ import com.cytube.mobile.ui.theme.maPageBackground
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.cytube.mobile.data.LIGHTS_DOWN_DIM_RANGE
+import com.cytube.mobile.data.NICO_EMOTE_OPACITY_RANGE
 import com.cytube.mobile.data.NICO_SPEED_RANGE
 import kotlin.math.roundToInt
 
@@ -164,7 +166,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                 checked = settings.showEmotes
             ) { scope.launch { store.setEmotes(it) } }
 
-            // Needs emotes shown at all, so it's only offered while they are.
+            // Need emotes shown at all, so they're only offered while they
+            // are. One or the other: turning either on turns the other off
+            // (SettingsStore), as in CyTube Plus.
             if (settings.showEmotes) {
                 SwitchRow(
                     title = "Nico chat: emotes only",
@@ -172,6 +176,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                         "Messages without any don't fly.",
                     checked = settings.nicoEmotesOnly
                 ) { scope.launch { store.setNicoEmotesOnly(it) } }
+                SwitchRow(
+                    title = "Nico chat: text only",
+                    subtitle = "Comments flying over the video show just their text. " +
+                        "Messages that are only emotes don't fly.",
+                    checked = settings.nicoTextOnly
+                ) { scope.launch { store.setNicoTextOnly(it) } }
             }
 
             SliderRow(
@@ -180,6 +190,18 @@ fun SettingsScreen(onBack: () -> Unit) {
                 range = NICO_SPEED_RANGE,
                 steps = 5                                          // 0.5, 0.75 … 2
             ) { scope.launch { store.setNicoSpeed(it) } }
+
+            // How see-through the flying emotes are. Greyed out with text
+            // only on, which flies none.
+            if (settings.showEmotes) {
+                SliderRow(
+                    label = { "Nico emote opacity: ${(it * 100).roundToInt()}%" },
+                    value = settings.nicoEmoteOpacity,
+                    range = NICO_EMOTE_OPACITY_RANGE,
+                    steps = 17,                                    // 10%, 15% … 100%
+                    enabled = !settings.nicoTextOnly
+                ) { scope.launch { store.setNicoEmoteOpacity(it) } }
+            }
 
             // Lights down is phone only.
             if (!isTv) {
@@ -284,6 +306,9 @@ private fun SliderRow(
     value: Float,
     range: ClosedFloatingPointRange<Float>,
     steps: Int,
+    /** False greys it out and leaves it be (it isn't focused or moved):
+     *  the slider greys itself, its text is faded here. */
+    enabled: Boolean = true,
     onChange: (Float) -> Unit
 ) {
     val focusManager = LocalFocusManager.current
@@ -294,10 +319,14 @@ private fun SliderRow(
         delay(SLIDER_SAVE_AFTER_MS)
         save(shown)
     }
+    val textAlpha = Modifier.alpha(if (enabled) 1f else DISABLED_ALPHA)
     Column(Modifier.padding(start = Ma.MarginStart, end = Ma.MarginEnd, top = 8.dp, bottom = 8.dp)) {
-        Text(label(shown), style = MaterialTheme.typography.bodyLarge)
-        if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label(shown), style = MaterialTheme.typography.bodyLarge, modifier = textAlpha)
+        if (subtitle != null) {
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = textAlpha)
+        }
         Slider(
+            enabled = enabled,
             modifier = Modifier.onPreviewKeyEvent { event ->
                 when (event.key) {
                     Key.DirectionUp, Key.DirectionDown -> {
@@ -324,6 +353,9 @@ private fun SliderRow(
 
 /** How long a slider's been still before it's saved anyway (see SliderRow). */
 private const val SLIDER_SAVE_AFTER_MS = 400L
+
+/** A greyed-out row's text, as Material greys out what can't be used. */
+private const val DISABLED_ALPHA = 0.38f
 
 @Composable
 private fun SwitchRow(

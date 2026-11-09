@@ -646,6 +646,8 @@ fun ChannelScreen(
                             emotes = state.emotes,
                             state = nekoState,
                             emotesOnly = state.nicoEmotesOnly,
+                            textOnly = state.nicoTextOnly,
+                            emoteOpacity = state.nicoEmoteOpacity,
                             speed = state.nicoSpeed,
                             // Spoilers shown, as TV chat shows them (there's
                             // no tap to reveal one with) — which is also how
@@ -736,6 +738,8 @@ fun ChannelScreen(
             media = state.media,
             messages = messages,
             nicoEmotesOnly = state.nicoEmotesOnly,
+            nicoTextOnly = state.nicoTextOnly,
+            nicoEmoteOpacity = state.nicoEmoteOpacity,
             nicoSpeed = state.nicoSpeed,
             player = state.player,
             showEmotes = state.showEmotes,
@@ -1240,6 +1244,8 @@ fun ChannelScreen(
                     emotes = state.emotes,
                     state = nekoState,
                     emotesOnly = state.nicoEmotesOnly,
+                    textOnly = state.nicoTextOnly,
+                    emoteOpacity = state.nicoEmoteOpacity,
                     speed = state.nicoSpeed
                 )
             }
@@ -2679,6 +2685,8 @@ private fun FullscreenPlayer(
     /** Read only where the overlay shows it (see WithMessages). */
     messages: State<PersistentList<ChatMessage>>,
     nicoEmotesOnly: Boolean,
+    nicoTextOnly: Boolean,
+    nicoEmoteOpacity: Float,
     nicoSpeed: Float,
     player: MediaTypes.Player,
     showEmotes: Boolean,
@@ -2735,6 +2743,8 @@ private fun FullscreenPlayer(
                     emotes = emotes,
                     state = nekoState,
                     emotesOnly = nicoEmotesOnly,
+                    textOnly = nicoTextOnly,
+                    emoteOpacity = nicoEmoteOpacity,
                     speed = nicoSpeed
                 )
             }

@@ -726,10 +726,34 @@ object ChatHtml {
         val text = rendered.text
         val links = text.getStringAnnotations(LINK_TAG, 0, text.length)
         if (links.isEmpty()) return rendered
+        val stripped = cutOut(text, links)
+        return rendered.copy(
+            text = stripped,
+            soloEmoteCount = soloEmoteCount(stripped, rendered.imageUrls)
+        )
+    }
+
+    /**
+     * Just [rendered]'s text: its emotes and pictures left out, and the
+     * spaces either side of each closed up (Niconico comments with "text
+     * only" on). Blank when there's nothing else, so a message that's only
+     * emotes doesn't fly.
+     */
+    fun textOnly(rendered: Rendered): Rendered {
+        val text = rendered.text
+        val images = text.getStringAnnotations(EMOTE_TAG, 0, text.length) +
+            text.getStringAnnotations(PICTURE_TAG, 0, text.length)
+        if (images.isEmpty()) return rendered
+        return rendered.copy(text = cutOut(text, images), imageUrls = emptyList(), soloEmoteCount = 0, fx = emptyMap())
+    }
+
+    /** [text] without [spans], keeping everything else's styles, and the
+     *  spaces either side of each closed up. */
+    private fun cutOut(text: AnnotatedString, spans: List<AnnotatedString.Range<String>>): AnnotatedString {
         val cut = BooleanArray(text.length)
-        for (link in links) for (i in link.start until link.end) cut[i] = true
-        // Left in: whatever isn't a link, minus a space after another space
-        // (or at the start) once the link between them is gone.
+        for (span in spans) for (i in span.start until span.end) cut[i] = true
+        // Left in: whatever isn't cut, minus a space after another space
+        // (or at the start) once what was between them is gone.
         val keep = BooleanArray(text.length)
         var lastKeptIsSpace = true
         for (i in text.indices) {
@@ -741,7 +765,7 @@ object ChatHtml {
         }
         var end = text.length
         while (end > 0 && (!keep[end - 1] || text[end - 1].isWhitespace())) end--
-        val stripped = buildAnnotatedString {
+        return buildAnnotatedString {
             var i = 0
             while (i < end) {
                 if (!keep[i]) { i++; continue }
@@ -751,10 +775,6 @@ object ChatHtml {
                 i = j
             }
         }
-        return rendered.copy(
-            text = stripped,
-            soloEmoteCount = soloEmoteCount(stripped, rendered.imageUrls)
-        )
     }
 
     /**

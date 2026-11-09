@@ -186,6 +186,21 @@ internal object EmoteAspect {
     }
 }
 
+/**
+ * These inline emotes drawn see-through, at [alpha] (Settings' "Nico emote
+ * opacity", for the Niconico overlay only): the same placeholders, so
+ * nothing moves, with each emote's drawing faded. Unchanged when solid.
+ */
+internal fun Map<String, InlineTextContent>.withAlpha(alpha: Float): Map<String, InlineTextContent> {
+    val a = if (alpha.isNaN()) 1f else alpha.coerceIn(0f, 1f)
+    if (a >= 1f || isEmpty()) return this
+    return mapValues { (_, content) ->
+        InlineTextContent(content.placeholder) { id ->
+            Box(Modifier.fillMaxSize().alpha(a)) { content.children(id) }
+        }
+    }
+}
+
 @Composable
 private fun inlineEmotes(
     urls: List<String>,
@@ -895,6 +910,12 @@ fun NekoChatOverlay(
     /** Settings' "Nico chat: emotes only": each comment flies just its
      *  emotes, and one with none doesn't fly. */
     emotesOnly: Boolean = false,
+    /** Settings' "Nico chat: text only": each comment flies just its text,
+     *  and one that's only emotes doesn't fly. Never on with [emotesOnly]. */
+    textOnly: Boolean = false,
+    /** Settings' "Nico emote opacity": how solid the comments' emotes are,
+     *  0.1 to 1. The text is always solid. */
+    emoteOpacity: Float = 1f,
     /** Settings' "Nico speed": 2 crosses in half the time, 0.5 in twice. */
     speed: Float = 1f,
     /** Spoilers shown rather than hidden: on TV, as its chat shows them.
@@ -927,7 +948,7 @@ fun NekoChatOverlay(
         LaunchedEffect(state) {
             if (state.hasCaughtUp) return@LaunchedEffect
             state.hasCaughtUp = true
-            val catchUp = messages.filter { flies(it, showEmotes, emotes, emotesOnly, revealSpoilers) }.takeLast(NEKO_CATCHUP_COUNT)
+            val catchUp = messages.filter { flies(it, showEmotes, emotes, emotesOnly, textOnly, revealSpoilers) }.takeLast(NEKO_CATCHUP_COUNT)
             for (msg in catchUp) {
                 state.pending.addLast(msg)
             }
@@ -948,7 +969,7 @@ fun NekoChatOverlay(
                 val m = messages[i]
                 if (m.seq <= state.lastSpawnedSeq) break
                 if (fresh.size >= NEKO_MAX_BURST) break
-                if (flies(m, showEmotes, emotes, emotesOnly, revealSpoilers)) fresh.add(m)
+                if (flies(m, showEmotes, emotes, emotesOnly, textOnly, revealSpoilers)) fresh.add(m)
             }
             fresh.reverse()
             for (msg in fresh) {
@@ -967,13 +988,14 @@ fun NekoChatOverlay(
         val currentShowEmotes by rememberUpdatedState(showEmotes)
         val currentEmotes by rememberUpdatedState(emotes)
         val currentEmotesOnly by rememberUpdatedState(emotesOnly)
+        val currentTextOnly by rememberUpdatedState(textOnly)
         val currentRevealSpoilers by rememberUpdatedState(revealSpoilers)
         val currentSpeed by rememberUpdatedState(speed)
         // Each waiting message's estimated width, by seq, worked out once:
         // the loop looks at every waiting message each time round, not just
         // the first. Started afresh when the emote settings change the
         // estimates.
-        val widthCache = remember(showEmotes, emotes, emotesOnly, revealSpoilers) { HashMap<Long, Float>() }
+        val widthCache = remember(showEmotes, emotes, emotesOnly, textOnly, revealSpoilers) { HashMap<Long, Float>() }
         val currentWidthCache by rememberUpdatedState(widthCache)
         LaunchedEffect(state, laneCount, screenWidthPx) {
             while (true) {
@@ -985,7 +1007,7 @@ fun NekoChatOverlay(
                 val widths = currentWidthCache
                 val waiting = state.pending.map { msg ->
                     val widthPx = widths.getOrPut(msg.seq) {
-                        estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, currentRevealSpoilers, density)
+                        estimateCommentWidthPx(msg, currentShowEmotes, currentEmotes, currentEmotesOnly, currentTextOnly, currentRevealSpoilers, density)
                     }
                     LaneCandidate(widthPx, (screenWidthPx + widthPx) / nekoDurationMs(screenWidthPx + widthPx, currentSpeed))
                 }
@@ -1033,6 +1055,8 @@ fun NekoChatOverlay(
                     showEmotes = showEmotes,
                     emotes = emotes,
                     emotesOnly = emotesOnly,
+                    textOnly = textOnly,
+                    emoteOpacity = emoteOpacity,
                     revealSpoilers = revealSpoilers,
                     onFinished = { state.active.remove(comment) }
                 )
@@ -1099,26 +1123,39 @@ private const val NEKO_MAX_BURST = 20
 /** Most messages waiting to fly at once — see NekoOverlayState.pending. */
 private const val NEKO_MAX_QUEUE = 30
 
-/** A comment as it flies: links left out, as nobody can tap one, and
- *  only its emotes when [emotesOnly] (which needs emotes shown at all). */
+/** A comment as it flies: links left out, as nobody can tap one; only its
+ *  emotes when [emotesOnly], or only its text when [textOnly] (both of which
+ *  need emotes shown at all: otherwise they're text anyway). */
 private fun nekoRendered(
     msg: ChatMessage,
     showEmotes: Boolean,
     emotes: EmoteSet,
     emotesOnly: Boolean,
+    textOnly: Boolean,
     revealSpoilers: Boolean
 ): ChatHtml.Rendered {
     val rendered = ChatHtml.withoutLinks(
         ChatHtml.render(msg.html, msg.addClass == "greentext", Color.Unspecified, showEmotes, emotes, revealSpoilers = revealSpoilers)
     )
-    return if (emotesOnly && showEmotes) ChatHtml.emotesOnly(rendered) else rendered
+    return when {
+        emotesOnly && showEmotes -> ChatHtml.emotesOnly(rendered)
+        textOnly && showEmotes -> ChatHtml.textOnly(rendered)
+        else -> rendered
+    }
 }
 
 /** Never PMs: this flies messages across the video for anyone looking at
  *  the screen (a TV, a screen share). Nor one that's only a link, which
  *  would fly past as nothing. */
-private fun flies(msg: ChatMessage, showEmotes: Boolean, emotes: EmoteSet, emotesOnly: Boolean, revealSpoilers: Boolean): Boolean =
-    !msg.isServerMessage && !msg.isPm && nekoRendered(msg, showEmotes, emotes, emotesOnly, revealSpoilers).text.isNotBlank()
+private fun flies(
+    msg: ChatMessage,
+    showEmotes: Boolean,
+    emotes: EmoteSet,
+    emotesOnly: Boolean,
+    textOnly: Boolean,
+    revealSpoilers: Boolean
+): Boolean =
+    !msg.isServerMessage && !msg.isPm && nekoRendered(msg, showEmotes, emotes, emotesOnly, textOnly, revealSpoilers).text.isNotBlank()
 
 /** White with a soft black glow instead of a background box. */
 private val NEKO_TEXT_STYLE = TextStyle(
@@ -1141,10 +1178,11 @@ private fun estimateCommentWidthPx(
     showEmotes: Boolean,
     emotes: EmoteSet,
     emotesOnly: Boolean,
+    textOnly: Boolean,
     revealSpoilers: Boolean,
     density: Density
 ): Float {
-    val rendered = nekoRendered(msg, showEmotes, emotes, emotesOnly, revealSpoilers)
+    val rendered = nekoRendered(msg, showEmotes, emotes, emotesOnly, textOnly, revealSpoilers)
     val soloEmotePx = with(density) { SOLO_EMOTE_HEIGHT.sp.toPx() }
     val emotePx = with(density) { EMOTE_HEIGHT.sp.toPx() }
     val charWidthPx = with(density) { 13.dp.toPx() }
@@ -1166,13 +1204,18 @@ private fun FlyingCommentItem(
     showEmotes: Boolean,
     emotes: EmoteSet,
     emotesOnly: Boolean,
+    textOnly: Boolean,
+    emoteOpacity: Float,
     revealSpoilers: Boolean,
     onFinished: () -> Unit
 ) {
-    val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes, emotesOnly, revealSpoilers) }
+    val rendered = remember(comment.id) { nekoRendered(comment.msg, showEmotes, emotes, emotesOnly, textOnly, revealSpoilers) }
     val solo = rendered.soloEmoteCount > 0
     val emoteHeight = if (solo) SOLO_EMOTE_HEIGHT else EMOTE_HEIGHT
-    val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
+    // Its emotes as see-through as Settings has them; changed while it
+    // flies, it follows.
+    val emotesAt = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
+    val inline = remember(emotesAt, emoteOpacity) { emotesAt.withAlpha(emoteOpacity) }
 
     // Its real width once laid out (the lane was picked on an estimate).
     var measuredWidthPx by remember(comment.id) { mutableFloatStateOf(comment.widthPx) }
