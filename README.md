@@ -78,10 +78,10 @@ use out of it:
 
 Works with a TV remote's D-pad. From the video, press **Down**:
 
-* With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico square to reach the **CC** button.
-* With "stay in sync" **off**, Down opens a full-screen playlist with a search bar, for picking your own videos (chat isn't available in this mode).
+* With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico square to reach the **CC** button. Press **Up** or **Back** to return to the video.
+* With "stay in sync" **off**, the video is yours to control: **OK** plays and pauses, **Left** and **Right** skip back and forward 10 seconds (hold to keep going), and the remote's own play/pause, rewind and fast-forward buttons work too. A bar along the bottom shows where you are. Down opens a full-screen playlist for picking your own videos (chat isn't available in this mode): it opens on what's playing, **OK** plays an item and takes you back to the video, and the search box at the top only brings up the keyboard when you press **OK** on it. **Back** returns to the video.
 
-Press **Up** or **Back** to return to the video. Adding videos and private messages are phone-only.
+Adding videos and private messages are phone-only.
 
 ---
 

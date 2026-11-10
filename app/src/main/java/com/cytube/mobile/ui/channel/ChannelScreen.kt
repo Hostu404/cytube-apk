@@ -35,11 +35,14 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
@@ -49,6 +52,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MailOutline
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
@@ -138,6 +142,10 @@ import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubeChannelTheme
 import com.cytube.mobile.ui.theme.ChannelTopBar
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import android.os.SystemClock
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 
 private enum class Panel { PLAYLIST, USERS, POLL }
 
@@ -577,6 +585,55 @@ fun ChannelScreen(
         LaunchedEffect(tvShowingChat, tvShowingPlaylist) {
             if (!tvShowingChat && !tvShowingPlaylist) runCatching { videoFocusRequester.requestFocus() }
         }
+        val overlayOpen = tvShowingChat || tvShowingPlaylist
+
+        // With sync off the video is the user's own to play, pause and seek
+        // (TvTransport): OK, Left and Right, and a remote's media keys, with
+        // a bar along the bottom showing where it is. Synced, the channel
+        // decides, as before.
+        val ownControls = !state.syncEnabled && state.player != MediaTypes.Player.WEB
+        val transport = remember { TvTransport() }
+        // Bumped as the player is asked where it is, and as a control is
+        // used: what the bar redraws on.
+        var transportTick by remember { mutableLongStateOf(0L) }
+        LaunchedEffect(ownControls) {
+            if (!ownControls) {
+                transport.reset()
+                transportTick = SystemClock.uptimeMillis()
+                return@LaunchedEffect
+            }
+            while (true) {
+                vm.ownPlaybackStatus()?.let { transport.onStatus(it, SystemClock.uptimeMillis()) }
+                val now = SystemClock.uptimeMillis()
+                transportTick = now
+                // Often while the bar is up, so its time moves smoothly;
+                // now and then otherwise, to notice a pause made some other
+                // way (a remote's own play/pause button).
+                delay(if (transport.visibleAt(now)) TV_TRANSPORT_REFRESH_MS else TV_TRANSPORT_IDLE_REFRESH_MS)
+            }
+        }
+        // OK (or a remote's play/pause) plays or pauses; Left and Right (or
+        // rewind and fast-forward) seek, and keep seeking while held; Up
+        // just shows the bar. True when it was one of those.
+        fun onTransportKey(event: KeyEvent): Boolean {
+            val action = TvKeys.actionFor(
+                event.key, pressed = event.type == KeyEventType.KeyDown, repeatCount = event.nativeKeyEvent.repeatCount
+            ) ?: return false
+            val now = SystemClock.uptimeMillis()
+            when (action) {
+                TvKeyAction.TOGGLE -> vm.togglePlayPauseOwn()?.let { transport.onToggled(it, now) }
+                TvKeyAction.PLAY -> vm.setPlayingOwn(true)?.let { transport.onToggled(it, now) }
+                TvKeyAction.PAUSE -> vm.setPlayingOwn(false)?.let { transport.onToggled(it, now) }
+                TvKeyAction.BACK ->
+                    transport.seekBy(-TvTransport.SEEK_STEP_SECONDS, now)?.let(vm::seekOwn) ?: transport.touch(now)
+                TvKeyAction.FORWARD ->
+                    transport.seekBy(TvTransport.SEEK_STEP_SECONDS, now)?.let(vm::seekOwn) ?: transport.touch(now)
+                TvKeyAction.SHOW -> transport.touch(now)
+                TvKeyAction.NONE -> return true
+            }
+            transportTick = now
+            return true
+        }
 
         // CyTubeChannelTheme wraps this the same way it wraps the windowed
         // Scaffold below — without it, TvChatView's ChatPanel and its Nico
@@ -596,21 +653,30 @@ fun ChannelScreen(
                     .fillMaxSize()
                     .focusGroup()
                     .focusRequester(videoFocusRequester)
+                    // Not while chat or the playlist is up: left focused
+                    // under one, the video kept the remote, and its next
+                    // press landed on whatever was nearest in the view on
+                    // top (the playlist's search box, keyboard and all).
+                    .focusProperties { canFocus = !overlayOpen }
                     .focusable()
                     .onPreviewKeyEvent { event ->
-                        if (!tvShowingChat && !tvShowingPlaylist &&
-                            event.type == KeyEventType.KeyUp &&
-                            event.key == Key.DirectionDown
-                        ) {
-                            // Personally browsing (sync off): straight to the
-                            // playlist, never chat — see tvShowingPlaylist's
-                            // own comment above for why the two never both
-                            // apply. Synced (the ordinary case): unchanged,
-                            // same chat view as always.
-                            if (state.syncEnabled) tvShowingChat = true else tvShowingPlaylist = true
-                            true
-                        } else {
-                            false
+                        when {
+                            overlayOpen -> false
+                            event.key == Key.DirectionDown -> {
+                                // Personally browsing (sync off): straight to the
+                                // playlist, never chat — see tvShowingPlaylist's
+                                // own comment above for why the two never both
+                                // apply. Synced (the ordinary case): unchanged,
+                                // same chat view as always. On release; the
+                                // press itself is kept from an embedded page
+                                // underneath too.
+                                if (event.type == KeyEventType.KeyUp) {
+                                    if (state.syncEnabled) tvShowingChat = true else tvShowingPlaylist = true
+                                }
+                                true
+                            }
+                            ownControls -> onTransportKey(event)
+                            else -> false
                         }
                     }
             ) {
@@ -628,7 +694,9 @@ fun ChannelScreen(
                         )
                     }
                 } else {
-                    playerContent()
+                    // An embedded page keeps off the remote's focus while
+                    // chat or the playlist covers it (see LocalPlayerCovered).
+                    CompositionLocalProvider(LocalPlayerCovered provides overlayOpen) { playerContent() }
                 }
 
                 // Exactly the same overlay the phone's fullscreen player
@@ -664,6 +732,19 @@ fun ChannelScreen(
                 state.kicked?.let { reason ->
                     Box(Modifier.align(Alignment.BottomCenter).padding(32.dp)) {
                         DisconnectedNotice(reason = reason, onRetry = vm::retry, onBack = onBack)
+                    }
+                }
+
+                if (ownControls && !overlayOpen && state.kicked == null) {
+                    val now = transportTick
+                    val status = transport.status
+                    if (status != null && transport.visibleAt(now)) {
+                        TvTransportBar(
+                            positionSeconds = transport.positionAt(now) ?: status.positionSeconds,
+                            lengthSeconds = status.lengthSeconds,
+                            paused = status.paused,
+                            modifier = Modifier.align(Alignment.BottomCenter)
+                        )
                     }
                 }
             }
@@ -2450,20 +2531,28 @@ private fun TvSubtitleButton(
 /**
  * TV's playlist view — the personal/unsynced-browsing counterpart to
  * TvChatView just above, reached the same way (D-pad Down from fullscreen
- * video, left with Up or Back) but ONLY while state.syncEnabled is false
- * (see the isTv branch's Down handler). Chat has no D-pad path at all in
- * that mode: turning sync off is a deliberate "I'm browsing on my own"
- * choice, and a synced channel-wide chat conversation sitting one Down
- * press away from a personal pick would be a strange mix, not a missing
- * feature — so this view replaces TvChatView entirely rather than sitting
- * alongside it. Same structural pattern as TvChatView throughout: a
- * fillMaxSize Surface (for real LocalContentColor, not just a painted
- * background), one Up-swallowing onPreviewKeyEvent that jumps focus to the
- * search field (the top stop) or exits from it, and reuse of what the phone
- * layout already has for a personal pick (ChannelViewModel.pickPersonal) —
- * MediaTypes.canResolveIndependently decides which rows are actually
- * selectable, the same rule PlaylistPanel greys rows out with, for the same
- * reason (see that function's own doc comment).
+ * video) but ONLY while state.syncEnabled is false (see the isTv branch's
+ * Down handler). Chat has no D-pad path at all in that mode: turning sync
+ * off is a deliberate "I'm browsing on my own" choice, and a synced
+ * channel-wide chat conversation sitting one Down press away from a personal
+ * pick would be a strange mix, not a missing feature — so this view replaces
+ * TvChatView entirely rather than sitting alongside it.
+ *
+ * Made to be driven with a remote and nothing else:
+ *  - It opens on the item playing (or the first one that can be picked),
+ *    focused once the list has actually drawn that row. Focusing it any
+ *    sooner failed now and then, and left the remote's next press to land
+ *    on the search box.
+ *  - Up and Down go from row to row; Up from the top row reaches the search
+ *    box, and Up from there (or Back from anywhere) goes back to the video.
+ *  - OK on an item plays it and goes back to the video.
+ *  - The search box is a button: the keyboard only comes up on OK, never
+ *    just because focus passed over it (a TV keyboard takes the remote's
+ *    keys for itself). Its search key, Down, or Back put it away again.
+ *
+ * MediaTypes.canResolveIndependently decides which rows can be picked, the
+ * same rule PlaylistPanel greys rows out with, for the same reason (see that
+ * function's own doc comment); the others can't take focus.
  */
 @Composable
 private fun TvPlaylistView(
@@ -2473,33 +2562,60 @@ private fun TvPlaylistView(
     onExit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val searchFocusRequester = remember { FocusRequester() }
-    val firstRowFocusRequester = remember { FocusRequester() }
+    val searchButtonFocus = remember { FocusRequester() }
+    val searchFieldFocus = remember { FocusRequester() }
+    // On the row focus is to go to: the one the view opens on, then the
+    // first match after a search.
+    val rowFocus = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
-    var searchFocused by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf("") }
-    // Focuses the first row, not the search box — like TvChatView's own
-    // LaunchedEffect(Unit) (see its comment), which focuses the non-text
-    // Nico toggle first rather than the chat input field. Focusing a
-    // text field pops Android TV's on-screen keyboard immediately — before
-    // the user has navigated anywhere — and that overlay then eats D-pad
-    // input itself: Down moves across keyboard keys instead of scrolling the
-    // list below, and Up/Back presses meant for this screen's own exit
-    // handling never reach it either, since the keyboard consumes them first.
-    // Focusing the first row instead means the keyboard only appears when the
-    // user deliberately navigates Up into search — exactly when they want it.
-    LaunchedEffect(Unit) {
-        if (playlist.isNotEmpty()) {
-            runCatching { firstRowFocusRequester.requestFocus() }
-        } else {
-            // Nothing to scroll to — search is the only focusable thing here.
-            runCatching { searchFocusRequester.requestFocus() }
-        }
-    }
+    var editing by remember { mutableStateOf(false) }
+    var focusRow by remember { mutableIntStateOf(-1) }
+    var searchFocused by remember { mutableStateOf(false) }
 
     val filtered = remember(playlist, query) {
         if (query.isBlank()) playlist
         else playlist.filter { it.title.contains(query, ignoreCase = true) }
+    }
+
+    // Brings [index] into view and focuses it once it's drawn (the list
+    // only draws the rows on screen, a frame or two after scrolling), or
+    // the search button when there's no row to go to.
+    suspend fun focusOn(index: Int) {
+        if (index < 0) {
+            repeat(TV_FOCUS_TRIES) {
+                withFrameNanos { }
+                if (runCatching { searchButtonFocus.requestFocus(FocusDirection.Enter) }.getOrDefault(false)) return
+            }
+            return
+        }
+        focusRow = index
+        runCatching { listState.scrollToItem(index) }
+        repeat(TV_FOCUS_TRIES) {
+            withFrameNanos { }
+            if (runCatching { rowFocus.requestFocus(FocusDirection.Enter) }.getOrDefault(false)) return
+        }
+    }
+
+    LaunchedEffect(Unit) { focusOn(TvPlaylistFocus.openingRow(playlist, personalPickUid)) }
+
+    // Puts the keyboard away, and goes to the first match ([toResults]) or
+    // back to the search button.
+    fun finishSearch(toResults: Boolean) {
+        keyboardController?.hide()
+        editing = false
+        val target = if (toResults) filtered.indexOfFirst(TvPlaylistFocus::pickable) else -1
+        scope.launch { focusOn(target) }
+    }
+    // Back while searching puts the search away rather than leaving the view.
+    BackHandler(enabled = editing) { finishSearch(toResults = false) }
+    LaunchedEffect(editing) {
+        if (!editing) return@LaunchedEffect
+        withFrameNanos { }
+        runCatching { searchFieldFocus.requestFocus() }
+        keyboardController?.show()
     }
 
     Surface(
@@ -2507,87 +2623,86 @@ private fun TvPlaylistView(
         color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground
     ) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            // Same one-stop-at-a-time shape as TvChatView's own Up handler
-            // (see its doc comment) — from the search field this exits, from
-            // anywhere in the list below it this jumps straight back UP to
-            // the search field rather than doing a real per-row focus
-            // search, so Up always has one predictable meaning regardless of
-            // how far down the list focus currently is.
-            .onPreviewKeyEvent { event ->
-                if (event.key != Key.DirectionUp) {
-                    false
-                } else {
-                    if (event.type == KeyEventType.KeyUp) {
-                        if (searchFocused) onExit() else runCatching { searchFocusRequester.requestFocus() }
-                    }
-                    true
-                }
-            }
-    ) {
+    Column(Modifier.fillMaxSize()) {
         Text(
             "Playlist — browsing unsynced",
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)
+        )
+        Text(
+            "OK plays it  ·  Back returns to the video",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
         )
 
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            placeholder = { Text("Search playlist") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .focusRequester(searchFocusRequester)
-                // hasFocus, not isFocused: the text field keeps its focus on
-                // a node inside itself, so isFocused here stayed false and Up
-                // never saw the field as focused (it kept re-focusing it
-                // instead of going back to the video).
-                .onFocusChanged { searchFocused = it.hasFocus }
-                // If the user does deliberately navigate up into search (or
-                // this is the empty-playlist fallback above), the on-screen
-                // keyboard shows and — same problem as the auto-focus case —
-                // a soft keyboard's own Down normally just moves across its
-                // keys rather than reaching this handler at all. That part
-                // can't be fixed here; what this handles is the keyboard
-                // NOT eating Down, which does happen (physical/TV-remote
-                // D-pad presses reach Compose even while the IME is up,
-                // unlike Back — see the LaunchedEffect comment above for why
-                // Back can't be handled the same way). Explicitly hiding the
-                // keyboard here means Down always dismisses it and continues
-                // on to the first row in one press, rather than leaving the
-                // keyboard sitting open on screen after focus has already
-                // moved past it.
-                //
-                // A preview handler, seen before the text field itself: the
-                // field takes Down (to move its cursor) before a plain key
-                // handler gets it, and then nothing moved focus at all.
-                // Down closes the keyboard and goes to the first row.
-                .onPreviewKeyEvent { event ->
-                    if (event.key != Key.DirectionDown) {
-                        false
-                    } else {
-                        if (event.type == KeyEventType.KeyDown) {
-                            keyboardController?.hide()
-                            if (filtered.isNotEmpty()) runCatching { firstRowFocusRequester.requestFocus() }
+        if (editing) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search playlist") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .focusRequester(searchFieldFocus)
+                    // Seen before the field itself, which would otherwise
+                    // take Down to move its cursor: Down puts the keyboard
+                    // away and goes to the results.
+                    .onPreviewKeyEvent { event ->
+                        if (event.key != Key.DirectionDown) {
+                            false
+                        } else {
+                            if (event.type == KeyEventType.KeyDown) finishSearch(toResults = true)
+                            true
                         }
-                        true
+                    },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { finishSearch(toResults = true) })
+            )
+        } else {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .focusRequester(searchButtonFocus)
+                    .onFocusChanged { searchFocused = it.isFocused }
+                    // The top of the view: Up from here goes back to the video.
+                    // On a press made here, not on the release of the press
+                    // that moved focus up here from the first row (that left
+                    // at once), nor on a held Up still repeating.
+                    .onPreviewKeyEvent { event ->
+                        if (event.key != Key.DirectionUp) {
+                            false
+                        } else {
+                            if (event.type == KeyEventType.KeyDown && event.nativeKeyEvent.repeatCount == 0) onExit()
+                            true
+                        }
                     }
-                },
-            // The keyboard's own action key does the same: close it and go
-            // to the results, rather than leave the keyboard up.
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = {
-                keyboardController?.hide()
-                if (filtered.isNotEmpty()) runCatching { firstRowFocusRequester.requestFocus() }
-            })
-        )
+                    .border(
+                        if (searchFocused) 2.dp else 1.dp,
+                        if (searchFocused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                        RoundedCornerShape(4.dp)
+                    )
+                    .clickable { editing = true }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Search, contentDescription = null)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    if (query.isBlank()) "Search playlist" else query,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (query.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
         Spacer(Modifier.height(8.dp))
 
         if (filtered.isEmpty()) {
@@ -2602,6 +2717,7 @@ private fun TvPlaylistView(
         } else {
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
+                state = listState,
                 contentPadding = PaddingValues(vertical = 8.dp)
             ) {
                 // Same stable-key fix as PlaylistPanel in Panels.kt — see that
@@ -2609,19 +2725,16 @@ private fun TvPlaylistView(
                 // is per-row remembered state, and an idx-suffixed key reset it
                 // (losing the focus highlight) on every playlist mutation.
                 itemsIndexed(filtered, key = { idx, item -> if (item.uid >= 0) "item_${item.uid}" else "pos_${idx}_${item.mediaId}" }) { idx, item ->
-                    val personallyResolvable =
-                        MediaTypes.canResolveIndependently(item.type)
+                    val personallyResolvable = TvPlaylistFocus.pickable(item)
                     val isPick = item.uid == personalPickUid
                     var rowFocused by remember { mutableStateOf(false) }
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            // Only the very first row — this is purely the
-                            // initial-focus target the LaunchedEffect above
-                            // requests focus on when the screen opens; every
-                            // other row is a completely ordinary focus target
-                            // reached by normal D-pad navigation.
-                            .then(if (idx == 0) Modifier.focusRequester(firstRowFocusRequester) else Modifier)
+                            // Only on the row focus is being sent to (see
+                            // focusOn); every other row is reached by plain
+                            // D-pad moves.
+                            .then(if (idx == focusRow) Modifier.focusRequester(rowFocus) else Modifier)
                             .background(
                                 if (isPick) MaterialTheme.colorScheme.surfaceContainerHigh
                                 else Color.Transparent
@@ -2639,7 +2752,11 @@ private fun TvPlaylistView(
                                 2.dp,
                                 if (rowFocused) MaterialTheme.colorScheme.primary else Color.Transparent
                             )
-                            .clickable(enabled = personallyResolvable) { onPersonalPick(item) }
+                            // Plays it, and back to the video to watch it.
+                            .clickable(enabled = personallyResolvable) {
+                                onPersonalPick(item)
+                                onExit()
+                            }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -2674,6 +2791,67 @@ private fun TvPlaylistView(
             }
         }
     }
+    }
+}
+
+/** Frames TV's views wait for a row to be drawn before giving up on
+ *  focusing it (see TvPlaylistView's focusOn): a second, at the least. */
+private const val TV_FOCUS_TRIES = 60
+
+/** How often TV's playback bar (sync off) asks the player where it is while
+ *  the bar is up, and while it isn't. */
+private const val TV_TRANSPORT_REFRESH_MS = 250L
+private const val TV_TRANSPORT_IDLE_REFRESH_MS = 1_000L
+
+/**
+ * TV's playback bar with sync off (see TvTransport): playing or paused,
+ * where the video is along its length, and which keys do what. Never
+ * focused: the keys belong to the video screen.
+ */
+@Composable
+private fun TvTransportBar(
+    positionSeconds: Double,
+    lengthSeconds: Int,
+    paused: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000))))
+            .padding(start = 48.dp, end = 48.dp, top = 40.dp, bottom = 28.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                contentDescription = if (paused) "Paused" else "Playing",
+                tint = Color.White,
+                modifier = Modifier.size(36.dp)
+            )
+            Spacer(Modifier.width(16.dp))
+            Text(TvTransport.clock(positionSeconds), color = Color.White, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.width(16.dp))
+            if (lengthSeconds > 0) {
+                LinearProgressIndicator(
+                    progress = { (positionSeconds / lengthSeconds).toFloat().coerceIn(0f, 1f) },
+                    modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = Color.White.copy(alpha = 0.3f)
+                )
+                Spacer(Modifier.width(16.dp))
+                Text(TvTransport.clock(lengthSeconds.toDouble()), color = Color.White, style = MaterialTheme.typography.titleMedium)
+            } else {
+                Text("Live", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            if (lengthSeconds > 0) "OK  play / pause        ◀ ▶  10 seconds        ▼  playlist"
+            else "OK  play / pause        ▼  playlist",
+            color = Color.White.copy(alpha = 0.75f),
+            style = MaterialTheme.typography.labelLarge
+        )
     }
 }
 

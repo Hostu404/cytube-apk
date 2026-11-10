@@ -1696,6 +1696,64 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- TV: the user's own playback controls, with sync off ----
+
+    /**
+     * Whether playback is the user's to control (TV's OK, Left and Right):
+     * with sync off, as on a personal pick. Synced, the channel decides, and
+     * sync would only undo a pause or a seek. Not in Compatibility View,
+     * whose page has its own player.
+     */
+    private fun playbackIsOwn(): Boolean {
+        val s = _state.value
+        return (!s.syncEnabled || s.personalPickActive) && s.effectiveMode != CompatMode.WEB
+    }
+
+    /** TV's OK with sync off: plays the video if it's paused (from the
+     *  start again if it had ended), else pauses it. Whether it's now
+     *  playing; null when playback isn't the user's (see playbackIsOwn). */
+    fun togglePlayPauseOwn(): Boolean? {
+        val p = player ?: return null
+        return setPlayingOwn(p.isPaused || p.hasEnded)
+    }
+
+    /** A remote's own Play or Pause key with sync off: [playing] or not.
+     *  Whether it's now playing; null as for [togglePlayPauseOwn]. */
+    fun setPlayingOwn(playing: Boolean): Boolean? {
+        if (!playbackIsOwn()) return null
+        val p = player ?: return null
+        if (playing) {
+            if (p.hasEnded) p.seekTo(0.0)
+            p.play()
+        } else {
+            p.pause()
+        }
+        return playing
+    }
+
+    /** TV's Left and Right with sync off: to [seconds] into the video, kept
+     *  within it. Nothing for live media, which has no length to move along. */
+    fun seekOwn(seconds: Double) {
+        if (!playbackIsOwn() || seconds.isNaN()) return
+        val p = player ?: return
+        val length = p.mediaLengthSeconds
+        if (length <= 0) return
+        p.seekTo(seconds.coerceIn(0.0, (length - 1).coerceAtLeast(0).toDouble()))
+    }
+
+    /** Where the video is, for TV's controls bar; null with no player, or
+     *  when playback isn't the user's (see playbackIsOwn). */
+    suspend fun ownPlaybackStatus(): PlaybackStatus? {
+        if (!playbackIsOwn()) return null
+        val p = player ?: return null
+        val at = p.currentTimeSeconds()
+        return PlaybackStatus(
+            positionSeconds = if (at.isNaN() || at.isInfinite()) 0.0 else at,
+            lengthSeconds = p.mediaLengthSeconds,
+            paused = p.isPaused || p.hasEnded
+        )
+    }
+
     /** The PiP window was closed ([closed]) or expanded back into the app.
      *  Closing stops playback until the app is opened again; expanding
      *  lifts a pause made from the PiP window (the full-screen view it

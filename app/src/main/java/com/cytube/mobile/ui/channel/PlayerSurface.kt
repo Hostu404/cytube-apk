@@ -101,6 +101,13 @@ import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * True while TV's chat or playlist view covers the video (see
+ * ChannelScreen's TV layout): an embedded page then mustn't take the
+ * remote's focus, which belongs to the view on top.
+ */
+internal val LocalPlayerCovered = compositionLocalOf { false }
+
+/**
  * Layer 4: player implementations.
  *
  * NATIVE and NEWPIPE are the same ExoPlayer surface — the only difference is
@@ -411,6 +418,8 @@ private fun EmbedSurface(
     // iframe that script can't reach).
     val isProviderPage = type in PROVIDER_EMBED_TYPES
     val isTv = remember { isTvDevice(context) }
+    // On TV, covered by the chat or playlist view (see LocalPlayerCovered).
+    val covered = LocalPlayerCovered.current
     var isReady by remember { mutableStateOf(false) }
     var failureReported by remember { mutableStateOf(false) }
     fun reportFailure(reason: String) {
@@ -728,8 +737,17 @@ private fun EmbedSurface(
         },
         // TV only, for the remote. On a phone this took focus from the chat
         // box, closing the keyboard mid-message, whenever the playlist moved
-        // to an embedded video.
-        update = { if (isTv) it.requestFocus() },
+        // to an embedded video. Not while TV's chat or playlist view covers
+        // it: the page could take the remote's focus away from that view
+        // whenever it was drawn again (an item announced again, say), and the
+        // remote then moved round the hidden page instead.
+        update = {
+            if (isTv) {
+                it.isFocusable = !covered
+                it.isFocusableInTouchMode = !covered
+                if (!covered) it.requestFocus()
+            }
+        },
         onRelease = {
             // Releasing is how the ViewModel learns this player is gone —
             // see ChannelViewModel.player.
