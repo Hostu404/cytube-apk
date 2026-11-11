@@ -1279,6 +1279,20 @@ fun ChannelScreen(
             }
         }
     }
+    // Sync off: a soft amber glow just under the video (see drawSyncOffGlow),
+    // fading in and out as sync is switched. Drawn over the page, so it takes
+    // no room and nothing moves for it; before lights down's dark layer
+    // below, so it goes down with everything else.
+    val syncOffGlow = animateFloatAsState(
+        targetValue = if (!state.syncEnabled && !webMode) 1f else 0f,
+        animationSpec = tween(SYNC_OFF_GLOW_FADE_MS),
+        label = "syncOffGlow"
+    )
+    Spacer(
+        Modifier.fillMaxSize().drawBehind {
+            drawSyncOffGlow(videoInRoot.translate(-screenInRoot), syncOffGlow.value)
+        }
+    )
     // Lights down's dark layer, over everything but the video: plain
     // black. Black rather than grey, so an OLED screen switches those pixels
     // off. The status and navigation bars' backgrounds are the app's, so

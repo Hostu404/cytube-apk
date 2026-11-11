@@ -1400,6 +1400,12 @@ private fun ExoSurface(
                 val view = LayoutInflater.from(ctx)
                     .inflate(R.layout.player_view, null, false) as PlayerView
                 view.apply {
+                    // The controls come up only when the video is tapped:
+                    // never by themselves as it loads, pauses, ends or fails
+                    // (Media3's "auto show"), which put them up at the end
+                    // of every video and the start of the next. Before the
+                    // player, whose state could bring them up.
+                    controllerAutoShow = false
                     this.player = exo
                     useController = showControls && !waitingForStream
                     // Media3's own default is 3s — shares ChannelScreen's

@@ -1730,7 +1730,20 @@ fun PlaylistPanel(
                             contentDescription = null,
                             modifier = Modifier.size(FilterChipDefaults.IconSize)
                         )
-                    }
+                    },
+                    // Off, it's in the amber of the glow under the video
+                    // (see drawSyncOffGlow), so the two read as the same
+                    // thing. On, as it always was.
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = SyncOffAmber.copy(alpha = 0.12f),
+                        labelColor = SyncOffAmber,
+                        iconColor = SyncOffAmber
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = syncEnabled,
+                        borderColor = SyncOffAmber.copy(alpha = 0.6f)
+                    )
                 )
             }
         }
