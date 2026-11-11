@@ -28,11 +28,11 @@ android {
         applicationId = "com.cytube.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "classless"
+        versionCode = 25
+        versionName = "scully"
         // Nightly builds (.github/workflows/nightly.yml) pass
         // -PnightlyBuild=<the night>, so the home screen shows which night an
-        // APK is from, e.g. "classless nightly 4 Nov". (Its commit is in the
+        // APK is from, e.g. "scully nightly 4 Nov". (Its commit is in the
         // nightly release's notes.)
         providers.gradleProperty("nightlyBuild").orNull?.let { versionName = "$versionName nightly $it" }
     }

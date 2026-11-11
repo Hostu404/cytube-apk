@@ -19,9 +19,15 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.FirstBaseline
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -38,7 +44,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -137,8 +142,8 @@ fun HomeScreen(
                     Row(Modifier.padding(start = 12.dp)) {
                         Text("CyTube APK", fontWeight = FontWeight.SemiBold, modifier = Modifier.alignByBaseline())
                         Spacer(Modifier.width(8.dp))
-                        if (BuildConfig.VERSION_NAME.startsWith("classless")) {
-                            ClasslessName(Modifier.alignByBaseline())
+                        if (BuildConfig.VERSION_NAME.startsWith(SCULLY)) {
+                            ScullyName(Modifier.alignByBaseline())
                         } else {
                             Text(
                                 BuildConfig.VERSION_NAME,
@@ -544,60 +549,62 @@ private fun EmptyResults(query: String) {
 }
 
 /**
- * The version's name for classless: its usual small grey text, wearing the top hat. The hat sits on
- * the first "l" as on a peg, its brim just on the l's tip (found from the letter itself, so it fits
- * whatever the phone's font), clear of the letters either side. Drawn over the bar, the title's row
- * keeps its size. On the dark theme its dark felt is lit up, so it doesn't vanish into the black.
- * Smoothed down from its bigger picture (mipmaps), as Apu is.
+ * The version's picture, standing in for its name, scully: her portrait in a circle. The picture
+ * is graded warm and glowing (that's in the picture itself, res/drawable-nodpi/scully.webp). It
+ * stays still and takes no taps. It stands where the name would, its middle on the middle of the
+ * title's letters, and is the name for screen readers. A nightly's date still follows in the
+ * version's usual small grey. Smoothed down from its bigger picture (mipmaps), as the hat and Apu
+ * were.
  */
 @Composable
-internal fun ClasslessName(modifier: Modifier = Modifier, versionName: String = BuildConfig.VERSION_NAME) {
-    val hat = ImageBitmap.imageResource(R.drawable.classless_hat).withMipMaps()
-    val style = MaterialTheme.typography.labelSmall
-    val lit = if (maIsLight()) null else HAT_LIT
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    Text(
-        versionName,
-        style = style,
-        color = maFaint(),
-        onTextLayout = { layout = it },
-        modifier = modifier.drawWithCache {
-            val peg = versionName.indexOf('l')
-            val tip = layout?.takeIf { peg >= 0 && peg < it.layoutInput.text.length }?.getPathForRange(peg, peg + 1)?.getBounds()
-            val em = style.fontSize.toPx()
-            val height = em * HAT_HEIGHT
-            val width = height * hat.width / hat.height
-            onDrawWithContent {
-                drawContent()
-                if (tip == null || tip.isEmpty) return@onDrawWithContent
-                drawImage(
-                    hat,
-                    dstOffset = IntOffset(((tip.left + tip.right - width) / 2).roundToInt(), (tip.top + em * HAT_ON_TIP - height).roundToInt()),
-                    dstSize = IntSize(width.roundToInt(), height.roundToInt()),
-                    filterQuality = FilterQuality.High,
-                    colorFilter = lit
-                )
-            }
+internal fun ScullyName(modifier: Modifier = Modifier, versionName: String = BuildConfig.VERSION_NAME) {
+    val scully = ImageBitmap.imageResource(R.drawable.scully).withMipMaps()
+    val title = MaterialTheme.typography.titleLarge.fontSize
+    val name = versionName.take(SCULLY.length)
+    val rest = versionName.drop(SCULLY.length).trimStart()
+    Row(modifier) {
+        Layout(
+            modifier = Modifier
+                .alignByBaseline()
+                .padding(start = PORTRAIT_GAP)
+                .semantics { contentDescription = name }
+                .drawWithCache {
+                    val photo = Rect(Offset.Zero, size)
+                    val circle = Path().apply { addOval(photo) }
+                    val dstSize = IntSize(photo.width.roundToInt(), photo.height.roundToInt())
+                    onDrawBehind {
+                        clipPath(circle) { drawImage(scully, dstSize = dstSize, filterQuality = FilterQuality.High) }
+                    }
+                }
+        ) { _, _ ->
+            val side = PORTRAIT_SIZE.roundToPx()
+            // Its baseline is the title's: that far below its middle, which puts its middle on
+            // the middle of the title's letters.
+            val baseline = (side / 2f + title.toPx() * TITLE_MIDDLE).roundToInt()
+            layout(side, side, mapOf(FirstBaseline to baseline)) {}
         }
-    )
+        if (rest.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                rest,
+                style = MaterialTheme.typography.labelSmall,
+                color = maFaint(),
+                modifier = Modifier.alignByBaseline()
+            )
+        }
+    }
 }
 
-/** The hat's height, and how far its brim comes down over the l's tip, as shares of the version's
- *  font size. */
-private const val HAT_HEIGHT = 1.3f
-private const val HAT_ON_TIP = 0.04f
+/** This version's name. */
+private const val SCULLY = "scully"
 
-/** The hat's felt on the dark theme: half as bright again, and lifted, so it shows on the black. */
-private val HAT_LIT = ColorFilter.colorMatrix(
-    ColorMatrix(
-        floatArrayOf(
-            1.5f, 0f, 0f, 0f, 30f,
-            0f, 1.5f, 0f, 0f, 30f,
-            0f, 0f, 1.5f, 0f, 30f,
-            0f, 0f, 0f, 1f, 0f
-        )
-    )
-)
+/** The portrait: its size, and its room from the title. Fixed in dp, as the bar it sits in is. */
+private val PORTRAIT_SIZE = 33.dp
+private val PORTRAIT_GAP = 2.dp
+
+/** How far the middle of the title's letters is above its baseline, as a share of its font size
+ *  (Roboto's capitals are 0.71 of it tall; its small letters a little less). */
+private const val TITLE_MIDDLE = 0.34f
 
 /** The search bar's hint (which, with cot on, Prince takes letters from). */
 private const val SEARCH_HINT = "Search channels…"
