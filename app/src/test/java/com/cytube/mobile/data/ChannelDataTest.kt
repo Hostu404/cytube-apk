@@ -158,4 +158,17 @@ class ChannelDataTest {
         assertEquals("foo\nbar\nbaz", recentsAfterVisit("bar\nFoo\nbaz", "FOO", 4))
         assertEquals("e\na\nb\nc", recentsAfterVisit("a\nb\nc\nd", "E", 4))
     }
+
+    // The home page's public list spells names as their links do; a starred
+    // "American-Dad" is kept as "american-dad", and must show as starred.
+    @Test
+    fun aPublicChannelWithCapitalsShowsAsAFavourite() {
+        val saved = favouritesOf(toggledFavourites(emptySet(), "American-Dad")).toSet()
+        assertTrue(isFavouriteChannel("American-Dad", saved))
+        assertTrue(isFavouriteChannel("american-dad", saved))
+        assertFalse(isFavouriteChannel("Channel-Z", saved))
+        // Starred again, it's no longer one, whichever way it's spelt.
+        val unstarred = favouritesOf(toggledFavourites(saved, "American-Dad")).toSet()
+        assertFalse(isFavouriteChannel("American-Dad", unstarred))
+    }
 }

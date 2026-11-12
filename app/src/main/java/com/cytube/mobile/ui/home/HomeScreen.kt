@@ -54,6 +54,7 @@ import com.cytube.mobile.BuildConfig
 import com.cytube.mobile.R
 import com.cytube.mobile.data.ChannelIndexRepository.PublicChannel
 import com.cytube.mobile.data.UpdateAlerts
+import com.cytube.mobile.data.isFavouriteChannel
 import com.cytube.mobile.ui.channel.openInBrowser
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.theme.CyTubePageTheme
@@ -174,6 +175,8 @@ fun HomeScreen(
         },
         contentWindowInsets = WindowInsets.systemBars.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
     ) { padding ->
+        // Looked up once a row, so kept as a set.
+        val favouriteSet = remember(state.favourites) { state.favourites.toHashSet() }
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),
             // The navigation bar is see-through (MainActivity), so the list
@@ -285,7 +288,9 @@ fun HomeScreen(
                 items(state.filtered, key = { "pub-${it.name}" }) { channel ->
                     PublicChannelRow(
                         channel = channel,
-                        isFavourite = channel.name in state.favourites,
+                        // As the link spells it, capitals and all: see
+                        // isFavouriteChannel.
+                        isFavourite = isFavouriteChannel(channel.name, favouriteSet),
                         onClick = { onOpenChannel(channel.name) },
                         onToggleFavourite = { vm.toggleFavourite(channel.name) }
                     )

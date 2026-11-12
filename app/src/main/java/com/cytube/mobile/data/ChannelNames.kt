@@ -19,3 +19,13 @@ val CHANNEL_NAME_REGEX = Regex("^[A-Za-z0-9_-]{1,100}$")
  * goes through this, so one channel isn't kept as two.
  */
 fun canonicalChannelName(name: String): String = name.lowercase()
+
+/**
+ * Whether the channel [name] is among [favourites] (kept canonical, see
+ * favouritesOf), however [name] is spelt. The public list gives each name as
+ * its link has it ("American-Dad"), where the favourite is kept as CyTube
+ * keeps the channel ("american-dad"); compared as spelt, a channel with a
+ * capital in its name never showed as a favourite.
+ */
+fun isFavouriteChannel(name: String, favourites: Set<String>): Boolean =
+    canonicalChannelName(name) in favourites
