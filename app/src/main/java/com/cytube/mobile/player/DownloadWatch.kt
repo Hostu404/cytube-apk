@@ -13,20 +13,23 @@ import java.util.concurrent.atomic.AtomicLong
  * the log can say how fast a video is actually downloading. Bytes read back
  * from the disk cache don't pass through here.
  */
+@OptIn(UnstableApi::class)
 object MediaBytes {
     private val total = AtomicLong()
 
     fun total(): Long = total.get()
 
-    /** [inner] (the bandwidth meter) with every network byte also counted
-     *  here. */
-    @OptIn(UnstableApi::class)
-    fun counting(inner: TransferListener): TransferListener = object : TransferListener {
-        override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) =
-            inner.onTransferInitializing(source, dataSpec, isNetwork)
+    /**
+     * Counts every network byte into [total], and that's all. It doesn't
+     * pass them on to the bandwidth meter: the player adds its meter to every
+     * data source it opens itself (Media3's BaseMediaSource), so passing them
+     * on here as well counted each byte twice, doubling the estimate the
+     * starting quality is chosen from (BandwidthEstimate).
+     */
+    val listener: TransferListener = object : TransferListener {
+        override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
 
-        override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) =
-            inner.onTransferStart(source, dataSpec, isNetwork)
+        override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
 
         override fun onBytesTransferred(
             source: DataSource,
@@ -35,11 +38,9 @@ object MediaBytes {
             bytesTransferred: Int
         ) {
             if (isNetwork) total.addAndGet(bytesTransferred.toLong())
-            inner.onBytesTransferred(source, dataSpec, isNetwork, bytesTransferred)
         }
 
-        override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) =
-            inner.onTransferEnd(source, dataSpec, isNetwork)
+        override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) = Unit
     }
 }
 

@@ -333,6 +333,13 @@ fun vimeoSdkHtml(id: String, initialTime: Double = 0.0, initialPaused: Boolean =
     """.trimIndent()
 }
 
+/** Subresource integrity for @peertube/embed-api 0.2.0's build/player.min.js
+ *  (the same bytes on unpkg, jsDelivr and in the npm package itself): the
+ *  page runs that file and nothing else, whatever the CDN serves. A new
+ *  version needs its own hash, "sha384-" + base64 of the file's SHA-384. */
+private const val PEERTUBE_EMBED_API_INTEGRITY =
+    "sha384-kXjD2ZvehEWWqnOUcWP1vEk7G0E8CGUftb8mQKPxsHVp523DqKI4FXfWMrnLWFqO"
+
 fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused: Boolean = false): String {
     if (embedUrl == null) return BLANK_EMBED_HTML
     val startSeconds = if (initialTime > 0) initialTime.toInt() else 0
@@ -355,7 +362,7 @@ fun peertubeSdkHtml(embedUrl: String?, initialTime: Double = 0.0, initialPaused:
         <div id="ptwrap">
         <iframe id="ptplayer" src="$src" allow="autoplay; fullscreen" allowfullscreen style="display:block;width:100%;height:100%;border:0;margin:0;padding:0;"></iframe>
         </div>
-        <script src="https://unpkg.com/@peertube/embed-api@0.2.0/build/player.min.js"></script>
+        <script src="https://unpkg.com/@peertube/embed-api@0.2.0/build/player.min.js" integrity="$PEERTUBE_EMBED_API_INTEGRITY" crossorigin="anonymous"></script>
         <script>
           var player = new PeerTubePlayer(document.getElementById('ptplayer'));
           var lastKnownPaused = ${if (initialPaused) "true" else "false"};

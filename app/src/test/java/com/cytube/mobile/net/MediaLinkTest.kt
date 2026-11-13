@@ -79,6 +79,21 @@ class MediaLinkTest {
 
     @Test fun streamable() = assertEquals(MediaLink.Parsed("sb", "abc12"), parsed("https://streamable.com/abc12"))
 
+    /** Shapes that used to come out as an id the server refuses: a trailing
+     *  slash, an embed link, a Drive link with the account in it. */
+    @Test fun trailingSlashesAndEmbedLinks() {
+        assertEquals(MediaLink.Parsed("tv", "v123456"), parsed("https://www.twitch.tv/videos/123456/"))
+        assertEquals(MediaLink.Parsed("tc", "FunnyClipName"), parsed("https://www.twitch.tv/somestreamer/clip/FunnyClipName/"))
+        assertEquals(MediaLink.Parsed("tc", "FunnyClipName"), parsed("https://clips.twitch.tv/FunnyClipName/"))
+        fails("https://www.twitch.tv/videos/")
+        assertEquals(MediaLink.Parsed("dm", "x7tgad0"), parsed("https://www.dailymotion.com/embed/video/x7tgad0"))
+        assertEquals(MediaLink.Parsed("sb", "abc12"), parsed("https://streamable.com/e/abc12"))
+        assertEquals(MediaLink.Parsed("sb", "abc12"), parsed("https://streamable.com/abc12/"))
+        assertEquals(MediaLink.Parsed("gd", "1AbC_dEf-123"), parsed("https://drive.google.com/file/u/0/d/1AbC_dEf-123/view"))
+        // A Dailymotion title after the id is left in: the server drops it itself.
+        assertEquals(MediaLink.Parsed("dm", "x7tgad0_some-title"), parsed("https://www.dailymotion.com/video/x7tgad0_some-title"))
+    }
+
     @Test fun peertube() =
         assertEquals(
             MediaLink.Parsed("pt", "framatube.org;9c9de5e8-0a1e-484a-b099-e80766180a6d"),

@@ -257,4 +257,56 @@ class ChannelStyleTest {
         assertEquals(0xFF00FF00.toInt(), cssColor("lime"))
         assertNull(cssColor("transparent"))
     }
+
+    /** A colour that isn't one is no colour, never a throw: a <font color>
+     *  in a chat message or the channel notice goes through cssColor on the
+     *  main thread, and "#fffz" (its "z" read as the alpha) crashed the app. */
+    @Test fun aMalformedColourIsNoColour() {
+        assertNull(cssColor("#fffz"))
+        assertNull(cssColor("#ff00ff0g"))
+        assertNull(cssColor("#ab1z"))
+        assertNull(cssColor("hsl(1e999, 50%, 50%)"))
+        // Real ones as before, alpha and all.
+        assertEquals(0xFFFF0000.toInt(), cssColor("#f00f"))
+        assertEquals(0x80FF0000.toInt(), cssColor("#ff000080"))
+        assertEquals(0xFFAABBCC.toInt(), cssColor("#AbC"))
+        assertEquals(0xFF00FF00.toInt(), cssColor("hsl(120, 100%, 50%)"))
+    }
+
+    /** One value that can't be read costs only itself: the rest of the
+     *  stylesheet (its emote modifiers, its name colours) is read as usual,
+     *  where the whole of it used to be thrown away. */
+    @Test fun oneBadValueLosesOnlyItself() {
+        val style = ChannelStyle.parse(
+            """
+            [title="/reverse"] {display: none}
+            [title="/reverse"] + .channel-emote {transform: scaleX(-1)}
+            .userlist_owner {color: red}
+            .redtext {color: hsl(1e999, 50%, 50%)}
+            .bluetext {color: blue; background-color: #fffz}
+            """
+        )
+        assertTrue("/reverse" in style.effects.modifiers)
+        assertEquals(0xFFFF0000.toInt(), style.nameColors.owner)
+        assertNull(style.effects.textLooks["redtext"])
+        assertEquals(0xFF0000FF.toInt(), style.effects.textLooks["bluetext"]?.color)
+    }
+
+    /** Colour animations with numbers too big to be real (they read as
+     *  infinity) leave the colour as it is rather than throwing: they're
+     *  worked out on the main thread, as rainbow text is drawn. */
+    @Test fun anInfiniteAnimationValueDoesntThrow() {
+        val looks = ChannelStyle.parse(
+            """
+            .hue {color: red; animation: hue 1s linear infinite}
+            @keyframes hue {to {filter: hue-rotate(1e999deg)}}
+            .fade {color: red; animation: fade 1s cubic-bezier(0.5, 1e999, 0.5, 1) infinite}
+            @keyframes fade {to {color: blue}}
+            """
+        ).effects.textLooks
+        for (t in listOf(0L, 250L, 500L, 999L)) {
+            assertNotNull(looks.getValue("hue").colorAt(t))
+            assertNotNull(looks.getValue("fade").colorAt(t))
+        }
+    }
 }

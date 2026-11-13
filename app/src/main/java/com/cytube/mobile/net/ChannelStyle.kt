@@ -641,8 +641,12 @@ private fun hueRotate(deg: Float): FloatArray {
     ))
 }
 
-/** [argb] with its hue turned [degrees], as CSS's hue-rotate() turns it. */
+/** [argb] with its hue turned [degrees], as CSS's hue-rotate() turns it.
+ *  An angle with no real value (hue-rotate(1e999deg) reads as infinity, and
+ *  its cosine as NaN) leaves the colour as it is, rather than throwing on
+ *  the main thread where a channel's rainbow text is drawn. */
 internal fun turnHue(argb: Int, degrees: Float): Int {
+    if (!degrees.isFinite()) return argb
     val m = hueRotate(degrees)
     val r = (argb shr 16) and 0xFF
     val g = (argb shr 8) and 0xFF
@@ -696,8 +700,11 @@ internal fun readableArgb(argb: Int, background: Int, min: Float = 3f): Int {
     return c
 }
 
-/** [t] of the way from ARGB colour [a] to [b]. */
+/** [t] of the way from ARGB colour [a] to [b]; [a] for a [t] with no real
+ *  value (an easing such as cubic-bezier(0.5, 1e999, 0.5, 1) can give
+ *  one), which would otherwise make a NaN that can't be rounded. */
 internal fun lerpArgb(a: Int, b: Int, t: Float): Int {
+    if (!t.isFinite()) return a
     fun channel(shift: Int): Int {
         val x = (a ushr shift) and 0xFF
         val y = (b ushr shift) and 0xFF
@@ -773,12 +780,17 @@ private class CssReader(css: String, private val base: String?) {
             val unsupported = nextDecls.containsKey("z-index") || nextDecls.containsKey("bottom") ||
                 nextDecls.containsKey("top") || nextDecls["position"].let { it == "absolute" || it == "fixed" }
             val stacks = !unsupported && (nextDecls["margin-right"]?.let(::px) ?: 0f) < 0f
+            // A style that can't be read is drawn plainly, as an unsupported
+            // one is: never the end of every other modifier, as it was when
+            // anything thrown here lost the whole stylesheet.
             modifiers[name] = EmoteModifier(
                 name = name,
                 hidden = hidden,
                 stacks = stacks,
-                target = if (unsupported) EmoteStyle() else style(nextDecls, baseEmotePx),
-                top = if (stacks) style(nextNext[name].orEmpty(), baseEmotePx) else EmoteStyle()
+                target = runCatching { if (unsupported) EmoteStyle() else style(nextDecls, baseEmotePx) }
+                    .getOrDefault(EmoteStyle()),
+                top = runCatching { if (stacks) style(nextNext[name].orEmpty(), baseEmotePx) else EmoteStyle() }
+                    .getOrDefault(EmoteStyle())
             )
         }
         val nameColors = NameColors(
@@ -793,10 +805,15 @@ private class CssReader(css: String, private val base: String?) {
         for ((_, decls) in rules + nestedRules) {
             for ((prop, value) in decls) if (prop.startsWith("--")) vars[prop] = value
         }
-        val (page, motd) = backgrounds(rules, vars)
-        val (nestedPage, nestedMotd) = if (page == null || motd == null) backgrounds(nestedRules, vars) else null to null
+        // The backgrounds and the text looks each on their own too, so that
+        // something in one that can't be read doesn't take the rest with it.
+        val (page, motd) = runCatching { backgrounds(rules, vars) }.getOrDefault(null to null)
+        val (nestedPage, nestedMotd) = if (page == null || motd == null) {
+            runCatching { backgrounds(nestedRules, vars) }.getOrDefault(null to null)
+        } else null to null
+        val looks = runCatching { textLooks(vars) }.getOrDefault(emptyMap())
         return ChannelStyle(
-            EmoteEffects(modifiers, baseEmotePx, textLooks(vars)), nameColors,
+            EmoteEffects(modifiers, baseEmotePx, looks), nameColors,
             pageBackground = page ?: nestedPage,
             motdBackground = motd ?: nestedMotd,
             imports = imports.toList()
@@ -820,7 +837,10 @@ private class CssReader(css: String, private val base: String?) {
             }
         }
         val looks = HashMap<String, TextLook>()
-        for ((name, decls) in byClass) textLook(withVars(decls, vars))?.let { looks[name] = it }
+        // Each class on its own: one that can't be read is left out alone.
+        for ((name, decls) in byClass) {
+            runCatching { textLook(withVars(decls, vars)) }.getOrNull()?.let { looks[name] = it }
+        }
         return looks
     }
 
@@ -1048,6 +1068,8 @@ private class CssReader(css: String, private val base: String?) {
 // be slow to read (a long run of unclosed comments, say) still reads fast.
 private const val MAX_SELECTOR_CHARS = 300
 private const val MAX_VALUE_CHARS = 1_000
+/** A value with its var()s filled in may be at most this long (see withVars). */
+private const val MAX_EXPANDED_CHARS = 2 * MAX_VALUE_CHARS
 private const val MAX_TOKEN_CHARS = 32
 private const val MAX_FUNCTIONS = 16
 private const val MAX_KEYFRAMES = 64
@@ -1304,17 +1326,37 @@ private val QUALIFIED_PAGE = Regex("""^(?:html[^\s>]*[\s>])?body[^\s>+~]*$|^html
 private val CSS_VAR = Regex("""var\(\s*+(--[\w-]++)\s*+(?:,\s*+([^()]*+(?:\([^()]*+\))?[^()]*+))?\)""")
 
 /** [decls] with var(--name) filled in from [vars] (or the fallback given
- *  in it), a few levels deep. */
+ *  in it), a few levels deep. A value that would grow past
+ *  [MAX_EXPANDED_CHARS] is left as written (its var()s unfilled, so it reads
+ *  as nothing): variables that each name another several times grow a value
+ *  exponentially, level by level, and a few hundred characters of CSS ran
+ *  the app out of memory. */
 private fun withVars(decls: Map<String, String>, vars: Map<String, String>): Map<String, String> {
     if (decls.values.none { it.contains("var(") }) return decls
-    return decls.mapValues { (_, value) ->
-        var v = value
-        repeat(4) {
-            if (!v.contains("var(")) return@mapValues v
-            v = CSS_VAR.replace(v) { m -> vars[m.groupValues[1].lowercase()] ?: m.groupValues[2] }
+    return decls.mapValues { (_, value) -> expandVars(value, vars) ?: value }
+}
+
+/** [value] with its var()s filled in, as [withVars] says; null if that
+ *  would make it longer than [MAX_EXPANDED_CHARS]. Built a match at a time,
+ *  so it stops as soon as it's too long rather than once the whole oversized
+ *  value has been made. */
+private fun expandVars(value: String, vars: Map<String, String>): String? {
+    var v = value
+    repeat(4) {
+        if (!v.contains("var(")) return v
+        val out = StringBuilder()
+        var last = 0
+        for (m in CSS_VAR.findAll(v)) {
+            out.append(v, last, m.range.first)
+            out.append(vars[m.groupValues[1].lowercase()] ?: m.groupValues[2])
+            if (out.length > MAX_EXPANDED_CHARS) return null
+            last = m.range.last + 1
         }
-        v
+        out.append(v, last, v.length)
+        if (out.length > MAX_EXPANDED_CHARS) return null
+        v = out.toString()
     }
+    return v
 }
 
 /** The layer of a (possibly layered) background value that holds its
@@ -1602,10 +1644,11 @@ internal fun parseColorAlpha(value: String): Int? {
     val rgb = parseColor(v) ?: return null
     val alpha: Float = when {
         v.startsWith("#") -> {
+            // Every digit is hex by now (parseColor checks): never throws.
             val hex = v.drop(1)
             when (hex.length) {
-                4 -> "${hex[3]}${hex[3]}".toInt(16) / 255f
-                8 -> hex.substring(6, 8).toInt(16) / 255f
+                4 -> "${hex[3]}${hex[3]}".toIntOrNull(16)?.div(255f) ?: return null
+                8 -> hex.substring(6, 8).toIntOrNull(16)?.div(255f) ?: return null
                 else -> 1f
             }
         }
@@ -1628,6 +1671,10 @@ private fun parseColor(value: String): Int? {
     val v = value.trim().lowercase()
     if (v.startsWith("#")) {
         val hex = v.drop(1)
+        // Every digit hex, or it's no colour at all, as in CSS: "#fffz" was
+        // read as #fff, and its "z" then thrown on as the alpha, which (from
+        // a <font color> in chat) crashed the app.
+        if (!hex.all { it in '0'..'9' || it in 'a'..'f' }) return null
         val rgb = when (hex.length) {
             3, 4 -> hex.take(3).map { "$it$it" }.joinToString("")
             6, 8 -> hex.take(6)
@@ -1654,7 +1701,10 @@ private fun parseColor(value: String): Int? {
             .filter { it.isNotBlank() }
             .take(3)
         if (n.size < 3) return null
-        val h = n[0].removeSuffix("deg").toFloatOrNull()?.let { ((it % 360f) + 360f) % 360f } ?: return null
+        // A finite angle only: hsl(1e999, …) reads as infinity, whose
+        // remainder is NaN, which can't be rounded (it threw).
+        val h = n[0].removeSuffix("deg").toFloatOrNull()?.takeIf { it.isFinite() }
+            ?.let { ((it % 360f) + 360f) % 360f } ?: return null
         val sat = n[1].removeSuffix("%").toFloatOrNull()?.div(100f)?.coerceIn(0f, 1f) ?: return null
         val light = n[2].removeSuffix("%").toFloatOrNull()?.div(100f)?.coerceIn(0f, 1f) ?: return null
         val a = sat * minOf(light, 1f - light)

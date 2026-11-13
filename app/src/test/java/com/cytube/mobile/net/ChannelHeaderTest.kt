@@ -400,4 +400,20 @@ class ChannelHeaderTest {
         )
         assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets(""))
     }
+
+    /** A script made to be slow to read (a long run of addresses, no ".css"
+     *  in it, nothing to end it) is read in one pass: the pattern used before
+     *  went over the rest of the run again from every "http" in it, which
+     *  took half a minute for a script this long. What's found is as before,
+     *  edges and all: ".css" ends the address or comes before a query, and
+     *  something closes it. */
+    @Test(timeout = 5_000)
+    fun `a script made to be slow reads fast`() {
+        assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets("http://".repeat(28_500)))
+        assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets("x='" + "http://a".repeat(25_000) + "'"))
+        assertEquals(listOf("https://a.example/s.css"), ChannelHeader.scriptStylesheets("load('https://a.example/s.css')"))
+        assertEquals(listOf("https://a.example/s.css?v=1&x"), ChannelHeader.scriptStylesheets("x = 'https://a.example/s.css?v=1&x' "))
+        assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets("x = 'https://a.example/s.cssx'"))
+        assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets("x = https://a.example/s.css"))
+    }
 }

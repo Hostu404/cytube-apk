@@ -13,7 +13,11 @@ import coil.decode.isGif
 import coil.fetch.SourceResult
 import coil.request.Options
 import kotlinx.coroutines.CancellationException
-import okio.Buffer
+import okio.BufferedSource
+import okio.buffer
+import okio.source
+import java.io.ByteArrayInputStream
+import java.io.IOException
 
 /**
  * GIF emotes. From Android 9, Android's own decoder (ImageDecoder) animates
@@ -29,8 +33,11 @@ import okio.Buffer
 internal class EmoteGifDecoder(private val source: ImageSource, private val options: Options) : Decoder {
 
     override suspend fun decode(): DecodeResult {
-        val bytes = source.use { it.source().readByteArray() }
-        fun copy() = ImageSource(Buffer().write(bytes), options.context)
+        val bytes = source.use { GifBytes.read(it.source()) }
+        // Read from [bytes] as each decoder goes, not from a whole copy made
+        // up front: a decoder that needs one (ImageDecoder, on Android 11+)
+        // makes its own.
+        fun copy() = ImageSource(ByteArrayInputStream(bytes).source().buffer(), options.context)
         if (Build.VERSION.SDK_INT >= 28) {
             val decoded = try {
                 ImageDecoderDecoder(copy(), options).decode()
@@ -47,6 +54,22 @@ internal class EmoteGifDecoder(private val source: ImageSource, private val opti
     class Factory : Decoder.Factory {
         override fun create(result: SourceResult, options: Options, imageLoader: ImageLoader): Decoder? =
             if (DecodeUtils.isGif(result.source.source())) EmoteGifDecoder(result.source, options) else null
+    }
+}
+
+/** A GIF read whole, as EmoteGifDecoder decodes it. */
+internal object GifBytes {
+    /** The biggest GIF decoded. It's held whole while it's decoded, and
+     *  ImageDecoder takes a copy of its own, so one much bigger (an emote or
+     *  poll picture pointing at a huge file) could run the app out of memory.
+     *  Past this it fails to load like any broken image. */
+    const val MAX_BYTES = 32L * 1024 * 1024
+
+    /** All of [source], or an IOException, having read no more than about
+     *  [max] bytes, if it's longer than that. */
+    fun read(source: BufferedSource, max: Long = MAX_BYTES): ByteArray {
+        if (source.request(max + 1)) throw IOException("GIF over $max bytes")
+        return source.readByteArray()
     }
 }
 

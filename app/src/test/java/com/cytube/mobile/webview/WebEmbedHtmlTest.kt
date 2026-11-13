@@ -47,6 +47,18 @@ class WebEmbedHtmlTest {
         assertFalse(ptHtml.contains("muted=1"))
     }
 
+    /** The PeerTube API comes from a public CDN, so it's pinned to its hash.
+     *  The hash needs crossorigin="anonymous" with it: a cross-origin script
+     *  checked without CORS is refused outright. */
+    @Test
+    fun peertubeApiIsPinnedToItsHash() {
+        val ptHtml = peertubeSdkHtml("https://peertube.example/videos/embed/12345")
+        val tag = Regex("<script src=\"https://unpkg\\.com/[^\"]*\"[^>]*>").find(ptHtml)?.value
+        assertTrue("no unpkg script in $ptHtml", tag != null)
+        assertTrue(tag, Regex(" integrity=\"sha384-[A-Za-z0-9+/]{64}\"").containsMatchIn(tag!!))
+        assertTrue(tag, tag.contains(" crossorigin=\"anonymous\""))
+    }
+
     @Test
     fun sameSite_matchesSubdomainsAndExactHosts() {
         assertTrue(sameSite("geo.dailymotion.com", "www.dailymotion.com"))

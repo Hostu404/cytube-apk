@@ -1,6 +1,7 @@
 package com.cytube.mobile.net
 
 import com.cytube.mobile.player.PlayerHandle
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.Locale
 import kotlin.math.abs
 
@@ -596,12 +597,21 @@ class LeadMemory(private val defaultOpenLeadSeconds: Double = DEFAULT_OPEN_LEAD_
         private val HOST_IN_URL = Regex("^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#:@]+@)?([^/?#:]+)")
         private val NUMERIC_HOST = Regex("^[0-9.]+$")
 
-        /** "rr3---sn-abc.googlevideo.com" and "rr5---sn-xyz.googlevideo.com"
-         *  are the same service: keyed on the last two labels of the host. */
+        /**
+         * Which server [url] is, for remembering how long opening from it
+         * takes: the name registered under its public suffix (OkHttp's list,
+         * as WebEmbedHtml.sameSite uses it), so "rr3---sn-abc.googlevideo.com"
+         * and "rr5---sn-xyz.googlevideo.com" are one service while
+         * "a.bbc.co.uk" and "b.other.co.uk" stay two (the host's last two
+         * labels, as this used to take, made both "co.uk"). An IP address,
+         * IPv6 as much as IPv4, is its own server.
+         */
         fun serverOf(url: String): String {
-            val host = HOST_IN_URL.find(url)?.groupValues?.get(2)?.lowercase() ?: return ""
-            if (NUMERIC_HOST.matches(host)) return host
-            return host.split('.').takeLast(2).joinToString(".")
+            val host = url.toHttpUrlOrNull()?.host
+                ?: HOST_IN_URL.find(url)?.groupValues?.get(2)?.lowercase()
+                ?: return ""
+            if (NUMERIC_HOST.matches(host) || ':' in host) return host
+            return runCatching { "https://$host/".toHttpUrlOrNull()?.topPrivateDomain() }.getOrNull() ?: host
         }
     }
 }

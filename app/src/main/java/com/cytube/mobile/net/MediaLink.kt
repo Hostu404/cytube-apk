@@ -81,6 +81,8 @@ object MediaLink {
     )
     private val ODYSEE_PATH = Regex("/@([^:]+)(?::\\w)?/([^:]+)")
     private val LIVESTREAM_PATH = Regex("/accounts/([0-9]+)/events/([0-9]+)")
+    /** The account part of a Drive link: /file/u/0/d/<id>. */
+    private val DRIVE_ACCOUNT = Regex("^/file/u/\\d+/")
 
     private val WHOLE_SHORTHAND = Regex("^[a-z]{2}:\\S+$")
     private val URL_IN_TEXT = Regex("(?:https?|rtmp)://\\S+", RegexOption.IGNORE_CASE)
@@ -170,12 +172,15 @@ object MediaLink {
             }
             "youtu.be" -> return ok("yt", path.removePrefix("/").substringBefore('/'))
 
+            // The segment after /clip/ or /videos/, not the path's last one:
+            // a trailing slash ("…/videos/123/") left that empty, and the
+            // id "v" was sent. Likewise a clip link's slash.
             "twitch.tv" -> return when {
-                path.contains("/clip/") -> ok("tc", path.substringAfterLast('/'))
-                path.startsWith("/videos/") -> ok("tv", "v" + path.substringAfterLast('/'))
+                path.contains("/clip/") -> ok("tc", path.substringAfter("/clip/").substringBefore('/'))
+                path.startsWith("/videos/") -> firstSegment("/videos/").let { if (it.isEmpty()) unknown() else ok("tv", "v$it") }
                 else -> ok("tw", path.removePrefix("/").substringBefore('/'))
             }
-            "clips.twitch.tv" -> return ok("tc", path.removePrefix("/"))
+            "clips.twitch.tv" -> return ok("tc", path.removePrefix("/").substringBefore('/'))
 
             "livestream.com" -> {
                 LIVESTREAM_PATH.find(path)?.let { m ->
@@ -191,14 +196,26 @@ object MediaLink {
             "vimeo.com", "player.vimeo.com" ->
                 path.split('/').firstOrNull { it.isNotEmpty() && it.all(Char::isDigit) }
                     ?.let { return ok("vi", it) }
-            "dailymotion.com" -> return ok("dm", path.removePrefix("/video/").substringBefore('/'))
+            // /video/x7tgad0 (any "_title" after the id the server drops
+            // itself), or the embed link, /embed/video/x7tgad0.
+            "dailymotion.com" -> return ok(
+                "dm",
+                if (path.startsWith("/embed/video/")) firstSegment("/embed/video/")
+                else path.removePrefix("/video/").substringBefore('/')
+            )
             "dai.ly" -> return ok("dm", path.removePrefix("/").substringBefore('/'))
             // The server looks the track up by its URL; give it the desktop one.
             "soundcloud.com" -> return ok("sc", "https://soundcloud.com$path")
-            "streamable.com" -> return ok("sb", path.removePrefix("/"))
+            // streamable.com/abc12, or the embed link streamable.com/e/abc12:
+            // the id alone (the server takes nothing with a "/" in it).
+            "streamable.com" -> return ok("sb", if (path.startsWith("/e/")) firstSegment("/e/") else firstSegment("/"))
 
             "docs.google.com", "drive.google.com" -> {
-                if (path.startsWith("/file/")) return ok("gd", path.removePrefix("/file/d/").substringBefore('/'))
+                // /file/d/<id>, or with the account in it (/file/u/0/d/<id>),
+                // as a browser signed in to more than one account links it.
+                if (path.startsWith("/file/")) {
+                    return ok("gd", DRIVE_ACCOUNT.replaceFirst(path, "/file/").removePrefix("/file/d/").substringBefore('/'))
+                }
                 if (path == "/open" || path == "/uc") param("id")?.let { return ok("gd", it) }
             }
 

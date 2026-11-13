@@ -37,10 +37,6 @@ object ChannelHeader {
      *  background song, a background video). */
     private val NOT_PICTURES = Regex("""\.(mp3|ogg|oga|wav|flac|m4a|aac|mp4|webm|mkv|mov|m3u8|mpd|js|css|html?|json)$""", RegexOption.IGNORE_CASE)
 
-    /** A stylesheet the script adds to the page itself (a <link> to a
-     *  .css, or the like). */
-    private val SCRIPT_STYLESHEET = Regex("""https?://[^'"`)\\\s]+?\.css(?:\?[^'"`)\\\s]*)?(?=['"`)\\\s])""", RegexOption.IGNORE_CASE)
-
     /** At most this many stylesheets the script adds are read. */
     private const val MAX_SCRIPT_STYLESHEETS = 4
 
@@ -61,16 +57,54 @@ object ChannelHeader {
             listOfNotNull(motdBackground(motdHtml, page)))
             .distinctBy { it.url }
 
-    /** Stylesheets the channel's script adds to the page (a <link> to a
-     *  .css, or the like), which its background can be in. */
+    /**
+     * Stylesheets the channel's script adds to the page (a <link> to a .css,
+     * or the like), which its background can be in: each web address in it
+     * ([SCRIPT_ADDRESS]: up to a quote, bracket, backslash or space) with
+     * ".css" in it, at its end or just before a "?", and which something
+     * closes rather than the end of the script.
+     *
+     * One pass over the script: each address is looked at once. A lazy
+     * pattern for the same thing went over the rest of an address again from
+     * every "http" in it, so a long run of them with no ".css" took time
+     * growing with its length squared (half a minute for the most a script
+     * is read, 200,000 characters).
+     */
     fun scriptStylesheets(js: String): List<String> {
         if (js.isBlank()) return emptyList()
-        return SCRIPT_STYLESHEET.findAll(js.take(MAX_CHARS))
+        val text = js.take(MAX_CHARS)
+        return SCRIPT_ADDRESS.findAll(text)
+            .filter { it.range.last + 1 < text.length && namesStylesheet(it.value) }
             .mapNotNull { webAddress(it.value) }
             .filter(::worthReading)
             .distinct()
             .take(MAX_SCRIPT_STYLESHEETS)
             .toList()
+    }
+
+    /** Whether [address] (one [SCRIPT_ADDRESS] match) has ".css", in any
+     *  case, after at least one character past its "://", either ending the
+     *  address or followed by a "?" (a query). */
+    private fun namesStylesheet(address: String): Boolean {
+        var from = address.indexOf("://") + 4
+        while (from + 4 <= address.length) {
+            val at = indexOfCss(address, from)
+            if (at < 0) return false
+            if (at + 4 == address.length || address[at + 4] == '?') return true
+            from = at + 1
+        }
+        return false
+    }
+
+    /** Where ".css", in any case, first is in [s] from [from]; -1 if
+     *  nowhere. Any case as the pattern this replaced took it: Kotlin's
+     *  ignore-case is Unicode's, under which the long s (ſ) is an s too. */
+    private fun indexOfCss(s: String, from: Int): Int {
+        fun isS(c: Char) = c == 's' || c == 'S' || c == 'ſ'
+        for (i in from..s.length - 4) {
+            if (s[i] == '.' && (s[i + 1] == 'c' || s[i + 1] == 'C') && isS(s[i + 2]) && isS(s[i + 3])) return i
+        }
+        return -1
     }
 
     /**

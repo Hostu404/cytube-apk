@@ -28,7 +28,6 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.FilteringMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
-import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import com.cytube.mobile.di.Graph
@@ -296,10 +295,11 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
             Graph.DEFAULT_USER_AGENT
         }
         val requestHeaders = headers.filterKeys { it != "User-Agent" && it.isNotBlank() }
-        val bandwidthMeter = DefaultBandwidthMeter.getSingletonInstance(appContext)
+        // Only counted for the log here: the player reports the same bytes
+        // to its bandwidth meter itself (see MediaBytes.listener).
         val upstream = OkHttpDataSource.Factory(Graph.mediaHttp)
             .setUserAgent(userAgent)
-            .setTransferListener(MediaBytes.counting(bandwidthMeter))
+            .setTransferListener(MediaBytes.listener)
             .apply { if (requestHeaders.isNotEmpty()) setDefaultRequestProperties(requestHeaders) }
         return mediaDataSourceFactory(upstream, if (cached) Graph.mediaCache(appContext) else null)
     }

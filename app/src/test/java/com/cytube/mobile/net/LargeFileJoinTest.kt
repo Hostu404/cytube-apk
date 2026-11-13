@@ -267,6 +267,15 @@ class SyncEngineHoldTest {
         assertEquals("", LeadMemory.serverOf("not a url"))
     }
 
+    /** Keyed on the name registered under the public suffix: two unrelated
+     *  sites under co.uk stay two servers, and an IPv6 address is its own. */
+    @Test fun serverKeysFollowThePublicSuffixList() {
+        assertEquals("bbc.co.uk", LeadMemory.serverOf("https://a.bbc.co.uk/x.mp4"))
+        assertEquals("other.co.uk", LeadMemory.serverOf("https://b.other.co.uk/y.mp4"))
+        assertEquals("2001:db8::1", LeadMemory.serverOf("https://[2001:db8::1]/v.mp4"))
+        assertEquals("example.com", LeadMemory.serverOf("rtmp://live.example.com/app/stream"))
+    }
+
     @Test fun memoryRoundTripsAndStaysBounded() {
         val m = LeadMemory()
         repeat(60) { m.learnOpenLead("s$it.com", it / 10.0) }
