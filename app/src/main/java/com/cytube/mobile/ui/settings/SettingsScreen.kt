@@ -1,5 +1,6 @@
 package com.cytube.mobile.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -39,11 +40,18 @@ import kotlinx.coroutines.launch
 import com.cytube.mobile.data.LIGHTS_DOWN_DIM_RANGE
 import com.cytube.mobile.data.NICO_EMOTE_OPACITY_RANGE
 import com.cytube.mobile.data.NICO_SPEED_RANGE
+import com.cytube.mobile.BuildConfig
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(
+    onBack: () -> Unit,
+    /** The purple guy's switch (Developer mode, at the bottom; see DevMode) has
+     *  just been turned on, or Developer mode found: he swings in (see
+     *  PurpleGuyState.switchedOn). */
+    onPurpleGuyOn: () -> Unit = {}
+) {
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
@@ -260,6 +268,43 @@ fun SettingsScreen(onBack: () -> Unit) {
                 // Plain rows that open the browser, not boxed buttons.
                 LinkRow("Buy Hostu a dunkaccino! ❤️") { openInBrowser(context, "https://ko-fi.com/hostu") }
                 LinkRow("View source on GitHub") { openInBrowser(context, "https://github.com/Hostu404/cytube-apk") }
+
+                // Last, the app's version (whatever it is: a nightly says so),
+                // and Developer mode hidden in it (see DevMode): tapped three
+                // times, it's Developer mode from then on, the purple guy's
+                // switch, on: red and locked, held to turn him off (see
+                // DeveloperModeSwitch).
+                if (settings.devMode) {
+                    DeveloperModeSwitchRow(
+                        title = DEV_MODE_NAME,
+                        on = settings.purpleGuy,
+                        onTurnOn = {
+                            onPurpleGuyOn()
+                            scope.launch { store.setPurpleGuy(true) }
+                        },
+                        onTurnOff = { scope.launch { store.setPurpleGuy(false) } }
+                    )
+                } else {
+                    val taps = remember { DevModeTaps() }
+                    val toast = remember { mutableStateOf<Toast?>(null) }
+                    VersionRow(BuildConfig.VERSION_NAME) {
+                        fun say(message: String) {
+                            toast.value?.cancel()
+                            toast.value = Toast.makeText(context, message, Toast.LENGTH_SHORT).also { it.show() }
+                        }
+                        // Found already: it's Developer mode as soon as that's saved.
+                        if (taps.found) {
+                            say(DEV_MODE_ALREADY)
+                            return@VersionRow
+                        }
+                        val left = taps.tap()
+                        say(devModeMessage(left))
+                        if (left == 0) {
+                            onPurpleGuyOn()
+                            scope.launch { store.findDevMode() }
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(32.dp))

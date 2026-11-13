@@ -20,12 +20,21 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
@@ -43,6 +52,8 @@ import com.cytube.mobile.ui.channel.ChannelScreen
 import com.cytube.mobile.ui.channel.PlaybackHost
 import com.cytube.mobile.ui.defaultSyncAccuracy
 import com.cytube.mobile.ui.home.HomeScreen
+import com.cytube.mobile.ui.home.PurpleGuy
+import com.cytube.mobile.ui.home.PurpleGuyState
 import com.cytube.mobile.ui.isTvDevice
 import com.cytube.mobile.ui.login.LoginScreen
 import com.cytube.mobile.ui.settings.SettingsScreen
@@ -139,6 +150,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                // The purple guy (Settings > Appearance; phone only): one for
+                // the whole app, above its pages, so he carries on from one
+                // to the next; on every page but the channel page.
+                val purpleGuy = remember { PurpleGuyState() }
+                val isTvApp = remember { isTvDevice(appContext) }
+
+                Box(Modifier.fillMaxSize()) {
                 NavHost(navController = nav, startDestination = "home") {
                     composable("home") {
                         // Phone mode: follow the Appearance setting (default:
@@ -200,9 +218,24 @@ class MainActivity : ComponentActivity() {
                         // above and CyTubeSettingsTheme's doc comment. (On TV
                         // the option is hidden, so this is the system mode.)
                         CyTubeSettingsTheme(darkTheme = isDark) {
-                            SettingsScreen(onBack = { nav.popBackStack() })
+                            SettingsScreen(
+                                onBack = { nav.popBackStack() },
+                                onPurpleGuyOn = purpleGuy::switchedOn
+                            )
                         }
                     }
+                }
+                if (!isTvApp) {
+                    PurpleGuy(
+                        state = purpleGuy,
+                        on = settings.purpleGuy,
+                        here = !onChannel,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .windowInsetsPadding(WindowInsets.navigationBars)
+                            .padding(end = 8.dp, bottom = 8.dp)
+                    )
+                }
                 }
             }
         }

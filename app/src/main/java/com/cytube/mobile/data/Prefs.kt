@@ -91,6 +91,14 @@ data class Settings(
     /** "cot", under the themes: Prince lives in the home search bar (see
      *  Prince), on whichever theme is picked. Phone only; off by default. */
     val cot: Boolean = false,
+    /** The purple guy, in the bottom right corner of every page but the
+     *  channel page (see PurpleGuy): Developer mode's switch. Phone only; off by
+     *  default. */
+    val purpleGuy: Boolean = false,
+    /** Developer mode found: the version at the bottom of Settings tapped three
+     *  times (see DevMode). From then on the purple guy's switch is there
+     *  instead, as Developer mode. Phone only. */
+    val devMode: Boolean = false,
     /** How fast Nico chat's comments fly across the video: 0.5 (half as
      *  fast) to 2 (twice as fast); 1 is the website's own speed. */
     val nicoSpeed: Float = 1f,
@@ -108,6 +116,11 @@ val NICO_SPEED_RANGE = 0.5f..2f
 val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
 /** 10% to 100%, as CyTube Plus offers it. */
 val NICO_EMOTE_OPACITY_RANGE = 0.1f..1f
+
+/** Whether Developer mode's been found, from what's saved: or, from before there
+ *  was a Developer mode, the purple guy on (so his switch is there to turn him
+ *  off). */
+internal fun devModeOf(found: Boolean?, purpleGuy: Boolean?): Boolean = found ?: (purpleGuy == true)
 
 /** Whether the Niconico overlay is text only, from what's saved: never
  *  together with emotes only, which wins should both somehow be saved on
@@ -169,6 +182,8 @@ class SettingsStore(private val context: Context) {
             guestName = p[GUEST_NAME] ?: "",
             themeMode = ThemeMode.parse(p[THEME_MODE]),
             cot = p[COT] ?: ThemeMode.wasCot(p[THEME_MODE]),
+            purpleGuy = p[PURPLE_GUY] ?: false,
+            devMode = devModeOf(p[DEV_MODE], p[PURPLE_GUY]),
             nicoSpeed = (p[NICO_SPEED] ?: 1f).coerceIn(NICO_SPEED_RANGE),
             lightsDownDim = (p[LIGHTS_DOWN_DIM] ?: DEFAULT_LIGHTS_DOWN_DIM).coerceIn(LIGHTS_DOWN_DIM_RANGE),
             messageRecall = p[MESSAGE_RECALL] ?: true
@@ -200,6 +215,17 @@ class SettingsStore(private val context: Context) {
         p[THEME_MODE] = v.name
     }
     suspend fun setCot(v: Boolean) = save { it[COT] = v }
+    /** The purple guy on or off, by Developer mode's switch (which is how Dev
+     *  Mode stays found, should he have been on before it was). */
+    suspend fun setPurpleGuy(v: Boolean) = save {
+        it[PURPLE_GUY] = v
+        it[DEV_MODE] = true
+    }
+    /** Developer mode found: and with it, the purple guy on. */
+    suspend fun findDevMode() = save {
+        it[DEV_MODE] = true
+        it[PURPLE_GUY] = true
+    }
     suspend fun setNicoSpeed(v: Float) = save { it[NICO_SPEED] = v.coerceIn(NICO_SPEED_RANGE) }
     suspend fun setLightsDownDim(v: Float) = save { it[LIGHTS_DOWN_DIM] = v.coerceIn(LIGHTS_DOWN_DIM_RANGE) }
     suspend fun setMessageRecall(v: Boolean) = save { it[MESSAGE_RECALL] = v }
@@ -276,6 +302,8 @@ class SettingsStore(private val context: Context) {
         val GUEST_NAME = stringPreferencesKey("guest_name")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val COT = booleanPreferencesKey("cot")
+        val PURPLE_GUY = booleanPreferencesKey("purple_guy")
+        val DEV_MODE = booleanPreferencesKey("dev_mode")
         val NICO_SPEED = floatPreferencesKey("nico_speed")
         val LIGHTS_DOWN_DIM = floatPreferencesKey("lights_down_dim")
         val MESSAGE_RECALL = booleanPreferencesKey("message_recall")
