@@ -237,8 +237,10 @@ internal class ConnectionGuard(
 
     private fun isProxy(target: InetSocketAddress): Boolean = proxies.any { proxy ->
         proxy.port == target.port && (
-            proxy.address?.let { it == target.address }
-                ?: runCatching { InetAddress.getAllByName(proxy.hostString) }.getOrNull()?.contains(target.address) == true
+            (
+                proxy.address?.let { it == target.address }
+                    ?: runCatching { InetAddress.getAllByName(proxy.hostString) }.getOrNull()?.contains(target.address)
+                ) == true
             )
     }
 

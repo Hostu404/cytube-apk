@@ -1,7 +1,7 @@
 package com.cytube.mobile.player
 
 import android.content.Context
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.SystemClock
 import android.util.Log
 import androidx.annotation.OptIn
@@ -316,7 +316,7 @@ class NativePlayerHandle(val exo: ExoPlayer, context: Context) : PlayerHandle {
      */
     private fun cacheable(media: MediaFrame, uri: String, mimeType: String?): Boolean =
         !media.isLivestream && media.type != "hl" &&
-            Util.inferContentTypeForUriAndMimeType(Uri.parse(uri), mimeType?.ifBlank { null }) == C.CONTENT_TYPE_OTHER
+            Util.inferContentTypeForUriAndMimeType(uri.toUri(), mimeType?.ifBlank { null }) == C.CONTENT_TYPE_OTHER
 
     /** [cached]: see [cacheable]. */
     private fun createMediaSourceFactory(

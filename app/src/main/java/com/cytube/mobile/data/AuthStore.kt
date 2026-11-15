@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Log
+import androidx.core.content.edit
 import java.security.GeneralSecurityException
 import java.security.KeyStore
 import java.util.Base64
@@ -48,10 +49,10 @@ internal class AuthStore private constructor(
     /** Remembers [session]; false if it couldn't be (it then lasts only
      *  until the app closes, as an unremembered login does). */
     fun save(session: AuthRepository.Session): Boolean = try {
-        prefs.edit()
-            .putString(KEY_NAME, box.seal(session.name, KEY_NAME))
-            .putString(KEY_COOKIE, box.seal(session.authCookie, KEY_COOKIE))
-            .apply()
+        prefs.edit {
+            putString(KEY_NAME, box.seal(session.name, KEY_NAME))
+            putString(KEY_COOKIE, box.seal(session.authCookie, KEY_COOKIE))
+        }
         true
     } catch (e: Exception) {
         Log.w(TAG, "login couldn't be remembered (${e.javaClass.simpleName})")
@@ -59,7 +60,10 @@ internal class AuthStore private constructor(
     }
 
     fun clear() {
-        prefs.edit().remove(KEY_NAME).remove(KEY_COOKIE).apply()
+        prefs.edit {
+            remove(KEY_NAME)
+            remove(KEY_COOKIE)
+        }
     }
 
     companion object {

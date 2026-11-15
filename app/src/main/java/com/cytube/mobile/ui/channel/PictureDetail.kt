@@ -1,6 +1,7 @@
 package com.cytube.mobile.ui.channel
 
 import android.graphics.Bitmap
+import androidx.core.graphics.scale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -20,10 +21,10 @@ internal class PictureDetail(val rows: FloatArray, val cols: FloatArray) {
         /** Worked out on a small copy of [bitmap] (a software one: its
          *  pixels are read); null if that fails. */
         fun of(bitmap: Bitmap): PictureDetail? = runCatching {
-            val scale = (SAMPLE_PX.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
-            val w = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
-            val h = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
-            val small = Bitmap.createScaledBitmap(bitmap, w, h, true)
+            val ratio = (SAMPLE_PX.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
+            val w = (bitmap.width * ratio).roundToInt().coerceAtLeast(1)
+            val h = (bitmap.height * ratio).roundToInt().coerceAtLeast(1)
+            val small = bitmap.scale(w, h)
             val pixels = IntArray(w * h)
             small.getPixels(pixels, 0, w, 0, 0, w, h)
             if (small !== bitmap) small.recycle()

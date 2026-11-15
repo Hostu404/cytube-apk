@@ -310,7 +310,7 @@ class SyncEngine(private val memory: LeadMemory = LeadMemory.shared) {
                 } else {
                     log("forward seek's first frame ${offset(behind)} the room")
                 }
-                if (-behind >= HOLD_MIN_SECONDS && -behind <= MAX_HOLD_SECONDS) {
+                if (-behind in HOLD_MIN_SECONDS..MAX_HOLD_SECONDS) {
                     if (!opened && pendingLeadCheck) {
                         // Overshot: forward seeks cost less than the lead.
                         pendingLeadCheck = false

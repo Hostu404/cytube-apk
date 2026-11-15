@@ -4,6 +4,8 @@ import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -21,6 +23,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.cytube.mobile.data.CompatMode
 import com.cytube.mobile.data.Settings
@@ -34,14 +37,17 @@ import com.cytube.mobile.ui.theme.Ma
 import com.cytube.mobile.ui.theme.MaSectionLabel
 import com.cytube.mobile.ui.theme.MaTopBar
 import com.cytube.mobile.ui.theme.maFaint
-import com.cytube.mobile.ui.theme.maPageBackground
+import androidx.compose.foundation.background
+import com.cytube.mobile.ui.theme.maPageColor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.cytube.mobile.data.HYBRID_CHAT_OPACITY_RANGE
 import com.cytube.mobile.data.LIGHTS_DOWN_DIM_RANGE
 import com.cytube.mobile.data.NICO_EMOTE_OPACITY_RANGE
 import com.cytube.mobile.data.NICO_SPEED_RANGE
 import com.cytube.mobile.BuildConfig
 import kotlin.math.roundToInt
+import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,7 +61,6 @@ fun SettingsScreen(
     val context = LocalContext.current
     val store = remember { SettingsStore(context) }
     val scope = rememberCoroutineScope()
-    val focusManager = LocalFocusManager.current
     // Every other setting works the same on TV as on phone; these are the
     // explicit exceptions, hidden here: Appearance (the TV screens keep
     // their own dark palette — see MainActivity — and Prince is
@@ -72,7 +77,7 @@ fun SettingsScreen(
     // its grain; pure black on dark.
     CyTubePageTheme {
     Scaffold(
-        modifier = Modifier.fillMaxSize().then(maPageBackground()),
+        modifier = Modifier.fillMaxSize().background(maPageColor()),
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = { MaTopBar("Settings", onBack) }
@@ -211,6 +216,25 @@ fun SettingsScreen(
                 ) { scope.launch { store.setNicoEmoteOpacity(it) } }
             }
 
+            // Hybrid chat (the chat button's Hybrid, in a channel's top bar) is
+            // the phone's, in fullscreen.
+            if (!isTv) {
+                HybridChatSideRow(right = settings.hybridChatRight) {
+                    scope.launch { store.setHybridChatRight(it) }
+                }
+                SliderRow(
+                    label = { "Hybrid chat opacity: ${(it * 100).roundToInt()}%" },
+                    value = settings.hybridChatOpacity,
+                    range = HYBRID_CHAT_OPACITY_RANGE,
+                    steps = 15                                     // 20%, 25% … 100%
+                ) { scope.launch { store.setHybridChatOpacity(it) } }
+                SwitchRow(
+                    title = "Dim hybrid chat when quiet",
+                    subtitle = "Fades it back after 15 seconds without a new message.",
+                    checked = settings.hybridChatDims
+                ) { scope.launch { store.setHybridChatDims(it) } }
+            }
+
             // Lights down is phone only.
             if (!isTv) {
                 SliderRow(
@@ -317,6 +341,37 @@ fun SettingsScreen(
  *  a RadioButton's touch area leaves around its circle. */
 private val RadioStart = 18.dp
 
+/** Hybrid chat's side of the screen, Left or Right, on one line ([right]:
+ *  the right's picked). Each choice is its radio button and its name, the
+ *  whole of it tapped to pick it. */
+@Composable
+private fun HybridChatSideRow(right: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().selectableGroup()
+            // The choices' own padding (SideChoice) makes up the end margin.
+            .padding(start = Ma.MarginStart, end = Ma.MarginEnd - 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Hybrid chat side", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+        SideChoice("Left", selected = !right) { onChange(false) }
+        SideChoice("Right", selected = right) { onChange(true) }
+    }
+}
+
+@Composable
+private fun SideChoice(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = null)
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
 /** A row that opens a link: the text, and a small grey arrow on the right. */
 @Composable
 private fun LinkRow(text: String, onClick: () -> Unit) {
@@ -361,7 +416,7 @@ private fun SliderRow(
     val save by rememberUpdatedState(onChange)
     LaunchedEffect(shown) {
         if (shown == value) return@LaunchedEffect
-        delay(SLIDER_SAVE_AFTER_MS)
+        delay(SLIDER_SAVE_AFTER_MS.milliseconds)
         save(shown)
     }
     val textAlpha = Modifier.alpha(if (enabled) 1f else DISABLED_ALPHA)

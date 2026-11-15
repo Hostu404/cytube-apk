@@ -7,6 +7,7 @@ import kotlin.coroutines.startCoroutine
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.roundToLong
 
 /**
  * A rough model of ExoPlayer streaming one big file over a slow server, for
@@ -37,7 +38,7 @@ class SimulatedExoPlayer(
 
     private enum class State { IDLE, BUFFERING, READY }
 
-    override val mediaType: String? = "fi"
+    override val mediaType: String = "fi"
     override var isReleased = false
 
     var now = 0.0; private set
@@ -148,7 +149,7 @@ class SimulatedExoPlayer(
         bufStart = maxOf(bufStart, position - BACK_BUFFER)
     }
 
-    private fun nearestKeyframe(t: Double) = Math.round(t / keyframeSeconds) * keyframeSeconds
+    private fun nearestKeyframe(t: Double) = (t / keyframeSeconds).roundToLong() * keyframeSeconds
 
     override fun setPlaybackRate(rate: Float) { this.rate = rate.toDouble() }
     override fun play() { playWhenReady = true }
@@ -262,6 +263,9 @@ class SimulatedJoin(
         return Double.NaN
     }
 
+    /** One line about this run, for printing while tuning: the tests
+     *  themselves check the numbers instead. */
+    @Suppress("unused")
     fun summary(label: String): String {
         val tail = samples.filter { it.t >= samples.last().t - 60 }
         val worstLate = tail.maxOfOrNull { abs(it.behind) } ?: Double.NaN

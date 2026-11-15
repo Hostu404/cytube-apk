@@ -20,12 +20,14 @@ import com.cytube.mobile.ui.theme.Ma
 import com.cytube.mobile.ui.theme.MaTextField
 import com.cytube.mobile.ui.theme.MaTopBar
 import com.cytube.mobile.ui.theme.maFaint
-import com.cytube.mobile.ui.theme.maPageBackground
+import androidx.compose.foundation.background
+import com.cytube.mobile.ui.theme.maPageColor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,7 +52,7 @@ fun LoginScreen(onBack: () -> Unit) {
     }
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var remember_ by remember { mutableStateOf(true) }
+    var rememberMe by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
 
@@ -72,7 +74,7 @@ fun LoginScreen(onBack: () -> Unit) {
         val saved = savedGuestName ?: return@LaunchedEffect
         val wanted = guestNameToSave(guestName)
         if (wanted == saved) return@LaunchedEffect
-        delay(500)
+        delay(500.milliseconds)
         if (settingsStore.setGuestName(guestName)) savedGuestName = wanted
     }
     // Leaving within the debounce cancels the save above; finish it on the
@@ -93,7 +95,7 @@ fun LoginScreen(onBack: () -> Unit) {
     // its grain; pure black on dark.
     CyTubePageTheme {
     Scaffold(
-        modifier = Modifier.fillMaxSize().then(maPageBackground()),
+        modifier = Modifier.fillMaxSize().background(maPageColor()),
         containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onBackground,
         topBar = { MaTopBar("Account", onBack) }
@@ -149,7 +151,7 @@ fun LoginScreen(onBack: () -> Unit) {
                 // The checkbox's touch area leaves 14dp around its box: pull
                 // it left so the box sits on the page margin.
                 Row(Modifier.offset(x = (-14).dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(checked = remember_, onCheckedChange = { remember_ = it }, enabled = !busy)
+                    Checkbox(checked = rememberMe, onCheckedChange = { rememberMe = it }, enabled = !busy)
                     Text("Stay signed in")
                 }
 
@@ -163,7 +165,7 @@ fun LoginScreen(onBack: () -> Unit) {
                     onClick = {
                         busy = true; error = null
                         scope.launch {
-                            when (val r = repo.login(username.trim(), password, remember_)) {
+                            when (val r = repo.login(username.trim(), password, rememberMe)) {
                                 is AuthRepository.LoginOutcome.Success -> {
                                     session = r.session
                                     password = ""

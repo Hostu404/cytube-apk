@@ -497,9 +497,8 @@ object ChatHtml {
                                         child.parents().any { it.normalName() == "a" } -> builder.append(link)
                                         else -> {
                                             builder.pushStringAnnotation(LINK_TAG, link)
-                                            builder.pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
                                             builder.append(link)
-                                            builder.pop(); builder.pop()
+                                            builder.pop()
                                         }
                                     }
                                 }
@@ -522,11 +521,8 @@ object ChatHtml {
                         "a" -> if (ctx.inHiddenSpoiler) walk(child, builder, ctx) else {
                             flushStack(builder, ctx)
                             builder.pushStringAnnotation(LINK_TAG, child.attr("href"))
-                            builder.pushStyle(
-                                SpanStyle(textDecoration = TextDecoration.Underline)
-                            )
                             walk(child, builder, ctx)
-                            builder.pop(); builder.pop()
+                            builder.pop()
                         }
 
                         "strong", "b" -> styled(SpanStyle(fontWeight = FontWeight.Bold), child, builder, ctx)
@@ -812,8 +808,10 @@ object ChatHtml {
      */
     private val URL_PATTERN = Regex("https?://[^\\s<>\"']+")
 
-    /** Link colour is added afterwards (see withLinkColor), so one parse
-     *  serves every caller whatever its theme. */
+    /** A link is only marked here (LINK_TAG), not drawn as one: its colour
+     *  and underline are added afterwards (see withLinkColor), so one parse
+     *  serves every caller whatever its theme, and hybrid chat, which wants
+     *  links as plain text, just leaves them off. */
     private fun AnnotatedString.Builder.appendLinkified(text: String) {
         if (!text.contains("http", ignoreCase = true)) {
             append(text)
@@ -825,9 +823,8 @@ object ChatHtml {
             // Trailing punctuation is almost never part of the URL.
             val url = m.value.trimEnd('.', ',', ')', ']', '!', '?', ';', ':')
             pushStringAnnotation(LINK_TAG, url)
-            pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
             append(url)
-            pop(); pop()
+            pop()
             append(m.value.substring(url.length))
             last = m.range.last + 1
         }

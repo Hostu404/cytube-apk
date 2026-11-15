@@ -221,6 +221,12 @@ data class ChannelUiState(
     val lightsDownDim: Float = DEFAULT_LIGHTS_DOWN_DIM,
     /** See Settings.messageRecall. */
     val messageRecall: Boolean = true,
+    /** See Settings.hybridChatOpacity. */
+    val hybridChatOpacity: Float = 1f,
+    /** See Settings.hybridChatRight. */
+    val hybridChatRight: Boolean = true,
+    /** See Settings.hybridChatDims. */
+    val hybridChatDims: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
      *  media switch never silently unmutes. */
@@ -641,6 +647,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 nicoSpeed = settings.nicoSpeed,
                 lightsDownDim = settings.lightsDownDim,
                 messageRecall = settings.messageRecall,
+                hybridChatOpacity = settings.hybridChatOpacity,
+                hybridChatRight = settings.hybridChatRight,
+                hybridChatDims = settings.hybridChatDims,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
@@ -674,6 +683,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             it.nicoEmoteOpacity == s.nicoEmoteOpacity &&
                             it.nicoSpeed == s.nicoSpeed && it.lightsDownDim == s.lightsDownDim &&
                             it.messageRecall == s.messageRecall &&
+                            it.hybridChatOpacity == s.hybridChatOpacity &&
+                            it.hybridChatRight == s.hybridChatRight &&
+                            it.hybridChatDims == s.hybridChatDims &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
@@ -687,6 +699,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             nicoSpeed = it.nicoSpeed,
                             lightsDownDim = it.lightsDownDim,
                             messageRecall = it.messageRecall,
+                            hybridChatOpacity = it.hybridChatOpacity,
+                            hybridChatRight = it.hybridChatRight,
+                            hybridChatDims = it.hybridChatDims,
                             syncEnabled = it.syncEnabled
                         )
                     }

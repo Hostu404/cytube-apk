@@ -1,7 +1,6 @@
 package com.cytube.mobile.ui.theme
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Box
@@ -86,10 +85,7 @@ fun maIsLight(): Boolean = MaterialTheme.colorScheme.background.luminance() >= 0
 /** The page background: the theme's background colour (pure black on dark, for
  *  OLED). */
 @Composable
-fun maPageBackground(): Modifier {
-    val color = MaterialTheme.colorScheme.background
-    return remember(color) { Modifier.background(color) }
-}
+fun maPageColor(): Color = MaterialTheme.colorScheme.background
 
 /** A section's label, with an optional action (Clear, refresh) on the
  *  right. */

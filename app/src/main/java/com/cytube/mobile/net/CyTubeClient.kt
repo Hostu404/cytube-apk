@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit
  */
 class CyTubeClient(
     private val http: OkHttpClient,
-    private val baseUrl: String = DEFAULT_BASE_URL,
+    baseUrl: String = DEFAULT_BASE_URL,
     /** Where CyTube's ip-session cookie is kept between connections (see
      *  IpSessionCookies); the app's own keeps it between runs too. */
     ipSessionStore: IpSessionStore = InMemoryIpSessionStore()

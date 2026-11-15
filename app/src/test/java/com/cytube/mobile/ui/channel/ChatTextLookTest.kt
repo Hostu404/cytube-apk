@@ -8,7 +8,6 @@ import com.cytube.mobile.net.Emote
 import com.cytube.mobile.net.EmoteSet
 import com.cytube.mobile.net.luminanceOf
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 

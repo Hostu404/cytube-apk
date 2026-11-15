@@ -1,5 +1,6 @@
 package com.cytube.mobile.player
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -26,6 +27,9 @@ import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 object BandwidthEstimate {
 
     @Volatile private var measured = false
+    // Media3's own app-wide meter, made from the application context (see
+    // init): nothing that comes and goes, such as an activity, is held here.
+    @SuppressLint("StaticFieldLeak")
     @Volatile private var meter: DefaultBandwidthMeter? = null
     @Volatile private var lastNetworkType: Int? = null
     private var networkListener: NetworkTypeObserver.Listener? = null

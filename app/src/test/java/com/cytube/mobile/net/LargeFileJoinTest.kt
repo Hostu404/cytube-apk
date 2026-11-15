@@ -112,7 +112,7 @@ class SyncEngineHoldTest {
 
     private class Player : PlayerHandle {
         override var mediaId: String? = "movie"
-        override val mediaType: String? = "fi"
+        override val mediaType: String = "fi"
         override val mediaLengthSeconds: Int = 7200
         override var isPaused = false
         override var isBuffering = false

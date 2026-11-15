@@ -105,7 +105,7 @@ class IpSessionTest {
 
     @Test fun aStoreThatFailsDoesNotStopTheConnection() = runBlocking {
         val broken = object : IpSessionStore {
-            override fun load(): String? = throw IllegalStateException("disk")
+            override fun load(): String = throw IllegalStateException("disk")
             override fun save(value: String) = throw IllegalStateException("disk")
         }
         assertEquals(issued, IpSessionCookies(FakeServer(setCookie = issued).client, "https://cytu.be", broken).forChannel("test"))

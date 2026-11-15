@@ -69,10 +69,10 @@ fun WebCompatView(
     baseUrl: String,
     channel: String,
     authCookie: String?,
+    modifier: Modifier = Modifier,
     /** A change loads the page afresh (tapping the channel name, which
      *  outside this view rejoins the channel). */
-    reloadKey: Int = 0,
-    modifier: Modifier = Modifier
+    reloadKey: Int = 0
 ) {
     val context = LocalContext.current
     val homeHost = remember(baseUrl) { baseUrl.toUri().host }

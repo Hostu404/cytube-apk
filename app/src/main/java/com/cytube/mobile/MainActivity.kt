@@ -59,6 +59,7 @@ import com.cytube.mobile.ui.login.LoginScreen
 import com.cytube.mobile.ui.settings.SettingsScreen
 import com.cytube.mobile.ui.theme.CyTubeSettingsTheme
 import com.cytube.mobile.ui.theme.CyTubeTheme
+import kotlin.system.exitProcess
 
 class MainActivity : ComponentActivity() {
 
@@ -289,7 +290,7 @@ class MainActivity : ComponentActivity() {
         AppVisibility.set(true)
         if (isTvDevice(this)) {
             finishAndRemoveTask()
-            System.exit(0)
+            exitProcess(0)
         }
     }
 

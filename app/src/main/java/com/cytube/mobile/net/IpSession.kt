@@ -60,10 +60,11 @@ internal object IpSessionCookie {
 }
 
 /**
- * The ip-session cookie to connect to [channel] with: the one in [store],
- * checked against the server and replaced when it hands out a new one (see
- * the doc at the top). Never throws: offline, refused or slow, the one there
- * is (or none) is used, and the connection goes ahead as it always did.
+ * The ip-session cookie to connect to a channel with ([forChannel]): the
+ * one in [store], checked against the server and replaced when it hands out
+ * a new one (see the doc at the top). Never throws: offline, refused or
+ * slow, the one there is (or none) is used, and the connection goes ahead
+ * as it always did.
  */
 internal class IpSessionCookies(
     private val http: OkHttpClient,

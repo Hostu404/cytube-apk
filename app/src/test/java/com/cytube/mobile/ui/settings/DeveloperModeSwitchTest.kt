@@ -19,6 +19,9 @@ class DeveloperModeSwitchTest {
         assertTrue(guard.mayTurnOn(now = 1_000 + TURN_ON_COOLDOWN_MS))
     }
 
+    // HOLD_MS is a constant, so this always holds: it's here to fail if
+    // the constant is ever changed to something too short or too long.
+    @Suppress("KotlinConstantConditions")
     @Test fun heldLongEnoughToMeanIt() {
         assertTrue(HOLD_MS in 500..1_500)
     }

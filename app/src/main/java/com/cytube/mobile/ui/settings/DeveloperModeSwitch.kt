@@ -58,6 +58,7 @@ import com.cytube.mobile.ui.theme.Ma
 import com.cytube.mobile.ui.theme.maIsLight
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
 /*
  * Developer mode's switch: the purple guy's (see DevMode). On, it's red and
@@ -126,7 +127,7 @@ internal fun DeveloperModeSwitchRow(
     }
     LaunchedEffect(hint) {
         if (hint) {
-            delay(HINT_MS)
+            delay(HINT_MS.milliseconds)
             hint = false
         }
     }

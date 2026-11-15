@@ -171,7 +171,7 @@ class ChannelHeaderTest {
         val ownPage = ChannelStyle.parse("body { background: url(https://i.imgur.com/own.png) }")
         assertEquals("https://i.imgur.com/own.png", ChannelHeader.image(listOf(ownPage, imported), "", notice)?.url)
         // One its script sets, before the notice's.
-        val script = """${'$'}("body").css("background-image", "url('https://i.imgur.com/script.jpg')");"""
+        val script = """$("body").css("background-image", "url('https://i.imgur.com/script.jpg')");"""
         assertEquals("https://i.imgur.com/script.jpg", ChannelHeader.image(listOf(own), script, notice)?.url)
         // Then the notice's: from the CSS, then from its own elements.
         assertEquals("https://i.imgur.com/motd-own.png", ChannelHeader.image(listOf(own), "", notice)?.url)
@@ -200,7 +200,7 @@ class ChannelHeaderTest {
     @Test
     fun `script backgrounds`() {
         assertEquals("https://i.imgur.com/1.png", ChannelHeader.scriptBackground("""document.body.style.backgroundImage = "url(https://i.imgur.com/1.png)";"""))
-        assertEquals("https://i.imgur.com/2.png", ChannelHeader.scriptBackground("""${'$'}('#bg').css({background: 'url(\"http://i.imgur.com/2.png\") center'});"""))
+        assertEquals("https://i.imgur.com/2.png", ChannelHeader.scriptBackground("""$('#bg').css({background: 'url(\"http://i.imgur.com/2.png\") center'});"""))
         // A url() that isn't a background.
         assertNull(ChannelHeader.scriptBackground("""var cursor = "url(https://i.imgur.com/cursor.png), auto"; el.style.cursor = cursor;"""))
         assertNull(ChannelHeader.scriptBackground(""))
@@ -274,7 +274,7 @@ class ChannelHeaderTest {
             window.ThemeOverride = "custtheme_glass_halloween";
             if (!window.RUNONCE) {
                 window.RUNONCE = true;
-                ${'$'}.getScript("https://checkthesedubs.github.io/js/Nexus-beta.js")
+                $.getScript("https://checkthesedubs.github.io/js/Nexus-beta.js")
             }
         """
         assertEquals("https://cdn.imgchest.com/files/my8xcmrrzq4.png", ChannelHeader.scriptBackground(kinoplex))
@@ -289,7 +289,7 @@ class ChannelHeaderTest {
         // Whichever comes first.
         assertEquals(
             "https://i.imgur.com/first.png",
-            ChannelHeader.scriptBackground("""BG = "https://i.imgur.com/first.png"; ${'$'}("body").css("background", "url(https://i.imgur.com/second.png)");""")
+            ChannelHeader.scriptBackground("""BG = "https://i.imgur.com/first.png"; $("body").css("background", "url(https://i.imgur.com/second.png)");""")
         )
     }
 
@@ -392,10 +392,10 @@ class ChannelHeaderTest {
         assertEquals(
             listOf("https://someone.github.io/theme.css", "https://cdn.example/x.css?v=3"),
             ChannelHeader.scriptStylesheets("""
-                ${'$'}("head").append('<link rel="stylesheet" href="https://someone.github.io/theme.css">');
+                $("head").append('<link rel="stylesheet" href="https://someone.github.io/theme.css">');
                 loadCSS("https://cdn.example/x.css?v=3");
-                ${'$'}("head").append('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato">');
-                ${'$'}.getScript("https://someone.github.io/theme.js");
+                $("head").append('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lato">');
+                $.getScript("https://someone.github.io/theme.js");
             """)
         )
         assertEquals(emptyList<String>(), ChannelHeader.scriptStylesheets(""))

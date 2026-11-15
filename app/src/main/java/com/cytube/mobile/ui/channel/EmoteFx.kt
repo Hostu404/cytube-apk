@@ -45,6 +45,7 @@ import com.cytube.mobile.net.TextLook
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * An emote drawn with one of the channel's modifiers (ChatHtml.EmoteFx):
@@ -105,7 +106,7 @@ private fun StyledEmote(
             while (true) {
                 // Asleep until the next tick, on a grid every emote shares so they
                 // all move in the same frame; then a frame (none while off screen).
-                delay(MIN_TICK_MS - SystemClock.uptimeMillis() % MIN_TICK_MS)
+                delay((MIN_TICK_MS - SystemClock.uptimeMillis() % MIN_TICK_MS).milliseconds)
                 withFrameMillis { }
                 val t = SystemClock.uptimeMillis()
                 now.longValue = t
@@ -201,7 +202,7 @@ internal fun animatedChatText(text: AnnotatedString, fx: List<TextLook>, animate
         val endsAt = fx.map { it.animation?.endsAtMs }.let { ends -> if (null in ends) null else ends.filterNotNull().maxOrNull() }
         while (true) {
             // As the emotes': asleep until the next tick on a shared grid.
-            delay(TEXT_TICK_MS - SystemClock.uptimeMillis() % TEXT_TICK_MS)
+            delay((TEXT_TICK_MS - SystemClock.uptimeMillis() % TEXT_TICK_MS).milliseconds)
             withFrameMillis { }
             val t = SystemClock.uptimeMillis()
             now.longValue = t

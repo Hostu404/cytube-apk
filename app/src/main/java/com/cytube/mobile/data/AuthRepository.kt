@@ -156,7 +156,7 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
 
                 http.newCall(req).execute().use { resp ->
                     val auth = resp.headers("Set-Cookie")
-                        .firstNotNullOfOrNull { parseCookie(it, "auth") }
+                        .firstNotNullOfOrNull { parseAuthCookie(it) }
 
                     if (auth == null) {
                         val body = resp.body?.string().orEmpty()
@@ -204,11 +204,12 @@ class AuthRepository(context: Context, private val http: OkHttpClient, private v
         }
     }
 
-    private fun parseCookie(setCookie: String, name: String): String? {
+    /** The value of the auth cookie in a Set-Cookie header, if that's what it sets. */
+    private fun parseAuthCookie(setCookie: String): String? {
         val first = setCookie.substringBefore(';')
         val idx = first.indexOf('=')
         if (idx <= 0) return null
-        if (first.substring(0, idx).trim() != name) return null
+        if (first.substring(0, idx).trim() != "auth") return null
         return first.substring(idx + 1).takeIf { it.isNotBlank() }
     }
 }

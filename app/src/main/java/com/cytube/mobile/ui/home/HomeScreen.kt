@@ -43,7 +43,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,7 +62,8 @@ import com.cytube.mobile.ui.theme.MaSectionLabel
 import com.cytube.mobile.ui.theme.MaTextField
 import com.cytube.mobile.ui.theme.maFaint
 import com.cytube.mobile.ui.theme.maIsLight
-import com.cytube.mobile.ui.theme.maPageBackground
+import androidx.compose.foundation.background
+import com.cytube.mobile.ui.theme.maPageColor
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -119,7 +119,7 @@ fun HomeScreen(
     CyTubePageTheme {
     val colors = MaterialTheme.colorScheme
     Scaffold(
-        modifier = Modifier.fillMaxSize().then(maPageBackground()),
+        modifier = Modifier.fillMaxSize().background(maPageColor()),
         // The page's own background (and grain) is drawn above, so the
         // Scaffold and top bar are see-through over it.
         containerColor = Color.Transparent,

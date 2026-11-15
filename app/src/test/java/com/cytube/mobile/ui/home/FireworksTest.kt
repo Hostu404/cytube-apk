@@ -39,6 +39,6 @@ class FireworksTest {
         assertTrue("about one every 1-2.5s: ${launches.size}", launches.size in 24..60)
         assertTrue("a new colour each time", launches.values.zipWithNext { a, b -> a.color != b.color }.all { it })
         assertTrue("some two-tone", launches.values.any { it.second != it.color })
-        assertTrue("its second colour is another", launches.values.all { it.second == it.color || it.second != it.color && it.second in 0..7 })
+        assertTrue("its second colour is another", launches.values.all { it.second == it.color || it.second in 0..7 })
     }
 }

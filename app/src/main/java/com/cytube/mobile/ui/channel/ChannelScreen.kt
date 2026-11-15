@@ -20,6 +20,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -77,7 +80,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.LocalDensity
 import coil.compose.rememberAsyncImagePainter
 import coil.compose.AsyncImagePainter
@@ -98,6 +100,10 @@ import androidx.compose.ui.draw.clipToBounds
 import android.graphics.drawable.BitmapDrawable
 import coil.size.Precision
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.Path
+import androidx.compose.foundation.Canvas
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -116,6 +122,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.layout
@@ -146,6 +154,7 @@ import kotlinx.coroutines.launch
 import android.os.SystemClock
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import kotlin.time.Duration.Companion.milliseconds
 
 private enum class Panel { PLAYLIST, USERS, POLL }
 
@@ -177,8 +186,8 @@ private const val LIGHTS_PEEK_MS = 4_000L
 /**
  * What the hosting Activity needs to drive Picture-in-Picture for whatever
  * ChannelScreen currently has on screen. Reported fresh on every
- * recomposition via [onPlaybackHostChange], and cleared (null) when the
- * screen leaves composition entirely.
+ * recomposition via ChannelScreen's `onPlaybackHostChange`, and cleared
+ * (null) when the screen leaves composition entirely.
  *
  * Leaving the app without entering PiP doesn't pause anything: playback
  * carries on in the background for as long as Android lets the app run.
@@ -194,6 +203,33 @@ data class PlaybackHost(
      *  back into the app (false). */
     val onPipLeft: (closed: Boolean) -> Unit
 )
+
+/**
+ * The view model's functions that ChannelScreen hands down to what it shows,
+ * each made once per view model (it's remembered with it). A fresh function
+ * reference on every recomposition counted as a new argument wherever it was
+ * passed, so the player area, chat and the rest couldn't skip.
+ */
+private class ChannelActions(vm: ChannelViewModel) {
+    val sendChat = vm::sendChat
+    val jumpTo = vm::jumpTo
+    val deleteItem = vm::deleteItem
+    val attachPlayer = vm::attachPlayer
+    val planStart = vm::plannedStart
+    val playbackFailed = vm::reportPlaybackFailure
+    /** Personal (unsynced) playlist browsing: see ChannelViewModel.pickPersonal
+     *  for why it exists, and what it does and doesn't touch. */
+    val personalPick = vm::pickPersonal
+    val syncChange = vm::setSyncEnabled
+    val playbackEnded = vm::onPlaybackEnded
+    val playbackStall = vm::onPlaybackStall
+    val queueLink = vm::queueLink
+    val startPm = vm::startPm
+    val toggleIgnore = vm::toggleIgnore
+    val cancelPm = vm::cancelPm
+    /** Play/pause from the picture-in-picture window (see PlaybackHost). */
+    val togglePlayPause = vm::togglePlaybackFromPip
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -239,6 +275,15 @@ fun ChannelScreen(
     // from windowed to fullscreen chrome or back. See NekoOverlayState.
     var chatOverlayOn by remember { mutableStateOf(false) }
     val nekoState = remember(chatOverlayOn) { NekoOverlayState() }
+    // Hybrid chat's on/off (see HybridChatLayer), for this visit as the Nico
+    // overlay's is: it's off each time a channel opens, and takes effect in
+    // fullscreen. Never on together with the Nico overlay (they don't work
+    // together): the two are modes of the top bar's one chat button (Off,
+    // Nico, Hybrid), so turning either on turns the other off.
+    var hybridChatOn by remember { mutableStateOf(false) }
+    // The one of the two last on: its shape marks the chat button while
+    // neither is (see the top bar).
+    var lastChatModeHybrid by remember { mutableStateOf(false) }
     var openPanel by remember { mutableStateOf<Panel?>(null) }
     var showModeSheet by remember { mutableStateOf(false) }
     // Lights down: everything around the windowed video dimmed, as dark as
@@ -259,25 +304,23 @@ fun ChannelScreen(
         onDispose { view.keepScreenOn = false }
     }
 
-    val onSendChat = remember(vm) { vm::sendChat }
-    val onJumpTo = remember(vm) { vm::jumpTo }
-    val onDeleteItem = remember(vm) { vm::deleteItem }
-    val onAttachPlayer = remember(vm) { vm::attachPlayer }
-    val onPlanStart = remember(vm) { vm::plannedStart }
-    // Held like the others: a fresh function reference on every state
-    // change counted as a new argument, so the player area couldn't skip.
-    val onPlaybackFailed = remember(vm) { vm::reportPlaybackFailure }
-    // Personal/unsynced playlist browsing — see ChannelViewModel's own doc
-    // comment on pickPersonal for why this exists and what it does and does
-    // not touch.
-    val onPersonalPick = remember(vm) { vm::pickPersonal }
-    val onSyncChange = remember(vm) { vm::setSyncEnabled }
-    val onPlaybackEnded = remember(vm) { vm::onPlaybackEnded }
-    val onPlaybackStall = remember(vm) { vm::onPlaybackStall }
-    val onQueueLink = remember(vm) { vm::queueLink }
-    val onStartPm = remember(vm) { vm::startPm }
-    val onToggleIgnore = remember(vm) { vm::toggleIgnore }
-    val onCancelPm = remember(vm) { vm::cancelPm }
+    // The view model's functions handed down, the same ones for as long as
+    // the view model is (see ChannelActions).
+    val actions = remember(vm) { ChannelActions(vm) }
+    val onSendChat = actions.sendChat
+    val onJumpTo = actions.jumpTo
+    val onDeleteItem = actions.deleteItem
+    val onAttachPlayer = actions.attachPlayer
+    val onPlanStart = actions.planStart
+    val onPlaybackFailed = actions.playbackFailed
+    val onPersonalPick = actions.personalPick
+    val onSyncChange = actions.syncChange
+    val onPlaybackEnded = actions.playbackEnded
+    val onPlaybackStall = actions.playbackStall
+    val onQueueLink = actions.queueLink
+    val onStartPm = actions.startPm
+    val onToggleIgnore = actions.toggleIgnore
+    val onCancelPm = actions.cancelPm
 
     // The single player surface, hoisted so it survives moving between the
     // compact layout and the fullscreen layout (which PiP also uses). Before
@@ -313,7 +356,7 @@ fun ChannelScreen(
     // Reported on every recomposition so the Activity's PiP button/state
     // (play vs. pause, whether PiP is even applicable right now) stays
     // current, and cleared when this screen goes away.
-    val onTogglePlayPause = remember(vm) { vm::togglePlaybackFromPip }
+    val onTogglePlayPause = actions.togglePlayPause
     // Set when the PiP window is closed (not expanded); see justExitedPip.
     // A plain holder, not state: MainActivity reports this in the same
     // callback that ends PiP, before the recomposition that reads it.
@@ -389,7 +432,7 @@ fun ChannelScreen(
         // second layout change on top of it is cheap insurance against
         // whatever exact race was turning "expand from PiP" into "crash or
         // close the app".
-        if (justExitedPip) delay(150)
+        if (justExitedPip) delay(150.milliseconds)
 
         val immersive = fullscreen
         // Android throws IllegalStateException("Only fullscreen activities
@@ -517,9 +560,11 @@ fun ChannelScreen(
         }
     }
     // Auto-hide overlay controls while fullscreen.
-    LaunchedEffect(controlsVisible, fullscreen) {
+    LaunchedEffect(controlsVisible, fullscreen, hybridChatOn) {
         if (fullscreen && controlsVisible) {
-            delay(CONTROLS_AUTO_HIDE_MS)
+            // With hybrid chat on, its message box comes up with them (see
+            // HybridChatLayer): they stay long enough to reach it.
+            delay((if (hybridChatOn) HYBRID_CONTROLS_MS else CONTROLS_AUTO_HIDE_MS).milliseconds)
             controlsVisible = false
         }
     }
@@ -609,7 +654,7 @@ fun ChannelScreen(
                 // Often while the bar is up, so its time moves smoothly;
                 // now and then otherwise, to notice a pause made some other
                 // way (a remote's own play/pause button).
-                delay(if (transport.visibleAt(now)) TV_TRANSPORT_REFRESH_MS else TV_TRANSPORT_IDLE_REFRESH_MS)
+                delay((if (transport.visibleAt(now)) TV_TRANSPORT_REFRESH_MS else TV_TRANSPORT_IDLE_REFRESH_MS).milliseconds)
             }
         }
         // OK (or a remote's play/pause) plays or pauses; Left and Right (or
@@ -837,7 +882,54 @@ fun ChannelScreen(
                 unreadPm?.from?.let(onStartPm)
                 vm.markPmsRead()
                 fullscreen = false
-            }
+            },
+            // Hybrid chat (Hybrid, on the top bar's chat button): the
+            // channel's chat over the video, right here in fullscreen. Phone
+            // only, as this whole layout is (TV returned above). See
+            // HybridChatLayer.
+            hybridChat = if (!hybridChatOn) null else { chatModifier, focusPm ->
+                CyTubeChannelTheme {
+                    HybridChatTheme {
+                        ChatPanel(
+                            // Read here, so new chat recomposes the chat alone.
+                            messages = messages.value,
+                            canSend = state.connection == ConnectionState.CONNECTED,
+                            disabledHint = chatUnavailableHint(state.connection),
+                            showEmotes = state.showEmotes,
+                            emotes = state.emotes,
+                            onSend = onSendChat,
+                            highlightName = state.localUser,
+                            onStartPm = if (state.localUser != null) onStartPm else null,
+                            pmTarget = state.pmTarget,
+                            onCancelPm = onCancelPm,
+                            users = state.users,
+                            nameColors = state.nameColors,
+                            groupMessages = state.groupChat,
+                            sentChat = if (state.messageRecall) state.sentChat else SentChat.EMPTY,
+                            recentEmotes = state.recentEmotes,
+                            coolingDown = state.chatCoolingDown,
+                            overVideo = true,
+                            overVideoOpacity = state.hybridChatOpacity,
+                            overVideoOnRight = state.hybridChatRight,
+                            dimWhenQuiet = state.hybridChatDims,
+                            // Beside the messages is the video: a tap there
+                            // brings its controls up or down, and the message
+                            // box comes and goes with them.
+                            onTapOutside = { controlsVisible = !controlsVisible },
+                            showBox = controlsVisible,
+                            focusPmOnOpen = focusPm,
+                            modifier = chatModifier
+                        )
+                    }
+                }
+            },
+            // With hybrid chat, a PM is answered right there in fullscreen.
+            onReplyPmHere = {
+                unreadPm?.from?.let(onStartPm)
+                vm.markPmsRead()
+            },
+            onPmsSeen = { vm.markPmsRead() },
+            hybridChatOnRight = state.hybridChatRight
         )
         return
     }
@@ -863,22 +955,22 @@ fun ChannelScreen(
 
     // Lights down stays down whatever playback does (pausing, a new video,
     // buffering, a dropped connection): only a touch around the video brings
-    // the lights partly up, for a few seconds (peeking), or the bulb button turning
-    // it off. The one exception is typing, which a touch starts: with the
+    // the lights partly up, for a few seconds (peeking), or the Lights down
+    // switch (in the ⋮ sheet) turning it off. The one exception is typing, which a touch starts: with the
     // keyboard open, the message box being written in stays lit.
     var peeking by remember { mutableStateOf(false) }
     var peeks by remember { mutableIntStateOf(0) }
     LaunchedEffect(peeks) {
         if (peeks == 0) return@LaunchedEffect
         peeking = true
-        delay(LIGHTS_PEEK_MS)
+        delay(LIGHTS_PEEK_MS.milliseconds)
         peeking = false
     }
     val lightsAreDown = lightsDown && canDimAround && !peeking && !WindowInsets.isImeVisible
     val currentLightsAreDown by rememberUpdatedState(lightsAreDown)
     // A touch around the video only lifts the dark part of the way
     // (LIGHTS_PEEK_LIFT), and that fade, and the one back down after it, is
-    // a little slower and smoother than the bulb button's.
+    // a little slower and smoother than the Lights down switch's.
     var fadeFromTouch by remember { mutableStateOf(false) }
     val lightsDim = state.lightsDownDim
     val dimTarget = when {
@@ -896,8 +988,8 @@ fun ChannelScreen(
                 if (peeking) LIGHTS_PEEK_UP_MS else LIGHTS_PEEK_DOWN_MS,
                 easing = LIGHTS_PEEK_EASING
             )
-            // The bulb button: down eases in and out; up starts at full
-            // speed, so the tap is answered at once.
+            // The Lights down switch: down eases in and out; up starts at
+            // full speed, so the tap is answered at once.
             dimTarget == lightsDim -> tween(LIGHTS_DOWN_MS, easing = FastOutSlowInEasing)
             else -> tween(LIGHTS_UP_MS, easing = LinearOutSlowInEasing)
         },
@@ -1026,8 +1118,8 @@ fun ChannelScreen(
                         ) {
                             SubtitleButton(options = state.subtitles, onSelect = vm::selectSubtitle)
                         }
-                        // Dedicated mute toggle, immediately left of the Nico
-                        // square. Backed by PlayerHandle.setVolume (already
+                        // Dedicated mute toggle, immediately left of the chat
+                        // button. Backed by PlayerHandle.setVolume (already
                         // implemented by every native/NewPipe/GDrive handle) via
                         // ChannelViewModel.toggleMute — purely an audio flag, so
                         // toggling it never pauses, seeks, or otherwise disrupts
@@ -1044,64 +1136,57 @@ fun ChannelScreen(
                                 )
                             }
                         }
-                        // The sole on/off switch for the Niconico overlay — see
-                        // chatOverlayOn's declaration above. Same idea as the
-                        // favourite star further along — filled when on,
-                        // outline when off — but drawn by hand rather than via a
-                        // Material icon: CropSquare turned out to be the crop
-                        // tool's corner-frame glyph, not a plain block, so its
-                        // "filled" theme still rendered as an outline and the
-                        // on/off states looked identical on device. A literal
-                        // square Box can't have that problem.
-                        IconButton(onClick = { chatOverlayOn = !chatOverlayOn }, modifier = TopBarButton) {
-                            val squareColor = LocalContentColor.current
-                            Box(
-                                Modifier
-                                    .size(20.dp)
-                                    .then(
-                                        if (chatOverlayOn) {
-                                            Modifier.background(squareColor)
-                                        } else {
-                                            Modifier.border(2.dp, squareColor)
-                                        }
-                                    )
-                                    .semantics {
-                                        contentDescription = if (chatOverlayOn) {
-                                            "Turn off Niconico chat overlay"
-                                        } else {
-                                            "Turn on Niconico chat overlay"
+                        // Chat over the video, one button for its modes, as
+                        // they don't work together: Off, Nico or Hybrid, from
+                        // a small menu (a popup: a tap outside it only closes
+                        // it). Its mark is the mode's, Nico's square or hybrid
+                        // chat's triangle, filled while one's on, outlined in
+                        // the last one's shape while off. Hybrid chat takes
+                        // effect in fullscreen, which Compatibility View
+                        // doesn't have, so it isn't offered there. (Phone only,
+                        // as this whole top bar is: TV has its own layout.)
+                        Box {
+                            var chatMenu by remember { mutableStateOf(false) }
+                            // Left on from before Compatibility View, it's
+                            // shown as off there, where there's no Hybrid.
+                            val hybridHere = hybridChatOn && !webMode
+                            IconButton(onClick = { chatMenu = true }, modifier = TopBarButton) {
+                                ChatModeMark(
+                                    triangle = hybridHere || (!chatOverlayOn && lastChatModeHybrid),
+                                    filled = chatOverlayOn || hybridHere,
+                                    modifier = Modifier.semantics {
+                                        contentDescription = when {
+                                            hybridHere -> "Chat over the video: hybrid"
+                                            chatOverlayOn -> "Chat over the video: Nico"
+                                            else -> "Chat over the video: off"
                                         }
                                     }
-                            )
-                        }
-                        // Lights down, left of the star: filled while on,
-                        // like the star. There from the moment the channel
-                        // opens (it dims once there is a video), so it doesn't
-                        // pop in; not in Compatibility View, which has no
-                        // video of its own to dim around.
-                        if (!webMode) {
-                            IconButton(modifier = TopBarButton, onClick = {
-                                lightsDown = !lightsDown
-                                // The touch on this button also counted as
-                                // bringing the lights up for a few seconds
-                                // (see the Box around the Scaffold); cancelled,
-                                // so they fade down or up at once, every tap.
-                                peeks = 0
-                                fadeFromTouch = false
-                                peeking = false
-                            }) {
-                                Icon(
-                                    if (lightsDown) Icons.Filled.Lightbulb else Icons.Outlined.LightbulbOutlined,
-                                    contentDescription = if (lightsDown) "Lights up" else "Lights down"
                                 )
                             }
+                            DropdownMenu(expanded = chatMenu, onDismissRequest = { chatMenu = false }) {
+                                ChatModeItem("Off", selected = !chatOverlayOn && !hybridHere, mark = null) {
+                                    chatOverlayOn = false
+                                    hybridChatOn = false
+                                    chatMenu = false
+                                }
+                                ChatModeItem("Nico", selected = chatOverlayOn, mark = { ChatModeMark(triangle = false, filled = true) }) {
+                                    chatOverlayOn = true
+                                    hybridChatOn = false
+                                    lastChatModeHybrid = false
+                                    chatMenu = false
+                                }
+                                if (!webMode) {
+                                    ChatModeItem("Hybrid", selected = hybridChatOn, mark = { ChatModeMark(triangle = true, filled = true) }) {
+                                        hybridChatOn = true
+                                        chatOverlayOn = false
+                                        lastChatModeHybrid = true
+                                        chatMenu = false
+                                    }
+                                }
+                            }
                         }
-                        IconButton(onClick = vm::toggleFavourite, modifier = TopBarButton) {
-                            Icon(
-                                if (state.isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                                contentDescription = "Favorite"
-                            )
-                        }
+                        // Favourite and lights down are in here, with
+                        // Compatibility (ChannelOptionsSheet).
                         IconButton(onClick = { showModeSheet = true }, modifier = TopBarButton) {
                             Icon(Icons.Default.MoreVert, contentDescription = "Channel options")
                         }
@@ -1164,7 +1249,7 @@ fun ChannelScreen(
             var windowedControlsVisible by remember { mutableStateOf(true) }
             LaunchedEffect(windowedControlsVisible, webMode) {
                 if (windowedControlsVisible && !webMode) {
-                    delay(CONTROLS_AUTO_HIDE_MS)
+                    delay(CONTROLS_AUTO_HIDE_MS.milliseconds)
                     windowedControlsVisible = false
                 }
             }
@@ -1401,9 +1486,23 @@ fun ChannelScreen(
     }
 
     if (showModeSheet) {
-        CompatModeSheet(
+        ChannelOptionsSheet(
             current = state.effectiveMode,
             backendNote = backendNote(state),
+            isFavourite = state.isFavourite,
+            onToggleFavourite = vm::toggleFavourite,
+            // Not in Compatibility View, which has no video of its own to
+            // dim around.
+            lightsDown = if (webMode) null else lightsDown,
+            onToggleLightsDown = {
+                lightsDown = !lightsDown
+                // The tap that opened this counted as bringing the lights
+                // up for a few seconds (see the Box around the Scaffold);
+                // cancelled, so they go down or up at once.
+                peeks = 0
+                fadeFromTouch = false
+                peeking = false
+            },
             onSelect = { vm.setMode(it); showModeSheet = false },
             onDismiss = { showModeSheet = false }
         )
@@ -1546,14 +1645,14 @@ private fun chatUnavailableHint(connection: ConnectionState): String = when (con
 }
 
 /** This state without its chat (the messages, the unread PMs): what
- *  ChannelScreen's [state] holds, so new chat doesn't change it. */
+ *  ChannelScreen's `state` holds, so new chat doesn't change it. */
 private fun ChannelUiState.withoutChat(): ChannelUiState =
     if (messages.isEmpty() && unreadPm == null) this else copy(messages = persistentListOf(), unreadPm = null)
 
 /**
  * Reads [messages] here, in a scope of its own, and hands them to
  * [content]: new chat then recomposes [content] alone, not the screen around
- * it (see ChannelScreen's [state]).
+ * it (see ChannelScreen's `state`).
  */
 @Composable
 private fun WithMessages(
@@ -1777,7 +1876,7 @@ private fun MotdSection(
     Column(
         Modifier
             .fillMaxWidth()
-            .then(if (underTitle) Modifier.pullUp(NOTICE_PULL_UP) else Modifier)
+            .then(if (underTitle) Modifier.pullUp() else Modifier)
             .padding(start = 16.dp, end = 16.dp, top = if (underTitle) 0.dp else 6.dp, bottom = 6.dp)
     ) {
         Row(
@@ -1840,11 +1939,11 @@ private val NOTICE_PULL_UP = 4.dp
 private val TOP_BAR_BUTTON_SIZE = 36.dp
 private val TopBarButton = Modifier.size(width = TOP_BAR_BUTTON_SIZE, height = 40.dp)
 
-/** Draws this [by] higher and gives that space back below it, unlike
- *  offset(), which moves the drawing but leaves a gap where it was. */
-private fun Modifier.pullUp(by: androidx.compose.ui.unit.Dp): Modifier = layout { measurable, constraints ->
+/** Draws this [NOTICE_PULL_UP] higher and gives that space back below it,
+ *  unlike offset(), which moves the drawing but leaves a gap where it was. */
+private fun Modifier.pullUp(): Modifier = layout { measurable, constraints ->
     val placeable = measurable.measure(constraints)
-    val up = by.roundToPx().coerceAtMost(placeable.height)
+    val up = NOTICE_PULL_UP.roundToPx().coerceAtMost(placeable.height)
     layout(placeable.width, placeable.height - up) { placeable.place(0, -up) }
 }
 
@@ -1872,8 +1971,8 @@ private fun NowPlayingBar(title: String, leader: String?) {
 
 /**
  * Subtitles, in the top bar left of the mute toggle, only when the item has
- * some. Filled when showing, outlined when not, like the star and the Nico
- * square. With one track a tap switches it on and off; with several, a tap
+ * some. Filled when showing, outlined when not, like the chat button's
+ * mark. With one track a tap switches it on and off; with several, a tap
  * opens a menu to pick one (or Off). The choice carries on to later items.
  */
 @Composable
@@ -2129,16 +2228,44 @@ internal val ChannelSheetProperties = ModalBottomSheetProperties(
     isAppearanceLightNavigationBars = false
 )
 
+/** The ⋮ in the channel's top bar: the channel's favourite and lights down
+ *  switches (short, and first), then its compatibility mode. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CompatModeSheet(
+private fun ChannelOptionsSheet(
     current: CompatMode,
     backendNote: String,
+    isFavourite: Boolean,
+    onToggleFavourite: () -> Unit,
+    /** Null where there's no lights down (Compatibility View). */
+    lightsDown: Boolean?,
+    onToggleLightsDown: () -> Unit,
     onSelect: (CompatMode) -> Unit,
     onDismiss: () -> Unit
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss, properties = ChannelSheetProperties) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+    // Open all the way, so Compatibility's choices are there without a drag
+    // under the two switches; it scrolls where the screen's too short for it.
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        properties = ChannelSheetProperties
+    ) {
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            OptionSwitch(
+                icon = if (isFavourite) Icons.Default.Star else Icons.Outlined.StarBorder,
+                label = "Favorite",
+                checked = isFavourite,
+                onToggle = onToggleFavourite
+            )
+            if (lightsDown != null) {
+                OptionSwitch(
+                    icon = if (lightsDown) Icons.Filled.Lightbulb else Icons.Outlined.LightbulbOutlined,
+                    label = "Lights down",
+                    checked = lightsDown,
+                    onToggle = onToggleLightsDown
+                )
+            }
+            Spacer(Modifier.height(12.dp))
             Text("Compatibility", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(4.dp))
             Text(
@@ -2165,6 +2292,70 @@ private fun CompatModeSheet(
                 body = "Load the whole CyTube page. Everything comes from the site, not the app.",
                 selected = current == CompatMode.WEB
             ) { onSelect(CompatMode.WEB) }
+        }
+    }
+}
+
+/** A switch in ChannelOptionsSheet: the whole row is the one switch. */
+@Composable
+private fun OptionSwitch(icon: ImageVector, label: String, checked: Boolean, onToggle: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = { onToggle() })
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null)
+        Spacer(Modifier.width(16.dp))
+        Text(label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = null)
+    }
+}
+
+/** One of the chat button's modes (the top bar): short, its mark first (so
+ *  the names line up, Off has a blank in its place), ticked when it's on. */
+@Composable
+private fun ChatModeItem(label: String, selected: Boolean, mark: (@Composable () -> Unit)?, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        onClick = onClick,
+        leadingIcon = { if (mark != null) mark() else Spacer(Modifier.size(20.dp)) },
+        trailingIcon = if (selected) {
+            { Icon(Icons.Default.Check, contentDescription = "On") }
+        } else {
+            null
+        }
+    )
+}
+
+/** The chat-over-video modes' marks, drawn by hand: Nico's a square, hybrid
+ *  chat's a triangle (pointing up, as wide as the square, as near equilateral
+ *  as that allows); filled when on, and outlined inside the edge when off, so
+ *  both are the one size. Not a Material icon: CropSquare is the crop tool's
+ *  corner frame, whose "filled" look is an outline too. */
+@Composable
+private fun ChatModeMark(triangle: Boolean, filled: Boolean, modifier: Modifier = Modifier) {
+    val color = LocalContentColor.current
+    Canvas(modifier.size(20.dp)) {
+        val shape = Path().apply {
+            if (triangle) {
+                val h = size.width * 0.866f
+                val top = (size.height - h) / 2
+                moveTo(size.width / 2, top)
+                lineTo(size.width, top + h)
+                lineTo(0f, top + h)
+                close()
+            } else {
+                addRect(Rect(Offset.Zero, size))
+            }
+        }
+        if (filled) {
+            drawPath(shape, color)
+        } else {
+            clipPath(shape) {
+                drawPath(shape, color, style = Stroke(width = 4.dp.toPx()))
+            }
         }
     }
 }
@@ -2213,9 +2404,9 @@ private fun backendNote(state: ChannelUiState): String {
  * plumbing added on top: filling the screen (a real view transition, not a
  * panel next to a still-visible video), treating Up as "back to fullscreen
  * video" from anywhere inside it via onPreviewKeyEvent, and a focusable,
- * D-pad-reachable stand-in for the phone's touch-only Nico square button in
- * its TopAppBar — same on/off visual, same behavior (toggles the shared
- * chatOverlayOn state hoisted in ChannelScreen), just reachable without a
+ * D-pad-reachable Nico square in its TopAppBar (the phone has it as the Nico
+ * mode of its chat button) — the same square, on or off, toggling the shared
+ * chatOverlayOn state hoisted in ChannelScreen, just reachable without a
  * touchscreen.
  *
  * When the video has subtitles, the CC button sits left of Nico, as on the
@@ -2708,7 +2899,7 @@ private fun TvPlaylistView(
                 Icon(Icons.Default.Search, contentDescription = null)
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    if (query.isBlank()) "Search playlist" else query,
+                    query.ifBlank { "Search playlist" },
                     style = MaterialTheme.typography.bodyLarge,
                     color = if (query.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
@@ -2889,11 +3080,60 @@ private fun FullscreenPlayer(
     chatOverlayOn: Boolean,
     nekoState: NekoOverlayState,
     playerContent: @Composable () -> Unit,
-    onOpenPm: () -> Unit = {}
+    onOpenPm: () -> Unit = {},
+    /** Hybrid chat's chat, or null with it off (see HybridChatLayer). */
+    hybridChat: (@Composable (Modifier, focusPm: Boolean) -> Unit)? = null,
+    /** A PM's pill tapped with hybrid chat on: reply to it here. */
+    onReplyPmHere: () -> Unit = {},
+    /** Hybrid chat is showing, so PMs are seen as they land. */
+    onPmsSeen: () -> Unit = {},
+    /** Hybrid chat's down the right side of the screen (the default),
+     *  rather than the left (Settings.hybridChatRight). */
+    hybridChatOnRight: Boolean = true
 ) {
+    // Hybrid chat put away ("Hide chat", or Back) for this fullscreen visit;
+    // and the last message there was then, for the Show chat pill's count.
+    // Each time fullscreen opens, chat's back up (this leaves composition
+    // with fullscreen; PiP keeps it, being the same layout).
+    var hybridHidden by remember { mutableStateOf(false) }
+    var hiddenAfterSeq by remember { mutableLongStateOf(Long.MIN_VALUE) }
+    // Chat brought back by tapping a PM's pill: straight into the box to
+    // reply. Any other time it comes up, the keyboard stays down, even with a
+    // PM still being written (or it would pop up over the video on its own).
+    var focusPmOnShow by remember { mutableStateOf(false) }
+    // Back from picture-in-picture, chat comes up keyboard down too.
+    LaunchedEffect(inPip) { if (inPip) focusPmOnShow = false }
+    val hybridOn = hybridChat != null
+    val hybridShowing = hybridOn && !hybridHidden && !inPip
+    // Hybrid chat at the start of the controls' row (the left, but in a
+    // right-to-left language): the row goes the other way round, so its Hide
+    // chat is still beside chat, and exit's in the far corner, clear of it.
+    val chatAtStart = hybridOn && hybridChatOnRight != (LocalLayoutDirection.current == LayoutDirection.Ltr)
+    val controlsShowing = controlsVisible && !inPip
+    fun hideHybrid() {
+        hiddenAfterSeq = messages.value.lastOrNull()?.seq ?: Long.MIN_VALUE
+        hybridHidden = true
+        focusPmOnShow = false
+    }
+    // When chat comes up (into fullscreen with it on, Show chat, back from
+    // picture-in-picture), the controls come up with it for a moment, so its
+    // Hide chat and message box are seen, then fade with them.
+    val controlsShown by rememberUpdatedState(controlsVisible)
+    LaunchedEffect(hybridShowing) {
+        if (hybridShowing && !controlsShown) onToggleControls()
+    }
+    // Back puts chat away before it leaves fullscreen. ChatPanel's own (the
+    // message box focused) comes later, so it goes first.
+    BackHandler(enabled = hybridShowing) { hideHybrid() }
+    LaunchedEffect(hybridShowing, unreadPm) {
+        if (hybridShowing && unreadPm != null) onPmsSeen()
+    }
     Box(
         Modifier.fillMaxSize().background(Color.Black)
-            .pointerInput(player) {
+            .pointerInput(player, hybridShowing) {
+                // Hybrid chat up: it takes the taps on the video itself, so
+                // a tap on chat doesn't toggle these (see HybridChatLayer).
+                if (hybridShowing) return@pointerInput
                 if (player == MediaTypes.Player.EMBED) {
                     // EmbedSurface's WebView handles touch across its whole
                     // surface for its own scrolling/zoom/link taps, the same
@@ -2917,7 +3157,8 @@ private fun FullscreenPlayer(
     ) {
         playerContent()
 
-        if (chatOverlayOn && !inPip) {
+        // Nico comments don't fly with hybrid chat on: it's the chat itself.
+        if (chatOverlayOn && !inPip && !hybridOn) {
             // Fills the whole screen itself (danmaku-style comments fly the
             // full width, on lanes spanning the full height), so no
             // alignment/sizing to set here beyond the default. Independent
@@ -2942,38 +3183,104 @@ private fun FullscreenPlayer(
             }
         }
 
-        AnimatedVisibility(visible = controlsVisible && !inPip, enter = fadeIn(), exit = fadeOut()) {
-            Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
+        // The controls (below) dim the video while they're up. Under hybrid
+        // chat, so the chat itself stays clear.
+        AnimatedVisibility(visible = controlsShowing, enter = fadeIn(), exit = fadeOut()) {
+            Box(Modifier.fillMaxSize().background(Color(0x66000000)))
+        }
+
+        if (hybridChat != null) {
+            HybridChatLayer(
+                visible = hybridShowing,
+                // Into picture-in-picture it's just gone: no slide in a tiny
+                // window.
+                instant = inPip,
+                onRight = hybridChatOnRight,
+                // A tap on the video brings the controls up (or down), just
+                // as it does without chat.
+                onTapVideo = onToggleControls
+            ) { chatModifier ->
+                hybridChat(chatModifier, focusPmOnShow)
+            }
+        }
+
+        AnimatedVisibility(visible = controlsShowing, enter = fadeIn(), exit = fadeOut()) {
+            // Clear of a camera cutout at either end, as hybrid chat is; and,
+            // with hybrid chat up, clear of it, on its side.
+            Row(
+                Modifier.fillMaxWidth()
+                    .windowInsetsPadding(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal))
+                    .then(if (hybridShowing) Modifier.clearOfHybridChat(atEnd = !chatAtStart) else Modifier),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Hybrid chat's Hide chat, or Show chat: at chat's end of the
+                // row, beside the chat and never over it (in the corner, where
+                // chat goes, while it's put away), up and gone with the rest.
+                val chatToggle: @Composable (Modifier) -> Unit = { toggleModifier ->
+                    HybridChatToggle(
+                        showing = hybridShowing,
+                        messages = messages,
+                        since = hiddenAfterSeq,
+                        onClick = {
+                            if (hybridShowing) {
+                                hideHybrid()
+                            } else {
+                                hybridHidden = false
+                            }
+                        },
+                        modifier = toggleModifier
+                    )
+                }
+                if (hybridOn && chatAtStart) chatToggle(Modifier.padding(start = 12.dp))
                 Row(
-                    Modifier.align(Alignment.TopStart).padding(12.dp),
+                    Modifier.weight(1f).padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Same control, same corner, whichever way you got into
                     // fullscreen — tap it again to leave, the way YouTube's
-                    // own player does.
-                    IconButton(onClick = onExit) {
-                        Icon(Icons.Default.FullscreenExit, contentDescription = "Exit fullscreen", tint = Color.White)
+                    // own player does. With hybrid chat at the start, the far
+                    // corner from it.
+                    val exitButton: @Composable () -> Unit = {
+                        IconButton(onClick = onExit) {
+                            Icon(Icons.Default.FullscreenExit, contentDescription = "Exit fullscreen", tint = Color.White)
+                        }
                     }
+                    if (!chatAtStart) exitButton()
                     Text(
                         media?.title.orEmpty(),
                         color = Color.White,
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        // Exit after it, at the row's end.
+                        modifier = if (chatAtStart) Modifier.weight(1f) else Modifier
                     )
+                    if (chatAtStart) exitButton()
                 }
+                if (hybridOn && !chatAtStart) chatToggle(Modifier.padding(end = 12.dp))
             }
         }
 
         // Stays up regardless of the auto-hiding controls: it's the only sign
-        // of a new PM while chat is off screen.
-        if (!inPip) unreadPm?.let { unread ->
+        // of a new PM while chat is off screen. Not at all while hybrid chat's
+        // showing, where the PM is right there in it; while it's put away,
+        // under the controls' row, below its Show chat, on chat's side.
+        if (!inPip && !hybridShowing) unreadPm?.let { unread ->
             Surface(
-                onClick = onOpenPm,
+                onClick = {
+                    if (hybridOn) {
+                        focusPmOnShow = true
+                        hybridHidden = false
+                        onReplyPmHere()
+                    } else {
+                        onOpenPm()
+                    }
+                },
                 shape = RoundedCornerShape(50),
                 color = MaterialTheme.colorScheme.tertiaryContainer,
                 contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                modifier = Modifier.align(Alignment.TopEnd).padding(12.dp)
+                modifier = Modifier.align(if (chatAtStart) Alignment.TopStart else Alignment.TopEnd)
+                    .padding(start = 12.dp, end = 12.dp, top = if (hybridOn) 72.dp else 12.dp)
             ) {
                 Row(
                     Modifier.padding(horizontal = 14.dp, vertical = 8.dp),

@@ -36,10 +36,10 @@ private class FakePlayer : PlayerHandle {
     override fun release() { isReleased = true }
 }
 
-class SyncEngineTest {
+/** A realistic clock value: 0 means "not started" inside the engine. */
+private const val T0 = 1_000_000L
 
-    /** A realistic clock value: 0 means "not started" inside the engine. */
-    private val T0 = 1_000_000L
+class SyncEngineTest {
 
     private lateinit var engine: SyncEngine
     private lateinit var player: FakePlayer

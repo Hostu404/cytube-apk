@@ -11,7 +11,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.BlendMode
@@ -40,6 +39,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * The purple guy: one for the whole app, kept above its pages (see
@@ -163,7 +163,7 @@ private class ScreenStage(private val state: PurpleGuyState, private val assets:
         state.pose = pose
     }
 
-    override suspend fun wait(ms: Long) = delay(ms)
+    override suspend fun wait(ms: Long) = delay(ms.milliseconds)
 }
 
 /** His life: turning up (see [arrival]), then standing about and doing

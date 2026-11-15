@@ -61,6 +61,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Prince's state. Kept by the home screen rather than by [Prince] itself:
@@ -400,7 +401,7 @@ fun Prince(
             typed || keepAwake -> state.wakeUp()
             state.asleep -> {
                 // Found asleep: wakes some time into the rest of its nap.
-                delay(random.nextLong(FIRST_CHANGE_MIN_MS, state.mood().napMaxMs))
+                delay(random.nextLong(FIRST_CHANGE_MIN_MS, state.mood().napMaxMs).milliseconds)
                 state.wakeUp()
             }
             // Found awake: somewhere into its time awake.
@@ -417,7 +418,7 @@ fun Prince(
             val mood = state.mood()
             if (mayNap && random.nextFloat() < mood.napChance) {
                 state.asleep = true
-                delay(random.nextLong(mood.napMinMs, mood.napMaxMs))
+                delay(random.nextLong(mood.napMinMs, mood.napMaxMs).milliseconds)
                 state.wakeUp()
             }
             awakeFor = random.nextLong(AWAKE_MIN_MS, AWAKE_MAX_MS)
@@ -433,7 +434,7 @@ fun Prince(
             if (state.pretaken.isNotEmpty()) state.layPretaken(now)
             val wait = state.tidyLetters(now)
             if (wait == Long.MAX_VALUE) awaitCancellation()
-            if (wait > 0) delay(wait)
+            if (wait > 0) delay(wait.milliseconds)
         }
     }
 
@@ -454,7 +455,7 @@ fun Prince(
     LaunchedEffect(animation) {
         step = 0
         while (true) {
-            delay(animation.frameMs)
+            delay(animation.frameMs.milliseconds)
             step = (step + 1) % animation.frames.size
         }
     }
@@ -666,10 +667,10 @@ private suspend fun PrinceState.stayAwake(ms: Long, roam: () -> Boolean) {
         val left = ms - (withFrameMillis { it } - start)
         val sit = random.nextLong(SIT_MIN_MS, SIT_MAX_MS)
         if (sit >= left) {
-            delay(left.coerceAtLeast(0L))
+            delay(left.coerceAtLeast(0L).milliseconds)
             return
         }
-        delay(sit)
+        delay(sit.milliseconds)
         val mood = mood()
         val roaming = roam() && room >= MIN_STROLL
         val letter = if (roaming && random.nextFloat() < mood.fetchChance) pickLetter() else null
@@ -687,7 +688,7 @@ private suspend fun PrinceState.wakeUp() {
     asleep = false
     waking = true
     try {
-        delay(WAKE.frames.size * WAKE.frameMs)
+        delay((WAKE.frames.size * WAKE.frameMs).milliseconds)
     } finally {
         waking = false
     }
@@ -697,7 +698,7 @@ private suspend fun PrinceState.wakeUp() {
 private suspend fun PrinceState.scratch() {
     scratching = true
     try {
-        delay(SCRATCH.frames.size * SCRATCH.frameMs * SCRATCH_LOOPS)
+        delay((SCRATCH.frames.size * SCRATCH.frameMs * SCRATCH_LOOPS).milliseconds)
     } finally {
         scratching = false
     }
@@ -707,7 +708,7 @@ private suspend fun PrinceState.scratch() {
 private suspend fun PrinceState.wag() {
     wagging = true
     try {
-        delay(WAG.frames.size * WAG.frameMs)
+        delay((WAG.frames.size * WAG.frameMs).milliseconds)
     } finally {
         wagging = false
     }
@@ -729,7 +730,7 @@ private suspend fun PrinceState.stroll() {
             walkTo(from)
         } else {
             walkTo(target)
-            delay(if (target <= restRoom) random.nextLong(REST_MIN_MS, REST_MAX_MS) else random.nextLong(TURN_MIN_MS, TURN_MAX_MS))
+            delay((if (target <= restRoom) random.nextLong(REST_MIN_MS, REST_MAX_MS) else random.nextLong(TURN_MIN_MS, TURN_MAX_MS)).milliseconds)
         }
     }
     walkTo(0f)
@@ -739,7 +740,7 @@ private suspend fun PrinceState.stroll() {
 private suspend fun PrinceState.ponder() {
     pondering = true
     try {
-        delay(PONDER.frames.size * PONDER.frameMs)
+        delay((PONDER.frames.size * PONDER.frameMs).milliseconds)
     } finally {
         pondering = false
     }
@@ -803,10 +804,10 @@ private suspend fun PrinceState.fetch(index: Int) {
         walkTo(target.roundToInt().toFloat())
         facing = LEFT
         hopFor(index)
-        delay(TURN_MIN_MS)
+        delay(TURN_MIN_MS.milliseconds)
         walkTo(PILE_AWAY)
         dropLetter()
-        delay(TURN_MIN_MS)
+        delay(TURN_MIN_MS.milliseconds)
     } finally {
         sideOn = false
     }
@@ -843,7 +844,7 @@ private suspend fun PrinceState.fedUp() {
     if (letter != null) return fetch(letter)
     val target = somewhereToSit() ?: return scratch()
     walkTo(target)
-    delay(random.nextLong(FED_UP_SIT_MIN_MS, FED_UP_SIT_MAX_MS))
+    delay(random.nextLong(FED_UP_SIT_MIN_MS, FED_UP_SIT_MAX_MS).milliseconds)
 }
 
 /** A place to sit in the empty half of the row, a short walk at least from
@@ -904,7 +905,7 @@ private suspend fun PrinceState.dropInAnger() {
     dropLetter()
     angry = true
     try {
-        delay(ANGRY_MS)
+        delay(ANGRY_MS.milliseconds)
     } finally {
         angry = false
     }
@@ -1159,7 +1160,7 @@ internal fun hatFor(date: LocalDate): Hat? {
     val easter = easterSunday(date.year)
     val turkey = thanksgiving(date.year)
     return when {
-        day >= 1231 || day <= 102 -> Hat.PARTY
+        day !in 103..1230 -> Hat.PARTY      // 31 December to 2 January
         day in 213..215 -> Hat.HEARTS
         day in 316..318 -> Hat.TOP_HAT
         !date.isBefore(easter.minusDays(2)) && !date.isAfter(easter.plusDays(1)) -> Hat.BUNNY

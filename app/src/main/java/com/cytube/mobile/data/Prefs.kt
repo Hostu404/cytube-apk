@@ -107,7 +107,16 @@ data class Settings(
     val lightsDownDim: Float = DEFAULT_LIGHTS_DOWN_DIM,
     /** The chat box's up arrow bringing back the last few messages you
      *  sent (see SentChat). Phone only; on by default. */
-    val messageRecall: Boolean = true
+    val messageRecall: Boolean = true,
+    /** How solid hybrid chat's messages are over the fullscreen video (see
+     *  HybridChatLayer): 0.2 to 1 (solid, the default). Phone only. */
+    val hybridChatOpacity: Float = 1f,
+    /** Hybrid chat down the right side of the fullscreen video (the
+     *  default), rather than the left. Phone only. */
+    val hybridChatRight: Boolean = true,
+    /** Hybrid chat's messages fading right back once nothing new's come in
+     *  for a while (see ChatPanel's overVideo). Off by default. Phone only. */
+    val hybridChatDims: Boolean = false
 )
 
 /** Lights down's darkness as it always was, until changed in Settings. */
@@ -116,6 +125,8 @@ val NICO_SPEED_RANGE = 0.5f..2f
 val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
 /** 10% to 100%, as CyTube Plus offers it. */
 val NICO_EMOTE_OPACITY_RANGE = 0.1f..1f
+/** 20% to 100%: fainter, and the letters are hard to make out. */
+val HYBRID_CHAT_OPACITY_RANGE = 0.2f..1f
 
 /** Whether Developer mode's been found, from what's saved: or, from before there
  *  was a Developer mode, the purple guy on (so his switch is there to turn him
@@ -127,6 +138,12 @@ internal fun devModeOf(found: Boolean?, purpleGuy: Boolean?): Boolean = found ?:
  *  (as in CyTube Plus, whose emotes only is checked first). */
 internal fun nicoTextOnlyOf(textOnly: Boolean?, emotesOnly: Boolean?): Boolean =
     textOnly == true && emotesOnly != true
+
+/** Hybrid chat's opacity as kept: within range, on the slider's 5% steps. */
+internal fun hybridChatOpacityOf(value: Float?): Float {
+    val v = value?.takeIf { !it.isNaN() } ?: 1f
+    return ((v.coerceIn(HYBRID_CHAT_OPACITY_RANGE) * 20f).roundToInt() / 20f).coerceIn(HYBRID_CHAT_OPACITY_RANGE)
+}
 
 /** The Niconico overlay's emote opacity as kept: within range, on the
  *  slider's 5% steps (no 0.35000002 from a dragged slider). */
@@ -186,7 +203,10 @@ class SettingsStore(private val context: Context) {
             devMode = devModeOf(p[DEV_MODE], p[PURPLE_GUY]),
             nicoSpeed = (p[NICO_SPEED] ?: 1f).coerceIn(NICO_SPEED_RANGE),
             lightsDownDim = (p[LIGHTS_DOWN_DIM] ?: DEFAULT_LIGHTS_DOWN_DIM).coerceIn(LIGHTS_DOWN_DIM_RANGE),
-            messageRecall = p[MESSAGE_RECALL] ?: true
+            messageRecall = p[MESSAGE_RECALL] ?: true,
+            hybridChatOpacity = hybridChatOpacityOf(p[HYBRID_CHAT_OPACITY]),
+            hybridChatRight = p[HYBRID_CHAT_RIGHT] ?: true,
+            hybridChatDims = p[HYBRID_CHAT_DIMS] ?: false
         )
     }.distinctUntilChanged()
 
@@ -229,6 +249,9 @@ class SettingsStore(private val context: Context) {
     suspend fun setNicoSpeed(v: Float) = save { it[NICO_SPEED] = v.coerceIn(NICO_SPEED_RANGE) }
     suspend fun setLightsDownDim(v: Float) = save { it[LIGHTS_DOWN_DIM] = v.coerceIn(LIGHTS_DOWN_DIM_RANGE) }
     suspend fun setMessageRecall(v: Boolean) = save { it[MESSAGE_RECALL] = v }
+    suspend fun setHybridChatOpacity(v: Float) = save { it[HYBRID_CHAT_OPACITY] = hybridChatOpacityOf(v) }
+    suspend fun setHybridChatRight(v: Boolean) = save { it[HYBRID_CHAT_RIGHT] = v }
+    suspend fun setHybridChatDims(v: Boolean) = save { it[HYBRID_CHAT_DIMS] = v }
 
     // ---- per-channel state ----
 
@@ -307,6 +330,9 @@ class SettingsStore(private val context: Context) {
         val NICO_SPEED = floatPreferencesKey("nico_speed")
         val LIGHTS_DOWN_DIM = floatPreferencesKey("lights_down_dim")
         val MESSAGE_RECALL = booleanPreferencesKey("message_recall")
+        val HYBRID_CHAT_OPACITY = floatPreferencesKey("hybrid_chat_opacity")
+        val HYBRID_CHAT_RIGHT = booleanPreferencesKey("hybrid_chat_right")
+        val HYBRID_CHAT_DIMS = booleanPreferencesKey("hybrid_chat_dims")
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")

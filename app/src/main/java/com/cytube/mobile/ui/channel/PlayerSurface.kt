@@ -540,7 +540,7 @@ private fun EmbedSurface(
                     override fun onReceivedHttpError(
                         view: WebView,
                         request: WebResourceRequest,
-                        errorResponse: android.webkit.WebResourceResponse
+                        errorResponse: WebResourceResponse
                     ) {
                         if (request.isForMainFrame) {
                             reportFailure(

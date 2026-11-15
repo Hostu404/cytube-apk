@@ -13,6 +13,9 @@ plugins {
     // needs this to find the addresses.
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
+// Gradle still marks this block as incubating, though it's what every
+// Android project uses to say where its libraries come from.
+@Suppress("UnstableApiUsage")
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {

@@ -29,7 +29,7 @@ internal class SharedLookups<K : Any, V>(private val scope: CoroutineScope) {
                 running[key] = started
                 // Registered before it's started, so it can't be missed.
                 started.invokeOnCompletion {
-                    synchronized(running) { if (running[key] === started) running.remove(key) }
+                    synchronized(running) { if (running[key] === started) running -= key }
                 }
             }
         }
@@ -40,7 +40,7 @@ internal class SharedLookups<K : Any, V>(private val scope: CoroutineScope) {
     /** The next [get] for [key] starts a lookup of its own, even while one
      *  is under way (which carries on for whoever is waiting on it). */
     fun forget(key: K) {
-        synchronized(running) { running.remove(key) }
+        synchronized(running) { running -= key }
     }
 
     /** Lookups under way. */

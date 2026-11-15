@@ -29,6 +29,7 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * New Year's fireworks, from 23:59 on New Year's Eve to 00:05 on New Year's Day by the phone's own
@@ -58,7 +59,7 @@ private fun rememberFireworksTime(): Boolean {
         while (true) {
             val now = fireworksNow()
             on = Fireworks.isOn(now)
-            delay(Fireworks.untilChange(now).coerceIn(1_000L, 60_000L))
+            delay(Fireworks.untilChange(now).coerceIn(1_000L, 60_000L).milliseconds)
             withFrameMillis { }
         }
     }
@@ -72,7 +73,7 @@ private fun FireworksShow(modifier: Modifier) {
     // A frame every 1/12 s, as Prince's walk: with the page away, it waits for the next frame.
     LaunchedEffect(show) {
         while (true) {
-            delay(Fireworks.FRAME_MS)
+            delay(Fireworks.FRAME_MS.milliseconds)
             withFrameMillis { show.step() }
         }
     }
@@ -94,9 +95,9 @@ internal object Fireworks {
     const val GAP_MAX = 30
     const val FIRST_AFTER = 6
 
-    fun isOn(now: LocalDateTime): Boolean = when {
-        now.monthValue == 12 && now.dayOfMonth == 31 -> !now.toLocalTime().isBefore(START)
-        now.monthValue == 1 && now.dayOfMonth == 1 -> now.toLocalTime().isBefore(END)
+    fun isOn(now: LocalDateTime): Boolean = when (now.monthValue) {
+        12 -> now.dayOfMonth == 31 && !now.toLocalTime().isBefore(START)
+        1 -> now.dayOfMonth == 1 && now.toLocalTime().isBefore(END)
         else -> false
     }
 

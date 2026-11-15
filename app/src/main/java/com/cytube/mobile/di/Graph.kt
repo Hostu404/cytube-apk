@@ -1,5 +1,6 @@
 package com.cytube.mobile.di
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import androidx.annotation.OptIn
@@ -175,6 +176,10 @@ object Graph {
         return mediaCacheInstance
     }
 
+    // Sized from the space free right now on purpose: the cache only ever
+    // takes a share of that (see mediaCacheBudgetBytes), and never asks the
+    // system to clear other apps' caches to make more room for it.
+    @SuppressLint("UsableSpace")
     private fun createMediaCache(appContext: Context): Cache? {
         val dir = File(appContext.cacheDir, MEDIA_CACHE_DIR)
         val database = StandaloneDatabaseProvider(appContext)

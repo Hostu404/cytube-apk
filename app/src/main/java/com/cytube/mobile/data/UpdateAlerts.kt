@@ -26,6 +26,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.time.Instant
 import java.time.LocalDate
+import kotlin.time.Duration.Companion.milliseconds
 
 /** Something to tell everyone on the home page (phone app only): a newer build to get ([update]), or
  *  a message from alerts.json, shown up to and including [until]. [id] is what dismissing it keeps. */
@@ -75,7 +76,7 @@ class UpdateAlerts(private val context: Context) {
             val p = context.dataStore.data.first()
             if (now - (p[CHECKED_AT] ?: 0L) in 0 until CHECK_EVERY_MS) return
             // Let the home page's own loading (the channel list) go first.
-            delay(START_DELAY_MS)
+            delay(START_DELAY_MS.milliseconds)
             val nightly = AppAlerts.isNightly(BuildConfig.VERSION_NAME)
             val release = fetch(if (nightly) NIGHTLY_API else LATEST_API)
             val news = fetch(ALERTS_FILE)

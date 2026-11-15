@@ -24,7 +24,7 @@ class EmotesTest {
         val emote = Emote(name = ":smile:", image = "https://example.com/smile.png", source = "")
         val emoteSet = EmoteSet.from(listOf(emote))
 
-        val message = "It costs $100 or \$50 with \\path\\to\\file"
+        val message = "It costs $100 or $50 with \\path\\to\\file"
         val result = emoteSet.apply(message)
         assertEquals(message, result)
     }

@@ -2,14 +2,17 @@ package com.cytube.mobile.ui.channel
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -22,6 +25,7 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -48,11 +52,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
@@ -60,8 +69,11 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
@@ -71,6 +83,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.font.FontWeight
@@ -78,10 +91,14 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.core.net.toUri
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -121,6 +138,7 @@ import java.time.format.DateTimeFormatter
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import com.cytube.mobile.ui.isTvDevice
+import kotlin.time.Duration.Companion.milliseconds
 
 /** One shared, immutable formatter rather than a new SimpleDateFormat for
  *  every chat row every time it's composed. */
@@ -303,7 +321,7 @@ fun ChatPanel(
     // fixed video -> Nico -> chat bar stop order was never built to host.
     showEmotePickerButton: Boolean = true,
     /** The local user's name: other people's messages mentioning it get
-     *  highlighted (see [mentionRegex]). Null for no highlighting. */
+     *  highlighted (see buildMentionRegex). Null for no highlighting. */
     highlightName: String? = null,
     /** Private-message support (phone only): null turns it off entirely,
      *  which is what TV passes — PMs still show there, just with no way to
@@ -329,7 +347,42 @@ fun ChatPanel(
     /** The server just dropped a message for coming too fast
      *  (ChannelUiState.chatCoolingDown): for that moment the box keeps what's
      *  typed rather than sending it to be dropped too. */
-    coolingDown: Boolean = false
+    coolingDown: Boolean = false,
+    /** Drawn over video (hybrid chat, in fullscreen), laid out over the whole
+     *  screen it's given:
+     *  - the messages down one side ([overVideoOnRight]), from the bottom
+     *    up, compact (no time by the name), outlined, each with a slim bar
+     *    in its sender's colour down its outer edge;
+     *  - links in them plain text, a tap on one doing nothing, so a mis-tap
+     *    can't throw you out into a browser;
+     *  - the message box in the middle of the bottom edge, one light pill,
+     *    clear of the messages, there with the fullscreen controls
+     *    ([showBox]) and while it's in use, sending putting it away with the
+     *    keyboard;
+     *  - with [dimWhenQuiet], the messages resting, faded right back, while
+     *    nothing's been said for a while (see the over-video branch below);
+     *  - nothing fading at the top of the list, there being no one colour
+     *    behind it to fade into. */
+    overVideo: Boolean = false,
+    /** Over video: a tap beside the messages (not on one), which is a tap on
+     *  the video. The keyboard's put away first. */
+    onTapOutside: () -> Unit = {},
+    /** Over video: the fullscreen controls are up, and the message box with
+     *  them (one tap on the video shows it all; see HybridChatLayer). */
+    showBox: Boolean = false,
+    /** Over video: how solid the messages are (Settings.hybridChatOpacity),
+     *  resting or not. */
+    overVideoOpacity: Float = 1f,
+    /** Over video: the messages down the right side of the screen (the
+     *  default), rather than the left (Settings.hybridChatRight). */
+    overVideoOnRight: Boolean = true,
+    /** Over video: the messages fade right back while it's quiet
+     *  (Settings.hybridChatDims). */
+    dimWhenQuiet: Boolean = false,
+    /** Coming up with a PM already started ([pmTarget] set) puts the cursor
+     *  in the box, keyboard up, as starting one here does. False leaves the
+     *  keyboard down that once (hybrid chat coming up over the video). */
+    focusPmOnOpen: Boolean = true
 ) {
     val context = LocalContext.current
     val mentionRegex = remember(highlightName) { highlightName?.let(::buildMentionRegex) }
@@ -355,8 +408,10 @@ fun ChatPanel(
     }
     // Starting a PM (from a message or the user list) puts the cursor
     // straight in the box, keyboard up, ready to type.
+    var pmFocusArmed by remember { mutableStateOf(focusPmOnOpen) }
     LaunchedEffect(pmTarget) {
-        if (pmTarget != null && onStartPm != null) runCatching { inputFocus.requestFocus() }
+        if (pmTarget != null && onStartPm != null && pmFocusArmed) runCatching { inputFocus.requestFocus() }
+        pmFocusArmed = true
     }
     var draft by remember { mutableStateOf(TextFieldValue("")) }
     var showEmotePicker by remember { mutableStateOf(false) }
@@ -398,6 +453,16 @@ fun ChatPanel(
         if (draft.text == r.text) draft = TextFieldValue("")
         recalled = null
     }
+    // Over video the message box keeps out of the way: it's there with the
+    // fullscreen controls (a tap on the video, or chat coming up), and while
+    // it's in use (typed in, something in it, the emote sheet up). One short
+    // fade each way, on the box's own layer: nothing else redraws for it.
+    val boxShown = !overVideo || showBox || inputFocused || draft.text.isNotEmpty() || showEmotePicker
+    val boxAlpha = animateFloatAsState(
+        targetValue = if (boxShown) 1f else 0f,
+        animationSpec = tween(if (boxShown) HYBRID_FADE_IN_MS else HYBRID_FADE_OUT_MS),
+        label = "messageBox"
+    )
     val listState = rememberLazyListState()
 
     // How fast messages are arriving, for the jump button below.
@@ -429,7 +494,7 @@ fun ChatPanel(
             val itemsBelow = info.totalItemsCount - 1 - last.index
             // Fresh, not the rate from the last batch: after a flood ends
             // that would still say ~100/s and pull the user back down.
-            arrivalsPerSecond = arrivals.perSecond(android.os.SystemClock.uptimeMillis())
+            arrivalsPerSecond = arrivals.perSecond(SystemClock.uptimeMillis())
             val slack = 3 + (arrivalsPerSecond * 0.5f).toInt()
             following = !listState.canScrollForward ||
                 (!listState.lastScrolledBackward && itemsBelow <= slack)
@@ -444,8 +509,8 @@ fun ChatPanel(
     // stale end-of-flood rate before the first update.
     LaunchedEffect(following) {
         while (!following) {
-            arrivalsPerSecond = arrivals.perSecond(android.os.SystemClock.uptimeMillis())
-            delay(500)
+            arrivalsPerSecond = arrivals.perSecond(SystemClock.uptimeMillis())
+            delay(500.milliseconds)
         }
     }
 
@@ -468,7 +533,7 @@ fun ChatPanel(
     // would silently stop autoscrolling for the rest of the session.
     LaunchedEffect(messages.lastOrNull()?.seq) {
         if (messages.isEmpty()) return@LaunchedEffect
-        val now = android.os.SystemClock.uptimeMillis()
+        val now = SystemClock.uptimeMillis()
         if (countedUpToSeq != Long.MIN_VALUE) {
             arrivals.record(now, messages.count { it.seq > countedUpToSeq })
         }
@@ -515,8 +580,13 @@ fun ChatPanel(
     // — with edge-to-edge that triggers no actual window resize, but it stops
     // some OS versions from ALSO panning the window on top of this, which is
     // what was pushing the input field far higher than the keyboard needs.)
-    Column(modifier.fillMaxSize()) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+    // Over video, the side the messages are down: the end (the right, but
+    // in a right-to-left language), or the start.
+    val overVideoAtEnd = overVideoOnRight == (LocalLayoutDirection.current == LayoutDirection.Ltr)
+    // The messages, and the jump down to the latest: under the box as usual,
+    // or, over video, down their side by themselves.
+    val messageList: @Composable (Modifier) -> Unit = { listModifier ->
+        Box(listModifier) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize()
@@ -532,7 +602,7 @@ fun ChatPanel(
                 // while there's something above to scroll back to.
                 .drawWithContent {
                     drawContent()
-                    if (listState.canScrollBackward) {
+                    if (!overVideo && listState.canScrollBackward) {
                         val fade = CHAT_TOP_FADE.toPx()
                         drawRect(
                             Brush.verticalGradient(
@@ -563,7 +633,20 @@ fun ChatPanel(
                         Modifier
                     }
                 ),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+            // Over video, a few messages sit at the bottom, by the box, not
+            // at the top of an empty column.
+            verticalArrangement = if (overVideo) Arrangement.Bottom else Arrangement.Top,
+            contentPadding = if (overVideo) {
+                // A little more on the screen's edge than the video's.
+                PaddingValues(
+                    start = if (overVideoAtEnd) 8.dp else 12.dp,
+                    end = if (overVideoAtEnd) 12.dp else 8.dp,
+                    top = 4.dp,
+                    bottom = 4.dp
+                )
+            } else {
+                PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+            }
         ) {
             items(
                 count = messages.size,
@@ -588,14 +671,16 @@ fun ChatPanel(
                     modifier = Modifier.padding(
                         top = when {
                             index == 0 -> 0.dp
-                            continues -> 2.dp
-                            else -> 8.dp
+                            continues -> if (overVideo) 0.dp else 2.dp
+                            else -> if (overVideo) 6.dp else 8.dp
                         }
                     ),
                     showEmotes = showEmotes,
                     emotes = emotes,
                     onUsernameClick = { name -> draft = draft.insertReply(name) },
                     onLinkClick = { url -> openInBrowser(context, url) },
+                    overVideo = overVideo,
+                    overVideoAtEnd = overVideoAtEnd,
                     // Tapping an emote someone already posted drops the same
                     // shortcode into the draft as picking it from the emote
                     // picker would — a quick way to reuse one you just saw.
@@ -644,13 +729,23 @@ fun ChatPanel(
             }
         }
         }
+    }
 
-        HorizontalDivider()
-
+    // Who the box sends privately to, and the way back to public chat.
+    val pmStrip: @Composable () -> Unit = {
         if (pmTarget != null) {
             Row(
                 Modifier.fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.tertiaryContainer)
+                    .then(
+                        // Over video, a rounded strip just above the box,
+                        // in line with it, rather than a band edge to edge.
+                        if (overVideo) {
+                            Modifier.padding(start = 8.dp, end = 10.dp, top = 6.dp)
+                                .background(MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.9f), RoundedCornerShape(14.dp))
+                        } else {
+                            Modifier.background(MaterialTheme.colorScheme.tertiaryContainer)
+                        }
+                    )
                     .padding(start = 16.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -676,104 +771,283 @@ fun ChatPanel(
                 }
             }
         }
+    }
 
-        Row(
-            // The one place this panel actually needs to react to the
-            // keyboard — see this composable's note on imePadding() further
-            // up. Scoped to just this row rather than the whole panel, right
-            // where the padding needs to land: directly between this row and
-            // the keyboard, with nothing else in between. Bottom padding is
-            // wider while the keyboard is up (16dp): the text cursor's drag
-            // handle draws a bit below the cursor line and gets clipped at
-            // the keyboard's top edge with less. With the keyboard down
-            // there's nothing to clip, so the row sits close to the bar
-            // below (the field has plenty of air of its own) and the chat
-            // gets the space.
-            Modifier.fillMaxWidth().imePadding()
-                .padding(
-                    start = 12.dp, end = 12.dp,
-                    bottom = if (WindowInsets.isImeVisible) 16.dp else 2.dp
-                ),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (emotes.all.isNotEmpty() && showEmotePickerButton) {
-                IconButton(onClick = { showEmotePicker = true }) {
-                    Icon(Icons.Default.Mood, contentDescription = "Emotes", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    // What the box says while it's empty.
+    val placeholderText = when {
+        !canSend -> disabledHint
+        pmTarget != null -> "Message $pmTarget privately"
+        else -> "Message"
+    }
+    // ↓ to the left of ↑, so ↑ stays where it is to be tapped again and
+    // again.
+    val recallButtons: (@Composable () -> Unit)? = if (!canRecall) null else {
+        {
+            Row {
+                if (recalling != null) {
+                    IconButton(onClick = ::recallNewer, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next message you sent")
+                    }
+                }
+                IconButton(
+                    onClick = ::recallOlder,
+                    enabled = (recalling ?: sent.size) > 0,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Previous message you sent")
                 }
             }
-            OutlinedTextField(
-                value = draft,
-                // No longer than the server lets a message be (see ChatDraft).
-                onValueChange = { draft = it.withinChatLimit(draft) },
-                placeholder = {
-                    Text(
-                        when {
-                            !canSend -> disabledHint
-                            pmTarget != null -> "Message $pmTarget privately"
-                            else -> "Message"
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                },
-                enabled = canSend,
-                // Grows with the draft instead of staying pinned to one line
-                // and scrolling the typed text sideways out of view — capped
-                // so a genuinely long paste can't take over the screen; still
-                // scrolls internally past that, same as any other multi-line
-                // field. imeAction = Send below still shows the ordinary
-                // "send" key instead of a return/newline glyph and fires
-                // onSend the same as before, so hitting enter still sends
-                // rather than adding a line — this only changes what happens
-                // while there's more text than fits on one line.
-                maxLines = 5,
-                shape = RoundedCornerShape(24.dp),
-                // ↓ to the left of ↑, so ↑ stays where it is to be tapped
-                // again and again.
-                trailingIcon = if (!canRecall) null else {
-                    {
-                        Row {
-                            if (recalling != null) {
-                                IconButton(onClick = ::recallNewer, modifier = Modifier.size(40.dp)) {
-                                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Next message you sent")
+        }
+    }
+    val fieldModifier = Modifier
+        .focusRequester(inputFocus)
+        .onFocusChanged { inputFocused = it.isFocused }
+        // A keyboard's Up and Down do the same, as on the website.
+        .onPreviewKeyEvent { event ->
+            if (event.type != KeyEventType.KeyDown || !canRecall) false
+            else when (event.key) {
+                Key.DirectionUp -> { recallOlder(); true }
+                Key.DirectionDown -> if (recalling != null) { recallNewer(); true } else false
+                else -> false
+            }
+        }
+        .then(inputFieldModifier)
+
+    if (overVideo) {
+        val tapOutside by rememberUpdatedState(onTapOutside)
+        // With dimWhenQuiet (Settings), the messages rest when it's quiet:
+        // after a while with nothing new, and nothing being done with them,
+        // they fade right back, leaving the picture. A new message, a touch
+        // on them, the controls coming up or the box being typed in bring
+        // them straight back. One fade, on the list's own layer, and only
+        // then. Without it none of this runs, and they just stay.
+        var awake by remember { mutableStateOf(true) }
+        var touches by remember { mutableIntStateOf(0) }
+        if (dimWhenQuiet) {
+            LaunchedEffect(messages.lastOrNull()?.seq, touches, showBox, inputFocused, listState.isScrollInProgress) {
+                awake = true
+                if (showBox || inputFocused || listState.isScrollInProgress) return@LaunchedEffect
+                delay(CHAT_REST_AFTER_MS.milliseconds)
+                awake = false
+            }
+        }
+        val lit = awake || !dimWhenQuiet
+        val restAlpha = animateFloatAsState(
+            targetValue = if (lit) 1f else CHAT_RESTING_ALPHA,
+            animationSpec = tween(if (lit) HYBRID_FADE_IN_MS else CHAT_REST_FADE_MS),
+            label = "chatRest"
+        )
+        Box(modifier.fillMaxSize()) {
+            messageList(
+                // Its whole side, top to bottom (above the keyboard while
+                // it's up): the box (below) never reaches it.
+                Modifier.align(if (overVideoAtEnd) Alignment.BottomEnd else Alignment.BottomStart)
+                    .fillMaxHeight()
+                    .hybridChatWidth()
+                    .imePadding()
+                    .padding(vertical = 8.dp)
+                    // Any touch on the messages wakes them: watched on its
+                    // way past, not taken. Only while they can rest.
+                    .then(
+                        if (!dimWhenQuiet) {
+                            Modifier
+                        } else {
+                            Modifier.pointerInput(Unit) {
+                                awaitEachGesture {
+                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                    touches++
                                 }
                             }
-                            IconButton(
-                                onClick = ::recallOlder,
-                                enabled = (recalling ?: sent.size) > 0,
-                                modifier = Modifier.size(40.dp)
-                            ) {
-                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Previous message you sent")
-                            }
+                        }
+                    )
+                    // A tap between or round messages (not on one) is a tap
+                    // on the video: the keyboard goes, and the controls come
+                    // up or go, as they would anywhere else on it.
+                    .pointerInput(Unit) {
+                        detectTapGestures {
+                            focusManager.clearFocus()
+                            tapOutside()
                         }
                     }
-                },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = {
-                    // Held while the server isn't taking messages; kept typed.
-                    if (!coolingDown) { onSend(draft.text); draft = TextFieldValue(""); recalled = null }
-                }),
-                modifier = Modifier.weight(1f)
-                    .focusRequester(inputFocus)
-                    .onFocusChanged { inputFocused = it.isFocused }
-                    // A keyboard's Up and Down do the same, as on the website.
-                    .onPreviewKeyEvent { event ->
-                        if (event.type != KeyEventType.KeyDown || !canRecall) false
-                        else when (event.key) {
-                            Key.DirectionUp -> { recallOlder(); true }
-                            Key.DirectionDown -> if (recalling != null) { recallNewer(); true } else false
-                            else -> false
-                        }
+                    // Each thing drawn faded on its own, rather than the list
+                    // drawn whole into a buffer of its own first.
+                    .graphicsLayer {
+                        alpha = restAlpha.value * overVideoOpacity
+                        compositingStrategy = CompositingStrategy.ModulateAlpha
                     }
-                    .then(inputFieldModifier)
             )
-            FilledIconButton(
-                onClick = { onSend(draft.text); draft = TextFieldValue(""); recalled = null },
-                enabled = canSend && !coolingDown && draft.text.isNotBlank(),
-                modifier = Modifier.size(48.dp)
+            // Over video: one see-through pill with everything in it (emotes,
+            // the text, recall, send), in the middle of the bottom edge,
+            // rather than an outlined field and a filled button sitting heavy
+            // on the picture. Its edge lights up while it's being typed in;
+            // send lights up once there's something to send. Plain shapes and
+            // colours: nothing to animate or redraw while it sits there.
+            val pill = RoundedCornerShape(22.dp)
+            val canSendNow = canSend && !coolingDown && draft.text.isNotBlank()
+            // Sent: the keyboard goes down and the box with it, rather than the
+            // box sitting there focused, its cursor blinking, until Back.
+            fun sendFromBox() {
+                onSend(draft.text)
+                draft = TextFieldValue("")
+                recalled = null
+                focusManager.clearFocus()
+            }
+            Box(
+                Modifier.align(Alignment.BottomCenter)
+                    .hybridBoxWidth()
+                    .imePadding()
             ) {
-                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                Column(Modifier.fillMaxWidth().graphicsLayer { alpha = boxAlpha.value }) {
+                    pmStrip()
+                    Row(
+                        // More room underneath while the keyboard is up, for the
+                        // cursor's handle, as the usual box below.
+                        Modifier.fillMaxWidth()
+                            .padding(
+                                start = 8.dp, end = 10.dp, top = 6.dp,
+                                bottom = if (WindowInsets.isImeVisible) 16.dp else 8.dp
+                            )
+                            .background(Color.Black.copy(alpha = if (inputFocused) 0.6f else 0.4f), pill)
+                            .border(
+                                1.dp,
+                                if (inputFocused) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else Color.White.copy(alpha = 0.16f),
+                                pill
+                            )
+                            .padding(horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (emotes.all.isNotEmpty() && showEmotePickerButton) {
+                            IconButton(onClick = { showEmotePicker = true }, modifier = Modifier.size(40.dp)) {
+                                Icon(
+                                    Icons.Default.Mood, contentDescription = "Emotes",
+                                    tint = Color.White.copy(alpha = 0.7f), modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        } else {
+                            Spacer(Modifier.width(12.dp))
+                        }
+                        BasicTextField(
+                            value = draft,
+                            // No longer than the server lets a message be (see ChatDraft).
+                            onValueChange = { draft = it.withinChatLimit(draft) },
+                            enabled = canSend,
+                            // A few lines at most: there's less height to spare.
+                            maxLines = 4,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color.White),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = {
+                                // Held while the server isn't taking messages; kept typed.
+                                if (!coolingDown) sendFromBox()
+                            }),
+                            decorationBox = { field ->
+                                Box(contentAlignment = Alignment.CenterStart) {
+                                    if (draft.text.isEmpty()) {
+                                        Text(
+                                            placeholderText,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = Color.White.copy(alpha = 0.5f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    field()
+                                }
+                            },
+                            modifier = Modifier.weight(1f).padding(vertical = 11.dp).then(fieldModifier)
+                        )
+                        recallButtons?.invoke()
+                        IconButton(
+                            onClick = { sendFromBox() },
+                            enabled = canSendNow,
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Send, contentDescription = "Send",
+                                tint = if (canSendNow) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.3f),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+                // Its place, while it's put away: a tap there is a tap on the
+                // video like any other (the box comes up with the controls),
+                // and doesn't reach the box's buttons, there but unseen.
+                if (!boxShown) {
+                    Spacer(
+                        Modifier.matchParentSize().clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClickLabel = "Show the controls and the message box"
+                        ) { tapOutside() }
+                    )
+                }
+            }
+        }
+    } else {
+        Column(modifier.fillMaxSize()) {
+            messageList(Modifier.weight(1f).fillMaxWidth())
+            HorizontalDivider()
+            pmStrip()
+            Row(
+                // The one place this panel actually needs to react to the
+                // keyboard — see this composable's note on imePadding() further
+                // up. Scoped to just this row rather than the whole panel, right
+                // where the padding needs to land: directly between this row and
+                // the keyboard, with nothing else in between. Bottom padding is
+                // wider while the keyboard is up (16dp): the text cursor's drag
+                // handle draws a bit below the cursor line and gets clipped at
+                // the keyboard's top edge with less. With the keyboard down
+                // there's nothing to clip, so the row sits close to the bar
+                // below (the field has plenty of air of its own) and the chat
+                // gets the space.
+                Modifier.fillMaxWidth().imePadding()
+                    .padding(
+                        start = 12.dp, end = 12.dp,
+                        bottom = if (WindowInsets.isImeVisible) 16.dp else 2.dp
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (emotes.all.isNotEmpty() && showEmotePickerButton) {
+                    IconButton(onClick = { showEmotePicker = true }) {
+                        Icon(Icons.Default.Mood, contentDescription = "Emotes", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                OutlinedTextField(
+                    value = draft,
+                    // No longer than the server lets a message be (see ChatDraft).
+                    onValueChange = { draft = it.withinChatLimit(draft) },
+                    placeholder = {
+                        Text(placeholderText, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    },
+                    enabled = canSend,
+                    // Grows with the draft instead of staying pinned to one line
+                    // and scrolling the typed text sideways out of view — capped
+                    // so a genuinely long paste can't take over the screen; still
+                    // scrolls internally past that, same as any other multi-line
+                    // field. imeAction = Send below still shows the ordinary
+                    // "send" key instead of a return/newline glyph and fires
+                    // onSend the same as before, so hitting enter still sends
+                    // rather than adding a line — this only changes what happens
+                    // while there's more text than fits on one line.
+                    maxLines = 5,
+                    shape = RoundedCornerShape(24.dp),
+                    trailingIcon = recallButtons,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = {
+                        // Held while the server isn't taking messages; kept typed.
+                        if (!coolingDown) { onSend(draft.text); draft = TextFieldValue(""); recalled = null }
+                    }),
+                    modifier = Modifier.weight(1f).then(fieldModifier)
+                )
+                FilledIconButton(
+                    onClick = { onSend(draft.text); draft = TextFieldValue(""); recalled = null },
+                    enabled = canSend && !coolingDown && draft.text.isNotBlank(),
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                }
             }
         }
     }
@@ -1039,9 +1313,9 @@ fun NekoChatOverlay(
                             )
                         )
                         // Gentle stagger so consecutive comments stream in with pleasant pacing
-                        delay(NEKO_SPAWN_STAGGER_MS)
+                        delay(NEKO_SPAWN_STAGGER_MS.milliseconds)
                     }
-                    is LanePick.Wait -> withTimeoutOrNull(pick.ms) { state.wakeSignal.receive() }
+                    is LanePick.Wait -> withTimeoutOrNull(pick.ms.milliseconds) { state.wakeSignal.receive() }
                 }
             }
         }
@@ -1413,6 +1687,36 @@ private const val CHAT_GROUP_MS = 5 * 60_000L
 /** How far down from the chat's top edge messages fade in. */
 private val CHAT_TOP_FADE = 16.dp
 
+/** Over video: how long chat waits, with nothing new, before it rests; how
+ *  faint it goes; and how slowly. */
+private const val CHAT_REST_AFTER_MS = 15_000L
+private const val CHAT_RESTING_ALPHA = 0.25f
+private const val CHAT_REST_FADE_MS = 1_200
+
+/** Over video: the outline round chat's letters (see textOutline). */
+private val TEXT_OUTLINE_COLOR = Color.Black.copy(alpha = 0.85f)
+private val TEXT_OUTLINE_WIDTH = 1.5.dp
+/** Over video: the bar down a message's outer side, and a PM's or a
+ *  mention's (see ChatRow). */
+private val SENDER_BAR_WIDTH = 2.dp
+private val HIGHLIGHT_BAR_WIDTH = 3.dp
+
+/**
+ * Over video (hybrid chat): a thin dark outline round the letters of the
+ * text laid out as [layout], so white text stays readable over a white
+ * picture. It's the same laid-out text drawn once more, behind, as a
+ * stroke: no layout or layer of its own. Letters given a colour of their own
+ * in a message (a channel's coloured text) keep that colour for theirs.
+ */
+private fun Modifier.textOutline(layout: () -> TextLayoutResult?): Modifier = drawBehind {
+    val laidOut = layout() ?: return@drawBehind
+    drawText(
+        laidOut,
+        color = TEXT_OUTLINE_COLOR,
+        drawStyle = Stroke(width = TEXT_OUTLINE_WIDTH.toPx(), join = StrokeJoin.Round)
+    )
+}
+
 /** [msg] goes under [prev] without a name: same person, same kind
  *  (public, or a PM with the same person), soon after. */
 private fun continuesGroup(prev: ChatMessage?, msg: ChatMessage): Boolean =
@@ -1461,23 +1765,35 @@ private fun ChatRow(
     onEmoteClick: (String) -> Unit,
     usernameClickable: Boolean = true,
     /** True on TV — see the call site's own comment. Forces every spoiler in
-     *  this row to render as plain, already-visible text; [revealedSpoilers]
-     *  below is only ever consulted when this is false. */
+     *  this row to render as plain, already-visible text; the row's own
+     *  `revealedSpoilers` is only ever consulted when this is false. */
     revealSpoilers: Boolean = false,
     mentionRegex: Regex? = null,
     /** Our own name, to tell PMs we sent from ones we received. */
     localName: String? = null,
     /** Tapping a PM's name replies privately to the other person. Null (TV)
      *  leaves PM names like any other. */
-    onPmReply: ((String) -> Unit)? = null
+    onPmReply: ((String) -> Unit)? = null,
+    /** Over video (ChatPanel's overVideo): against the screen's edge, with a
+     *  bar in the sender's colour down it; the name smaller and without the
+     *  time; every letter outlined; and links plain text, as the rest. */
+    overVideo: Boolean = false,
+    /** Over video: that edge is the end (the right, but in a right-to-left
+     *  language), not the start. */
+    overVideoAtEnd: Boolean = true
 ) {
-    val linkColor = MaterialTheme.colorScheme.primary
+    // Plain-text links: no colour, so none of the link look is added to the
+    // parse (see ChatHtml.render), and taps on them are ignored below.
+    val linkColor = if (overVideo) Color.Unspecified else MaterialTheme.colorScheme.primary
+    // Its text's style, set against the screen's edge over video.
+    fun aligned(style: TextStyle) =
+        if (overVideo) style.copy(textAlign = if (overVideoAtEnd) TextAlign.End else TextAlign.Start) else style
     // Which of THIS message's own spoilers (by index — see ChatHtml.SPOILER_TAG)
     // have been tapped open. Saveable, so scrolling a spoiler off-screen and
     // back doesn't hide it again (the chat list keeps saved state per message
     // key while its row is gone; plain remember was dropped with the row).
     var revealedSpoilers by rememberSaveable(msg.seq, stateSaver = SPOILER_SET_SAVER) {
-        mutableStateOf(emptySet<Int>())
+        mutableStateOf(emptySet())
     }
     val rendered = remember(msg.html, msg.addClass, linkColor, showEmotes, emotes, revealSpoilers, revealedSpoilers) {
         ChatHtml.render(
@@ -1492,12 +1808,15 @@ private fun ChatRow(
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
     if (msg.isServerMessage) {
+        var serverLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
         Text(
             rendered.text,
             inlineContent = inline,
-            style = MaterialTheme.typography.bodySmall,
+            style = aligned(MaterialTheme.typography.bodySmall),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            onTextLayout = { if (overVideo) serverLayout = it },
             modifier = modifier.fillMaxWidth().padding(vertical = 2.dp)
+                .then(if (overVideo) Modifier.textOutline { serverLayout } else Modifier)
         )
         return
     }
@@ -1519,25 +1838,52 @@ private fun ChatRow(
         mentionsMe -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
         else -> null
     }
-    val rowModifier = if (highlight != null) {
-        modifier.fillMaxWidth()
+    val rowModifier = when {
+        // Over video: no band behind it. A slim bar in the sender's colour
+        // down its outer edge instead, which the text lines up against; a
+        // PM's or a mention's wider, in its own colour.
+        overVideo -> {
+            val barColor = when {
+                msg.isPm -> MaterialTheme.colorScheme.tertiary
+                mentionsMe -> MaterialTheme.colorScheme.primary
+                else -> nameColor
+            }
+            val barWidth = if (msg.isPm || mentionsMe) HIGHLIGHT_BAR_WIDTH else SENDER_BAR_WIDTH
+            modifier.fillMaxWidth()
+                .drawBehind {
+                    val w = barWidth.toPx()
+                    // Drawn where it is on screen: the end's the left in a
+                    // right-to-left language.
+                    val onRightEdge = overVideoAtEnd == (layoutDirection == LayoutDirection.Ltr)
+                    val x = if (onRightEdge) size.width - w / 2 else w / 2
+                    drawLine(barColor, start = Offset(x, 0f), end = Offset(x, size.height), strokeWidth = w)
+                }
+                .padding(
+                    start = if (overVideoAtEnd) 0.dp else barWidth + 8.dp,
+                    end = if (overVideoAtEnd) barWidth + 8.dp else 0.dp
+                )
+        }
+        highlight != null -> modifier.fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .background(highlight)
             .padding(horizontal = 8.dp, vertical = 4.dp)
-    } else {
-        modifier.fillMaxWidth()
+        else -> modifier.fillMaxWidth()
     }
 
     // The name and time on a line above the message; the same person's
     // next messages go under it with neither, like Discord.
-    val nameStyle = MaterialTheme.typography.labelLarge
+    val nameStyle = if (overVideo) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge
     val timeStyle = MaterialTheme.typography.labelSmall
     val timeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
     val pmColor = MaterialTheme.colorScheme.tertiary
     val shownName = if (isOutgoingPm) "You → ${msg.to ?: "?"}" else msg.username
-    val header = remember(continuesGroup, shownName, nameColor, msg.timestamp, msg.isPm) {
+    val header = remember(continuesGroup, shownName, nameColor, msg.timestamp, msg.isPm, overVideo) {
         if (continuesGroup) {
             null
+        } else if (overVideo) {
+            // Just the name (and PM, on one), in one colour (headerColor):
+            // a colour inside the text would be its outline's colour too.
+            AnnotatedString(if (msg.isPm) "$shownName  PM" else shownName)
         } else {
             buildAnnotatedString {
                 withStyle(nameStyle.toSpanStyle().copy(color = if (msg.isPm) pmColor else nameColor)) {
@@ -1563,18 +1909,22 @@ private fun ChatRow(
         else onUsernameClick(msg.username)
     }
 
-    Column(rowModifier) {
+    Column(rowModifier, horizontalAlignment = if (overVideo && overVideoAtEnd) Alignment.End else Alignment.Start) {
         if (header != null) {
+            var headerLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
             // Only the name line is clickable, not the row. The padding comes
             // after clickable so it grows the tap target: short names were
             // easy to miss otherwise.
             Text(
                 header,
-                style = MaterialTheme.typography.bodyMedium,
+                style = if (overVideo) aligned(nameStyle) else MaterialTheme.typography.bodyMedium,
+                color = if (!overVideo) Color.Unspecified else if (msg.isPm) pmColor else nameColor,
+                onTextLayout = { if (overVideo) headerLayout = it },
                 modifier = Modifier
                     .then(if (usernameClickable) Modifier.clickable(onClick = onNameClick) else Modifier)
                     // Vertical only, so the name lines up with the message.
-                    .padding(vertical = 4.dp)
+                    .padding(vertical = if (overVideo) 1.dp else 4.dp)
+                    .then(if (overVideo) Modifier.textOutline { headerLayout } else Modifier)
             )
         }
         // ClickableText cannot take inlineContent, and inline emotes are not
@@ -1586,51 +1936,53 @@ private fun ChatRow(
             // are still matched against [text], whose places are the same.
             text = animatedChatText(text, rendered.textFx, animateText),
             inlineContent = inline,
-            style = MaterialTheme.typography.bodyMedium,
+            style = aligned(MaterialTheme.typography.bodyMedium),
             onTextLayout = { layout = it },
-            modifier = Modifier.pointerInput(text, usernameClickable) {
-                // Emotes render small (28sp inline, still only 56sp even for
-                // a solo emote), and getOffsetForPosition only ever resolves
-                // to the exact character the finger landed on — a tap a few
-                // px off the actual glyph missed the emote's own char index
-                // entirely and fell through as "no emote", which is exactly
-                // the "requires excessive precision" complaint. This adds a
-                // forgiving margin around each emote's own rendered box
-                // before giving up on it, the same way a real touch target
-                // is bigger than its visible icon.
-                val tolerancePx = 10.dp.toPx()
-                detectTapGestures { pos ->
-                    val l = layout ?: return@detectTapGestures
-                    val offset = l.getOffsetForPosition(pos)
-                    // Emotes and links never overlap, but check emotes first
-                    // since that's the more specific hit.
-                    val emote = ChatHtml.emoteAt(text, offset) ?: run {
-                        val spans = text.getStringAnnotations(
-                            ChatHtml.EMOTE_TAG, 0, text.length
-                        )
-                        spans.firstOrNull { span ->
-                            val box = l.getBoundingBox(span.start)
-                            pos.x in (box.left - tolerancePx)..(box.right + tolerancePx) &&
-                                pos.y in (box.top - tolerancePx)..(box.bottom + tolerancePx)
-                        }?.item
-                    }
-                    // A tap on a hidden spoiler only ever reveals it (the
-                    // links and emotes inside aren't drawn as such until
-                    // then — see ChatHtml.spoiler). Once revealed, a link or
-                    // emote in it works like anywhere else, and a tap on its
-                    // plain text hides it again. Skipped outright when
-                    // revealSpoilers is on (TV): nothing is hidden there.
-                    val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(text, offset) else null
-                    val link = ChatHtml.linkAt(text, offset)
-                    when {
-                        spoilerIndex != null && spoilerIndex !in revealedSpoilers ->
-                            revealedSpoilers = revealedSpoilers + spoilerIndex
-                        emote != null -> onEmoteClick(emote)
-                        link != null -> onLinkClick(link)
-                        spoilerIndex != null -> revealedSpoilers = revealedSpoilers - spoilerIndex
+            modifier = Modifier
+                .then(if (overVideo) Modifier.textOutline { layout } else Modifier)
+                .pointerInput(text, usernameClickable) {
+                    // Emotes render small (28sp inline, still only 56sp even for
+                    // a solo emote), and getOffsetForPosition only ever resolves
+                    // to the exact character the finger landed on — a tap a few
+                    // px off the actual glyph missed the emote's own char index
+                    // entirely and fell through as "no emote", which is exactly
+                    // the "requires excessive precision" complaint. This adds a
+                    // forgiving margin around each emote's own rendered box
+                    // before giving up on it, the same way a real touch target
+                    // is bigger than its visible icon.
+                    val tolerancePx = 10.dp.toPx()
+                    detectTapGestures { pos ->
+                        val l = layout ?: return@detectTapGestures
+                        val offset = l.getOffsetForPosition(pos)
+                        // Emotes and links never overlap, but check emotes first
+                        // since that's the more specific hit.
+                        val emote = ChatHtml.emoteAt(text, offset) ?: run {
+                            val spans = text.getStringAnnotations(
+                                ChatHtml.EMOTE_TAG, 0, text.length
+                            )
+                            spans.firstOrNull { span ->
+                                val box = l.getBoundingBox(span.start)
+                                pos.x in (box.left - tolerancePx)..(box.right + tolerancePx) &&
+                                    pos.y in (box.top - tolerancePx)..(box.bottom + tolerancePx)
+                            }?.item
+                        }
+                        // A tap on a hidden spoiler only ever reveals it (the
+                        // links and emotes inside aren't drawn as such until
+                        // then — see ChatHtml.spoiler). Once revealed, a link or
+                        // emote in it works like anywhere else, and a tap on its
+                        // plain text hides it again. Skipped outright when
+                        // revealSpoilers is on (TV): nothing is hidden there.
+                        val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(text, offset) else null
+                        val link = if (overVideo) null else ChatHtml.linkAt(text, offset)
+                        when {
+                            spoilerIndex != null && spoilerIndex !in revealedSpoilers ->
+                                revealedSpoilers = revealedSpoilers + spoilerIndex
+                            emote != null -> onEmoteClick(emote)
+                            link != null -> onLinkClick(link)
+                            spoilerIndex != null -> revealedSpoilers = revealedSpoilers - spoilerIndex
+                        }
                     }
                 }
-            }
         )
     }
 }
@@ -2084,7 +2436,7 @@ fun UsersPanel(
     /** Ignore that user, or stop ignoring them; null hides the option. */
     onToggleIgnore: ((String) -> Unit)? = null,
     /** The channel's own name colours, from its CSS (see ChannelStyle). */
-    nameColors: com.cytube.mobile.net.NameColors = com.cytube.mobile.net.NameColors.NONE
+    nameColors: NameColors = NameColors.NONE
 ) {
     if (users.isEmpty()) {
         EmptyPanel("No users listed.", modifier)

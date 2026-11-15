@@ -15,6 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration.Companion.milliseconds
 
 class SharedLookupsTest {
 
@@ -24,7 +25,7 @@ class SharedLookupsTest {
     fun tearDown() = scope.cancel()
 
     /** Until [condition] holds, giving the callers started meanwhile their turn. */
-    private suspend fun until(condition: () -> Boolean) = withTimeout(5_000) {
+    private suspend fun until(condition: () -> Boolean) = withTimeout(5_000.milliseconds) {
         while (!condition()) yield()
     }
 

@@ -123,8 +123,7 @@ object ChannelHeader {
                 val before = text.substring((m.range.first - SCRIPT_CONTEXT_CHARS).coerceAtLeast(0), m.range.first)
                 BACKGROUND_WORD.containsMatchIn(before)
             }
-            .mapNotNull { m -> webAddress(m.value)?.takeIf { !NOT_PICTURES.containsMatchIn(it.substringBefore('?')) } }
-            .firstOrNull()
+            .firstNotNullOfOrNull { m -> webAddress(m.value)?.takeIf { !NOT_PICTURES.containsMatchIn(it.substringBefore('?')) } }
     }
 
     /** A background set on one of the notice's own elements

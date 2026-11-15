@@ -10,16 +10,16 @@ import org.junit.Test
 class NicoSettingsTest {
 
     @Test fun textOnlyIsOffUnlessTurnedOn() {
-        assertFalse(nicoTextOnlyOf(null, null))
-        assertFalse(nicoTextOnlyOf(false, false))
-        assertTrue(nicoTextOnlyOf(true, null))
-        assertTrue(nicoTextOnlyOf(true, false))
+        assertFalse(nicoTextOnlyOf(textOnly = null, emotesOnly = null))
+        assertFalse(nicoTextOnlyOf(textOnly = false, emotesOnly = false))
+        assertTrue(nicoTextOnlyOf(textOnly = true, emotesOnly = null))
+        assertTrue(nicoTextOnlyOf(textOnly = true, emotesOnly = false))
     }
 
     // Turning either on turns the other off (SettingsStore); should both
     // still be saved on, emotes only wins, as CyTube Plus checks it first.
     @Test fun neverTogetherWithEmotesOnly() {
-        assertFalse(nicoTextOnlyOf(true, true))
+        assertFalse(nicoTextOnlyOf(textOnly = true, emotesOnly = true))
     }
 
     @Test fun opacityIsSolidUntilChanged() {
