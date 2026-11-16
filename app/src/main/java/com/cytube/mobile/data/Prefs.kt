@@ -111,12 +111,16 @@ data class Settings(
     /** How solid hybrid chat's messages are over the fullscreen video (see
      *  HybridChatLayer): 0.2 to 1 (solid, the default). Phone only. */
     val hybridChatOpacity: Float = 1f,
-    /** Hybrid chat down the right side of the fullscreen video (the
-     *  default), rather than the left. Phone only. */
-    val hybridChatRight: Boolean = true,
-    /** Hybrid chat's messages fading right back once nothing new's come in
-     *  for a while (see ChatPanel's overVideo). Off by default. Phone only. */
-    val hybridChatDims: Boolean = false
+    /** Hybrid chat down the right side of the fullscreen video, rather
+     *  than the left (the default, as in CyTube Plus). Phone only. */
+    val hybridChatRight: Boolean = false,
+    /** Fade old messages: each of hybrid chat's messages fading back once
+     *  it's 15 seconds old, scrolling the chat bringing them back (see
+     *  ChatPanel's overVideo). Off by default. Phone only. */
+    val hybridChatDims: Boolean = false,
+    /** How big hybrid chat's messages are, emotes and all: 0.8 to 2 (1, the
+     *  usual size, by default). Phone only. */
+    val hybridChatTextSize: Float = 1f
 )
 
 /** Lights down's darkness as it always was, until changed in Settings. */
@@ -127,6 +131,8 @@ val LIGHTS_DOWN_DIM_RANGE = 0.5f..1f
 val NICO_EMOTE_OPACITY_RANGE = 0.1f..1f
 /** 20% to 100%: fainter, and the letters are hard to make out. */
 val HYBRID_CHAT_OPACITY_RANGE = 0.2f..1f
+/** 80% to 200%, as CyTube Plus offers it. */
+val HYBRID_CHAT_TEXT_SIZE_RANGE = 0.8f..2f
 
 /** Whether Developer mode's been found, from what's saved: or, from before there
  *  was a Developer mode, the purple guy on (so his switch is there to turn him
@@ -143,6 +149,12 @@ internal fun nicoTextOnlyOf(textOnly: Boolean?, emotesOnly: Boolean?): Boolean =
 internal fun hybridChatOpacityOf(value: Float?): Float {
     val v = value?.takeIf { !it.isNaN() } ?: 1f
     return ((v.coerceIn(HYBRID_CHAT_OPACITY_RANGE) * 20f).roundToInt() / 20f).coerceIn(HYBRID_CHAT_OPACITY_RANGE)
+}
+
+/** Hybrid chat's text size as kept: within range, on the slider's 10% steps. */
+internal fun hybridChatTextSizeOf(value: Float?): Float {
+    val v = value?.takeIf { !it.isNaN() } ?: 1f
+    return ((v.coerceIn(HYBRID_CHAT_TEXT_SIZE_RANGE) * 10f).roundToInt() / 10f).coerceIn(HYBRID_CHAT_TEXT_SIZE_RANGE)
 }
 
 /** The Niconico overlay's emote opacity as kept: within range, on the
@@ -205,8 +217,9 @@ class SettingsStore(private val context: Context) {
             lightsDownDim = (p[LIGHTS_DOWN_DIM] ?: DEFAULT_LIGHTS_DOWN_DIM).coerceIn(LIGHTS_DOWN_DIM_RANGE),
             messageRecall = p[MESSAGE_RECALL] ?: true,
             hybridChatOpacity = hybridChatOpacityOf(p[HYBRID_CHAT_OPACITY]),
-            hybridChatRight = p[HYBRID_CHAT_RIGHT] ?: true,
-            hybridChatDims = p[HYBRID_CHAT_DIMS] ?: false
+            hybridChatRight = p[HYBRID_CHAT_RIGHT] ?: false,
+            hybridChatDims = p[HYBRID_CHAT_DIMS] ?: false,
+            hybridChatTextSize = hybridChatTextSizeOf(p[HYBRID_CHAT_TEXT_SIZE])
         )
     }.distinctUntilChanged()
 
@@ -252,6 +265,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setHybridChatOpacity(v: Float) = save { it[HYBRID_CHAT_OPACITY] = hybridChatOpacityOf(v) }
     suspend fun setHybridChatRight(v: Boolean) = save { it[HYBRID_CHAT_RIGHT] = v }
     suspend fun setHybridChatDims(v: Boolean) = save { it[HYBRID_CHAT_DIMS] = v }
+    suspend fun setHybridChatTextSize(v: Float) = save { it[HYBRID_CHAT_TEXT_SIZE] = hybridChatTextSizeOf(v) }
 
     // ---- per-channel state ----
 
@@ -333,6 +347,7 @@ class SettingsStore(private val context: Context) {
         val HYBRID_CHAT_OPACITY = floatPreferencesKey("hybrid_chat_opacity")
         val HYBRID_CHAT_RIGHT = booleanPreferencesKey("hybrid_chat_right")
         val HYBRID_CHAT_DIMS = booleanPreferencesKey("hybrid_chat_dims")
+        val HYBRID_CHAT_TEXT_SIZE = floatPreferencesKey("hybrid_chat_text_size")
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")

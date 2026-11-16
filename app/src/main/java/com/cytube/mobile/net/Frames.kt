@@ -293,7 +293,11 @@ data class ChatMessage(
     val to: String? = null,
     /** Assigned by the ViewModel; a stable LazyColumn key so chat rows are not
         rebuilt every time the buffer trims from the front. */
-    val seq: Long = 0L
+    val seq: Long = 0L,
+    /** When it came in (SystemClock.elapsedRealtime), also assigned by the
+     *  ViewModel as it's added to chat: how old it is, for hybrid chat's
+     *  Fade old messages. 0 for one never added. */
+    val receivedAt: Long = 0L
 ) {
     val isServerMessage: Boolean get() = username.isBlank() || username == "[server]"
 

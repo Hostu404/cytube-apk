@@ -3,6 +3,7 @@ package com.cytube.mobile.ui.channel
 import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
+import android.view.KeyEvent as AndroidKeyEvent
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
@@ -69,11 +70,8 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.key.*
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextLayoutResult
@@ -107,6 +105,7 @@ import kotlinx.collections.immutable.ImmutableSet
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentSetOf
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withTimeoutOrNull
@@ -359,8 +358,13 @@ fun ChatPanel(
      *    clear of the messages, there with the fullscreen controls
      *    ([showBox]) and while it's in use, sending putting it away with the
      *    keyboard;
-     *  - with [dimWhenQuiet], the messages resting, faded right back, while
-     *    nothing's been said for a while (see the over-video branch below);
+     *  - with [fadeOldMessages], each message fading back 15 seconds after
+     *    it came in, scrolling the chat bringing them all back (see fades,
+     *    below);
+     *  - the messages [overVideoTextScale] times their usual size;
+     *  - a physical keyboard's typing going into the box when nothing's
+     *    being typed in, and the box put away, keyboard and all, when it's
+     *    in use but empty and untouched for a while;
      *  - nothing fading at the top of the list, there being no one colour
      *    behind it to fade into. */
     overVideo: Boolean = false,
@@ -373,12 +377,14 @@ fun ChatPanel(
     /** Over video: how solid the messages are (Settings.hybridChatOpacity),
      *  resting or not. */
     overVideoOpacity: Float = 1f,
-    /** Over video: the messages down the right side of the screen (the
-     *  default), rather than the left (Settings.hybridChatRight). */
-    overVideoOnRight: Boolean = true,
-    /** Over video: the messages fade right back while it's quiet
-     *  (Settings.hybridChatDims). */
-    dimWhenQuiet: Boolean = false,
+    /** Over video: the messages down the right side of the screen, rather
+     *  than the left (the default; Settings.hybridChatRight). */
+    overVideoOnRight: Boolean = false,
+    /** Over video: Fade old messages (Settings.hybridChatDims). */
+    fadeOldMessages: Boolean = false,
+    /** Over video: how big the messages are, emotes and all
+     *  (Settings.hybridChatTextSize); 1 is their usual size. */
+    overVideoTextScale: Float = 1f,
     /** Coming up with a PM already started ([pmTarget] set) puts the cursor
      *  in the box, keyboard up, as starting one here does. False leaves the
      *  keyboard down that once (hybrid chat coming up over the video). */
@@ -583,6 +589,39 @@ fun ChatPanel(
     // Over video, the side the messages are down: the end (the right, but
     // in a right-to-left language), or the start.
     val overVideoAtEnd = overVideoOnRight == (LocalLayoutDirection.current == LayoutDirection.Ltr)
+    // Over video, with Fade old messages (Settings): each message fades back
+    // once it's HYBRID_FADE_AFTER_MS old, by when it came in (so with chat
+    // coming up, the older ones are faded already), and what's new stands
+    // out. Scrolling the chat brings them all back up, to read, until
+    // HYBRID_AWAKE_MS after it stops; nothing else does (a tap, the
+    // controls, typing). The clock they're judged by moves on only as the
+    // next one's time comes up: one wait, no ticking. Without the setting,
+    // none of this runs.
+    val fades = overVideo && fadeOldMessages
+    val fadeClock = remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var scrolledAwake by remember { mutableStateOf(false) }
+    if (fades) {
+        LaunchedEffect(messages.lastOrNull()?.seq) {
+            while (true) {
+                val now = SystemClock.elapsedRealtime()
+                fadeClock.longValue = now
+                val due = nextFadeDue(messages, now) ?: break
+                delay((due - now).milliseconds)
+            }
+        }
+        // Scrolling by hand: the list's own following of new messages jumps
+        // there at once, never "in progress".
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress }.collectLatest { scrolling ->
+                if (scrolling) {
+                    scrolledAwake = true
+                } else if (scrolledAwake) {
+                    delay(HYBRID_AWAKE_MS.milliseconds)
+                    scrolledAwake = false
+                }
+            }
+        }
+    }
     // The messages, and the jump down to the latest: under the box as usual,
     // or, over video, down their side by themselves.
     val messageList: @Composable (Modifier) -> Unit = { listModifier ->
@@ -663,6 +702,9 @@ fun ChatPanel(
                 val nameColor = remember(msg.username, rank, nameColors, listBackground) {
                     chatNameColor(msg.username, rank, nameColors, listBackground)
                 }
+                // Fade old messages: faded back on its own layer, each thing
+                // in it drawn faded, as the list's opacity is (below).
+                val ageAlpha = if (fades) rememberAgeAlpha(msg, fadeClock, scrolledAwake) else null
                 ChatRow(
                     msg = msg,
                     nameColor = nameColor,
@@ -673,6 +715,15 @@ fun ChatPanel(
                             index == 0 -> 0.dp
                             continues -> if (overVideo) 0.dp else 2.dp
                             else -> if (overVideo) 6.dp else 8.dp
+                        }
+                    ).then(
+                        if (ageAlpha == null) {
+                            Modifier
+                        } else {
+                            Modifier.graphicsLayer {
+                                alpha = ageAlpha.value
+                                compositingStrategy = CompositingStrategy.ModulateAlpha
+                            }
                         }
                     ),
                     showEmotes = showEmotes,
@@ -815,67 +866,65 @@ fun ChatPanel(
 
     if (overVideo) {
         val tapOutside by rememberUpdatedState(onTapOutside)
-        // With dimWhenQuiet (Settings), the messages rest when it's quiet:
-        // after a while with nothing new, and nothing being done with them,
-        // they fade right back, leaving the picture. A new message, a touch
-        // on them, the controls coming up or the box being typed in bring
-        // them straight back. One fade, on the list's own layer, and only
-        // then. Without it none of this runs, and they just stay.
-        var awake by remember { mutableStateOf(true) }
-        var touches by remember { mutableIntStateOf(0) }
-        if (dimWhenQuiet) {
-            LaunchedEffect(messages.lastOrNull()?.seq, touches, showBox, inputFocused, listState.isScrollInProgress) {
-                awake = true
-                if (showBox || inputFocused || listState.isScrollInProgress) return@LaunchedEffect
-                delay(CHAT_REST_AFTER_MS.milliseconds)
-                awake = false
-            }
+        // The box in use but empty, and untouched for a while (tapped into,
+        // or a PM started, and nothing typed): it's put away, keyboard and
+        // all, as a tap beside it would. Anything typed, or the cursor
+        // moved, starts the wait again; something typed and not sent keeps
+        // it, as the emote sheet being up does.
+        LaunchedEffect(inputFocused, draft, showEmotePicker) {
+            if (!inputFocused || draft.text.isNotEmpty() || showEmotePicker) return@LaunchedEffect
+            delay(HYBRID_BOX_IDLE_MS.milliseconds)
+            focusManager.clearFocus()
         }
-        val lit = awake || !dimWhenQuiet
-        val restAlpha = animateFloatAsState(
-            targetValue = if (lit) 1f else CHAT_RESTING_ALPHA,
-            animationSpec = tween(if (lit) HYBRID_FADE_IN_MS else CHAT_REST_FADE_MS),
-            label = "chatRest"
-        )
+        // A physical keyboard, with nothing being typed in: a key that types
+        // something puts it in the box, and the box in use, so the rest
+        // follows it there; Enter just puts the box in use. Not a shortcut,
+        // nor Space.
+        UnhandledKeys { event ->
+            if (event.action != AndroidKeyEvent.ACTION_DOWN || !canSend || inputFocused) return@UnhandledKeys false
+            if (event.keyCode == AndroidKeyEvent.KEYCODE_ENTER || event.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER) {
+                if (!event.hasNoModifiers()) return@UnhandledKeys false
+            } else {
+                val typed = typedText(event.getUnicodeChar(event.metaState), event.isCtrlPressed || event.isMetaPressed)
+                    ?: return@UnhandledKeys false
+                draft = draft.typedIn(typed).withinChatLimit(draft)
+            }
+            runCatching { inputFocus.requestFocus() }
+            true
+        }
+        // The messages' text size (Settings), emotes and all: they're sized
+        // in sp, so going by the font scale here.
+        val density = LocalDensity.current
+        val chatDensity = remember(density, overVideoTextScale) {
+            if (overVideoTextScale == 1f) density else Density(density.density, density.fontScale * overVideoTextScale)
+        }
         Box(modifier.fillMaxSize()) {
-            messageList(
-                // Its whole side, top to bottom (above the keyboard while
-                // it's up): the box (below) never reaches it.
-                Modifier.align(if (overVideoAtEnd) Alignment.BottomEnd else Alignment.BottomStart)
-                    .fillMaxHeight()
-                    .hybridChatWidth()
-                    .imePadding()
-                    .padding(vertical = 8.dp)
-                    // Any touch on the messages wakes them: watched on its
-                    // way past, not taken. Only while they can rest.
-                    .then(
-                        if (!dimWhenQuiet) {
-                            Modifier
-                        } else {
-                            Modifier.pointerInput(Unit) {
-                                awaitEachGesture {
-                                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-                                    touches++
-                                }
+            CompositionLocalProvider(LocalDensity provides chatDensity) {
+                messageList(
+                    // Its whole side, top to bottom (above the keyboard while
+                    // it's up): the box (below) never reaches it.
+                    Modifier.align(if (overVideoAtEnd) Alignment.BottomEnd else Alignment.BottomStart)
+                        .fillMaxHeight()
+                        .hybridChatWidth()
+                        .imePadding()
+                        .padding(vertical = 8.dp)
+                        // A tap between or round messages (not on one) is a tap
+                        // on the video: the keyboard goes, and the controls come
+                        // up or go, as they would anywhere else on it.
+                        .pointerInput(Unit) {
+                            detectTapGestures {
+                                focusManager.clearFocus()
+                                tapOutside()
                             }
                         }
-                    )
-                    // A tap between or round messages (not on one) is a tap
-                    // on the video: the keyboard goes, and the controls come
-                    // up or go, as they would anywhere else on it.
-                    .pointerInput(Unit) {
-                        detectTapGestures {
-                            focusManager.clearFocus()
-                            tapOutside()
+                        // Each thing drawn faded on its own, rather than the list
+                        // drawn whole into a buffer of its own first.
+                        .graphicsLayer {
+                            alpha = overVideoOpacity
+                            compositingStrategy = CompositingStrategy.ModulateAlpha
                         }
-                    }
-                    // Each thing drawn faded on its own, rather than the list
-                    // drawn whole into a buffer of its own first.
-                    .graphicsLayer {
-                        alpha = restAlpha.value * overVideoOpacity
-                        compositingStrategy = CompositingStrategy.ModulateAlpha
-                    }
-            )
+                )
+            }
             // Over video: one see-through pill with everything in it (emotes,
             // the text, recall, send), in the middle of the bottom edge,
             // rather than an outlined field and a filled button sitting heavy
@@ -1071,7 +1120,7 @@ fun ChatPanel(
  * here, since CyTube usernames can contain them and \b would treat "bob"
  * as mentioned in "bob-bot".
  */
-private fun buildMentionRegex(name: String): Regex =
+internal fun buildMentionRegex(name: String): Regex =
     Regex("(?<![\\w-])" + Regex.escape(name) + "(?![\\w-])", RegexOption.IGNORE_CASE)
 
 /**
@@ -1687,12 +1736,6 @@ private const val CHAT_GROUP_MS = 5 * 60_000L
 /** How far down from the chat's top edge messages fade in. */
 private val CHAT_TOP_FADE = 16.dp
 
-/** Over video: how long chat waits, with nothing new, before it rests; how
- *  faint it goes; and how slowly. */
-private const val CHAT_REST_AFTER_MS = 15_000L
-private const val CHAT_RESTING_ALPHA = 0.25f
-private const val CHAT_REST_FADE_MS = 1_200
-
 /** Over video: the outline round chat's letters (see textOutline). */
 private val TEXT_OUTLINE_COLOR = Color.Black.copy(alpha = 0.85f)
 private val TEXT_OUTLINE_WIDTH = 1.5.dp
@@ -1849,12 +1892,25 @@ private fun ChatRow(
                 else -> nameColor
             }
             val barWidth = if (msg.isPm || mentionsMe) HIGHLIGHT_BAR_WIDTH else SENDER_BAR_WIDTH
+            // A mention also has a blue wash from that edge, glowing brighter
+            // for a moment as it comes in.
+            val glow = if (mentionsMe) rememberMentionGlow(msg) else null
             modifier.fillMaxWidth()
                 .drawBehind {
                     val w = barWidth.toPx()
                     // Drawn where it is on screen: the end's the left in a
                     // right-to-left language.
                     val onRightEdge = overVideoAtEnd == (layoutDirection == LayoutDirection.Ltr)
+                    if (glow != null) {
+                        val wash = MENTION_WASH.copy(alpha = MENTION_WASH_ALPHA + MENTION_GLOW_ALPHA * glow.value)
+                        drawRect(
+                            if (onRightEdge) {
+                                Brush.horizontalGradient(0.1f to Color.Transparent, 1f to wash)
+                            } else {
+                                Brush.horizontalGradient(0f to wash, 0.9f to Color.Transparent)
+                            }
+                        )
+                    }
                     val x = if (onRightEdge) size.width - w / 2 else w / 2
                     drawLine(barColor, start = Offset(x, 0f), end = Offset(x, size.height), strokeWidth = w)
                 }

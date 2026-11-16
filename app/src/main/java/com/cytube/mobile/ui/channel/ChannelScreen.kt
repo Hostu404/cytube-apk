@@ -911,7 +911,8 @@ fun ChannelScreen(
                             overVideo = true,
                             overVideoOpacity = state.hybridChatOpacity,
                             overVideoOnRight = state.hybridChatRight,
-                            dimWhenQuiet = state.hybridChatDims,
+                            fadeOldMessages = state.hybridChatDims,
+                            overVideoTextScale = state.hybridChatTextSize,
                             // Beside the messages is the video: a tap there
                             // brings its controls up or down, and the message
                             // box comes and goes with them.
@@ -929,7 +930,8 @@ fun ChannelScreen(
                 vm.markPmsRead()
             },
             onPmsSeen = { vm.markPmsRead() },
-            hybridChatOnRight = state.hybridChatRight
+            hybridChatOnRight = state.hybridChatRight,
+            localName = state.localUser
         )
         return
     }
@@ -3087,9 +3089,12 @@ private fun FullscreenPlayer(
     onReplyPmHere: () -> Unit = {},
     /** Hybrid chat is showing, so PMs are seen as they land. */
     onPmsSeen: () -> Unit = {},
-    /** Hybrid chat's down the right side of the screen (the default),
-     *  rather than the left (Settings.hybridChatRight). */
-    hybridChatOnRight: Boolean = true
+    /** Hybrid chat's down the right side of the screen, rather than the
+     *  left (the default; Settings.hybridChatRight). */
+    hybridChatOnRight: Boolean = false,
+    /** Our own name, for hybrid chat's Show chat: whether someone's
+     *  mentioned us meanwhile. */
+    localName: String? = null
 ) {
     // Hybrid chat put away ("Hide chat", or Back) for this fullscreen visit;
     // and the last message there was then, for the Show chat pill's count.
@@ -3221,6 +3226,7 @@ private fun FullscreenPlayer(
                         showing = hybridShowing,
                         messages = messages,
                         since = hiddenAfterSeq,
+                        localName = localName,
                         onClick = {
                             if (hybridShowing) {
                                 hideHybrid()

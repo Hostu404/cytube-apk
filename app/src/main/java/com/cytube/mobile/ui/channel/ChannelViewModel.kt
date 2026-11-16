@@ -224,9 +224,11 @@ data class ChannelUiState(
     /** See Settings.hybridChatOpacity. */
     val hybridChatOpacity: Float = 1f,
     /** See Settings.hybridChatRight. */
-    val hybridChatRight: Boolean = true,
+    val hybridChatRight: Boolean = false,
     /** See Settings.hybridChatDims. */
     val hybridChatDims: Boolean = false,
+    /** See Settings.hybridChatTextSize. */
+    val hybridChatTextSize: Float = 1f,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
      *  media switch never silently unmutes. */
@@ -650,6 +652,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 hybridChatOpacity = settings.hybridChatOpacity,
                 hybridChatRight = settings.hybridChatRight,
                 hybridChatDims = settings.hybridChatDims,
+                hybridChatTextSize = settings.hybridChatTextSize,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
@@ -686,6 +689,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             it.hybridChatOpacity == s.hybridChatOpacity &&
                             it.hybridChatRight == s.hybridChatRight &&
                             it.hybridChatDims == s.hybridChatDims &&
+                            it.hybridChatTextSize == s.hybridChatTextSize &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
@@ -702,6 +706,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             hybridChatOpacity = it.hybridChatOpacity,
                             hybridChatRight = it.hybridChatRight,
                             hybridChatDims = it.hybridChatDims,
+                            hybridChatTextSize = it.hybridChatTextSize,
                             syncEnabled = it.syncEnabled
                         )
                     }
@@ -2615,7 +2620,9 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun appendChat(current: PersistentList<ChatMessage>, messages: List<ChatMessage>): PersistentList<ChatMessage> {
         if (messages.isEmpty()) return current
-        val tagged = messages.map { it.copy(seq = ++chatSeq) }
+        // When each came in, for hybrid chat's Fade old messages.
+        val now = SystemClock.elapsedRealtime()
+        val tagged = messages.map { it.copy(seq = ++chatSeq, receivedAt = now) }
         val all = current.addingAll(tagged)
         val drop = all.size - MAX_CHAT_MESSAGES
         return if (drop <= 0) all else all.subList(drop, all.size).toPersistentList()

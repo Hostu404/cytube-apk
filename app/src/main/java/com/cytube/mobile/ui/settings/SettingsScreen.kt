@@ -42,6 +42,7 @@ import com.cytube.mobile.ui.theme.maPageColor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.cytube.mobile.data.HYBRID_CHAT_OPACITY_RANGE
+import com.cytube.mobile.data.HYBRID_CHAT_TEXT_SIZE_RANGE
 import com.cytube.mobile.data.LIGHTS_DOWN_DIM_RANGE
 import com.cytube.mobile.data.NICO_EMOTE_OPACITY_RANGE
 import com.cytube.mobile.data.NICO_SPEED_RANGE
@@ -228,9 +229,18 @@ fun SettingsScreen(
                     range = HYBRID_CHAT_OPACITY_RANGE,
                     steps = 15                                     // 20%, 25% … 100%
                 ) { scope.launch { store.setHybridChatOpacity(it) } }
+                SliderRow(
+                    label = {
+                        val percent = (it * 100).roundToInt()
+                        if (percent == 100) "Hybrid chat text size: Normal" else "Hybrid chat text size: $percent%"
+                    },
+                    value = settings.hybridChatTextSize,
+                    range = HYBRID_CHAT_TEXT_SIZE_RANGE,
+                    steps = 11                                     // 80%, 90% … 200%
+                ) { scope.launch { store.setHybridChatTextSize(it) } }
                 SwitchRow(
-                    title = "Dim hybrid chat when quiet",
-                    subtitle = "Fades it back after 15 seconds without a new message.",
+                    title = "Fade old messages",
+                    subtitle = "Hybrid chat: each message fades 15 seconds after it comes in. Scroll the chat to bring them back.",
                     checked = settings.hybridChatDims
                 ) { scope.launch { store.setHybridChatDims(it) } }
             }
