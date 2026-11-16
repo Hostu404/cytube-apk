@@ -66,6 +66,36 @@ class HybridChatAlertsTest {
         assertTrue(isOld(message(1, receivedAt = 0L), now = 5_000L))
     }
 
+    // The channel's recent chat, come with the join: old already, faded at
+    // once as in CyTube Plus, but for what was only just posted. The rest:
+    // from when it came in, whatever its time.
+    @Test fun joiningsChatIsOldAlready() {
+        val now = 500_000L
+        val wall = 1_700_000_000_000L
+        fun joins(posted: Long) = arrivedAt(posted, fromJoin = true, now = now, wallNow = wall)
+        assertEquals(0L, joins(wall - 10_000L))          // 10 s before
+        assertEquals(0L, joins(wall - 3_600_000L))       // an hour before
+        assertEquals(now, joins(wall - 2_000L))          // only just posted
+        assertEquals(now, joins(wall + 2_000L))          // the clocks a little apart
+        assertEquals(0L, joins(wall + 60_000L))          // far apart: old, all of it
+        assertEquals(now, arrivedAt(wall - 3_600_000L, fromJoin = false, now = now, wallNow = wall))
+        assertTrue(isOld(message(1, receivedAt = joins(wall - 10_000L)), now))
+    }
+
+    // The join's chat: what comes in the first JOIN_CHAT_MS of chat after
+    // joining, counted from the first of it however long the join took; and
+    // again after the next join.
+    @Test fun theJoinsChatIsWhatComesFirst() {
+        val join = JoinChat()
+        assertTrue(join.isFromJoin(100_000L))
+        assertTrue(join.isFromJoin(100_000L + JOIN_CHAT_MS))
+        assertFalse(join.isFromJoin(100_001L + JOIN_CHAT_MS))
+        assertFalse(join.isFromJoin(500_000L))
+        join.joined()
+        assertTrue(join.isFromJoin(900_000L))
+        assertFalse(join.isFromJoin(900_001L + JOIN_CHAT_MS))
+    }
+
     @Test fun nextToFadeIsTheOldestStillBright() {
         val chat = listOf(
             message(1, receivedAt = 10_000L),
@@ -78,6 +108,11 @@ class HybridChatAlertsTest {
         assertEquals(75_000L, nextFadeDue(chat, now = 70_000L))
         assertNull(nextFadeDue(chat, now = 75_000L))
         assertNull(nextFadeDue(emptyList(), now = 1L))
+        // A join's, old already, after one still bright (missed while
+        // reconnecting): that one still fades in its time.
+        val rejoined = listOf(message(1, receivedAt = 50_000L), message(2, receivedAt = 0L))
+        assertEquals(65_000L, nextFadeDue(rejoined, now = 60_000L))
+        assertNull(nextFadeDue(rejoined, now = 65_000L))
     }
 
     @Test fun keysThatTypeSomething() {

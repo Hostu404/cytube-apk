@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.ViewCompat
 import com.cytube.mobile.net.ChatMessage
 import kotlinx.collections.immutable.PersistentList
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -366,13 +367,47 @@ internal fun rememberAgeAlpha(msg: ChatMessage, clock: LongState, awake: Boolean
 internal fun isOld(msg: ChatMessage, now: Long): Boolean =
     msg.receivedAt == 0L || msg.receivedAt + HYBRID_FADE_AFTER_MS <= now
 
+/** When a message come in at [now] (SystemClock.elapsedRealtime) counts as
+ *  having come in, for Fade old messages: [now]; but the channel's recent
+ *  chat, which a join brings ([fromJoin]: see JoinChat), is old already (0),
+ *  faded at once as in CyTube Plus, unless its own time ([timestampMs], the
+ *  server's) is within JUST_POSTED_MS of this device's clock ([wallNow]):
+ *  only just posted. With the two clocks far apart, all of it is old. */
+internal fun arrivedAt(timestampMs: Long, fromJoin: Boolean, now: Long, wallNow: Long): Long =
+    if (fromJoin && abs(wallNow - timestampMs) >= JUST_POSTED_MS) 0L else now
+
+/**
+ * Tells the channel's recent chat, which a join brings, from what's said
+ * after it: all the chat that comes in the first JOIN_CHAT_MS of chat after
+ * joining, as CyTube Plus has it. Counted from the first of it to come, not
+ * from joining, so a join slow to bring it changes nothing.
+ */
+internal class JoinChat {
+    private var fromMs = Long.MIN_VALUE
+
+    /** Joining (connected, or a channel's password accepted): the chat that
+     *  comes next is the join's. */
+    fun joined() {
+        fromMs = Long.MIN_VALUE
+    }
+
+    /** Whether chat come in at [now] (SystemClock.elapsedRealtime) is the
+     *  join's. */
+    fun isFromJoin(now: Long): Boolean {
+        if (fromMs == Long.MIN_VALUE) fromMs = now
+        return now - fromMs <= JOIN_CHAT_MS
+    }
+}
+
 /** When the next of [messages] still bright at [now] fades, or null with
  *  none left: the oldest one not yet old, found from the newest back, as
- *  they came in in order. */
+ *  they came in in order; passing over any old from the start (a join's: see
+ *  arrivedAt), which can come after one still bright. */
 internal fun nextFadeDue(messages: List<ChatMessage>, now: Long): Long? {
     var due: Long? = null
     for (i in messages.indices.reversed()) {
         val m = messages[i]
+        if (m.receivedAt == 0L) continue
         if (isOld(m, now)) break
         due = m.receivedAt + HYBRID_FADE_AFTER_MS
     }
@@ -479,6 +514,12 @@ internal const val HYBRID_BOX_IDLE_MS = 6_000L
  *  it stops. */
 internal const val HYBRID_FADE_AFTER_MS = 15_000L
 internal const val HYBRID_AWAKE_MS = 10_000L
+/** The chat that comes in this long from the first of it after joining is
+ *  the join's, the channel's recent chat (see JoinChat); of that, only what
+ *  was posted under JUST_POSTED_MS ago is new (see arrivedAt), as in CyTube
+ *  Plus. */
+internal const val JOIN_CHAT_MS = 3_000L
+private const val JUST_POSTED_MS = 5_000L
 /** How faded back an old message is, and how quickly it fades (slowly) and
  *  comes back (quickly). */
 private const val FADED_ALPHA = 0.35f

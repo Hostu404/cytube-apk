@@ -116,8 +116,8 @@ data class Settings(
     val hybridChatRight: Boolean = false,
     /** Fade old messages: each of hybrid chat's messages fading back once
      *  it's 15 seconds old, scrolling the chat bringing them back (see
-     *  ChatPanel's overVideo). Off by default. */
-    val hybridChatDims: Boolean = false,
+     *  ChatPanel's overVideo). On by default, as in CyTube Plus's look. */
+    val hybridChatDims: Boolean = true,
     /** How big hybrid chat's messages are, emotes and all: 0.8 to 2 (1, the
      *  usual size, by default). */
     val hybridChatTextSize: Float = 1f,
@@ -221,7 +221,7 @@ class SettingsStore(private val context: Context) {
             messageRecall = p[MESSAGE_RECALL] ?: true,
             hybridChatOpacity = hybridChatOpacityOf(p[HYBRID_CHAT_OPACITY]),
             hybridChatRight = p[HYBRID_CHAT_RIGHT] ?: false,
-            hybridChatDims = p[HYBRID_CHAT_DIMS] ?: false,
+            hybridChatDims = p[HYBRID_CHAT_DIMS] ?: true,
             hybridChatTextSize = hybridChatTextSizeOf(p[HYBRID_CHAT_TEXT_SIZE]),
             hybridChatTv = p[HYBRID_CHAT_TV] ?: false
         )

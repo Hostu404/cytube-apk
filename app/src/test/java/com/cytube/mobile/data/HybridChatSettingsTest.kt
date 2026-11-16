@@ -2,18 +2,19 @@ package com.cytube.mobile.data
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Hybrid chat's settings as saved: on the left, solid, the usual text size
- * and not fading until changed; its opacity 20-100% in 5% steps, its text
- * size 80-200% in 10% steps.
+ * and fading old messages until changed; its opacity 20-100% in 5% steps,
+ * its text size 80-200% in 10% steps.
  */
 class HybridChatSettingsTest {
 
-    @Test fun leftSolidNormalSizeAndNotFadingUntilChanged() {
+    @Test fun leftSolidNormalSizeAndFadingUntilChanged() {
         assertFalse(Settings().hybridChatRight)
-        assertFalse(Settings().hybridChatDims)
+        assertTrue(Settings().hybridChatDims)
         assertEquals(1f, Settings().hybridChatOpacity)
         assertEquals(1f, Settings().hybridChatTextSize)
         // On TV, off until turned on in Settings.

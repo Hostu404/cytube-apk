@@ -61,8 +61,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
@@ -91,7 +89,6 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -1750,29 +1747,31 @@ private const val CHAT_GROUP_MS = 5 * 60_000L
 /** How far down from the chat's top edge messages fade in. */
 private val CHAT_TOP_FADE = 16.dp
 
-/** Over video: the outline round chat's letters (see textOutline). */
-private val TEXT_OUTLINE_COLOR = Color.Black.copy(alpha = 0.85f)
-private val TEXT_OUTLINE_WIDTH = 1.5.dp
+/** Over video: the soft dark shadow under chat's letters (see ChatRow), as
+ *  CyTube Plus's: dark and close, a little lower than the letter. */
+private val TEXT_SHADOW_COLOR = Color.Black.copy(alpha = 0.95f)
+private val TEXT_SHADOW_BLUR = 3.dp
+private val TEXT_SHADOW_DROP = 1.dp
 /** Over video: the bar down a message's outer side, and a PM's or a
  *  mention's (see ChatRow). */
 private val SENDER_BAR_WIDTH = 2.dp
 private val HIGHLIGHT_BAR_WIDTH = 3.dp
 
 /**
- * Over video (hybrid chat): a thin dark outline round the letters of the
- * text laid out as [layout], so white text stays readable over a white
- * picture. It's the same laid-out text drawn once more, behind, as a
- * stroke: no layout or layer of its own. Letters given a colour of their own
- * in a message (a channel's coloured text) keep that colour for theirs.
+ * Over video (hybrid chat): what starts a message, "name: ", as on the
+ * website and CyTube Plus, in the sender's colour ([color]); on a PM, "name
+ * (PM): ". Marked ([CHAT_NAME_TAG]) so a tap on it is a tap on the name.
  */
-private fun Modifier.textOutline(layout: () -> TextLayoutResult?): Modifier = drawBehind {
-    val laidOut = layout() ?: return@drawBehind
-    drawText(
-        laidOut,
-        color = TEXT_OUTLINE_COLOR,
-        drawStyle = Stroke(width = TEXT_OUTLINE_WIDTH.toPx(), join = StrokeJoin.Round)
-    )
+internal fun chatNamePrefix(name: String, isPm: Boolean, color: Color): AnnotatedString = buildAnnotatedString {
+    withStyle(SpanStyle(color = color, fontWeight = FontWeight.SemiBold)) {
+        pushStringAnnotation(CHAT_NAME_TAG, name)
+        append(if (isPm) "$name (PM): " else "$name: ")
+        pop()
+    }
 }
+
+/** Marks the name at the start of a message over video (chatNamePrefix). */
+internal const val CHAT_NAME_TAG = "cp-name"
 
 /** [msg] goes under [prev] without a name: same person, same kind
  *  (public, or a PM with the same person), soon after. */
@@ -1831,9 +1830,11 @@ private fun ChatRow(
     /** Tapping a PM's name replies privately to the other person. Null (TV)
      *  leaves PM names like any other. */
     onPmReply: ((String) -> Unit)? = null,
-    /** Over video (ChatPanel's overVideo): against the screen's edge, with a
-     *  bar in the sender's colour down it; the name smaller and without the
-     *  time; every letter outlined; and links plain text, as the rest. */
+    /** Over video (ChatPanel's overVideo), as CyTube Plus has it: against the
+     *  screen's edge, with a bar in the sender's colour down it; the name at
+     *  the start of the message ("name: message", as on the website), without
+     *  the time; a soft dark shadow under every letter; and links plain text,
+     *  as the rest. */
     overVideo: Boolean = false,
     /** Over video: that edge is the end (the right, but in a right-to-left
      *  language), not the start. */
@@ -1842,9 +1843,17 @@ private fun ChatRow(
     // Plain-text links: no colour, so none of the link look is added to the
     // parse (see ChatHtml.render), and taps on them are ignored below.
     val linkColor = if (overVideo) Color.Unspecified else MaterialTheme.colorScheme.primary
-    // Its text's style, set against the screen's edge over video.
+    // Over video, every letter with a soft dark shadow under it (names and a
+    // channel's coloured text too), so it reads over any picture.
+    val density = LocalDensity.current
+    val shadow = remember(density, overVideo) {
+        if (!overVideo) null else with(density) {
+            Shadow(TEXT_SHADOW_COLOR, Offset(0f, TEXT_SHADOW_DROP.toPx()), TEXT_SHADOW_BLUR.toPx())
+        }
+    }
+    // Its text's style, set against the screen's edge, and shadowed, over video.
     fun aligned(style: TextStyle) =
-        if (overVideo) style.copy(textAlign = if (overVideoAtEnd) TextAlign.End else TextAlign.Start) else style
+        if (overVideo) style.copy(textAlign = if (overVideoAtEnd) TextAlign.End else TextAlign.Start, shadow = shadow) else style
     // Which of THIS message's own spoilers (by index — see ChatHtml.SPOILER_TAG)
     // have been tapped open. Saveable, so scrolling a spoiler off-screen and
     // back doesn't hide it again (the chat list keeps saved state per message
@@ -1865,15 +1874,12 @@ private fun ChatRow(
     val inline = inlineEmotes(rendered.imageUrls, emoteHeight, rendered.fx)
 
     if (msg.isServerMessage) {
-        var serverLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
         Text(
             rendered.text,
             inlineContent = inline,
             style = aligned(MaterialTheme.typography.bodySmall),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            onTextLayout = { if (overVideo) serverLayout = it },
             modifier = modifier.fillMaxWidth().padding(vertical = 2.dp)
-                .then(if (overVideo) Modifier.textOutline { serverLayout } else Modifier)
         )
         return
     }
@@ -1941,19 +1947,19 @@ private fun ChatRow(
     }
 
     // The name and time on a line above the message; the same person's
-    // next messages go under it with neither, like Discord.
-    val nameStyle = if (overVideo) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge
+    // next messages go under it with neither, like Discord. Over video, the
+    // name starts the message itself instead (namePrefix).
+    val nameStyle = MaterialTheme.typography.labelLarge
     val timeStyle = MaterialTheme.typography.labelSmall
     val timeColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
     val pmColor = MaterialTheme.colorScheme.tertiary
     val shownName = if (isOutgoingPm) "You → ${msg.to ?: "?"}" else msg.username
+    val namePrefix = remember(continuesGroup, shownName, nameColor, msg.isPm, overVideo, pmColor) {
+        if (overVideo && !continuesGroup) chatNamePrefix(shownName, msg.isPm, if (msg.isPm) pmColor else nameColor) else null
+    }
     val header = remember(continuesGroup, shownName, nameColor, msg.timestamp, msg.isPm, overVideo) {
-        if (continuesGroup) {
+        if (continuesGroup || overVideo) {
             null
-        } else if (overVideo) {
-            // Just the name (and PM, on one), in one colour (headerColor):
-            // a colour inside the text would be its outline's colour too.
-            AnnotatedString(if (msg.isPm) "$shownName  PM" else shownName)
         } else {
             buildAnnotatedString {
                 withStyle(nameStyle.toSpanStyle().copy(color = if (msg.isPm) pmColor else nameColor)) {
@@ -1981,36 +1987,35 @@ private fun ChatRow(
 
     Column(rowModifier, horizontalAlignment = if (overVideo && overVideoAtEnd) Alignment.End else Alignment.Start) {
         if (header != null) {
-            var headerLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
             // Only the name line is clickable, not the row. The padding comes
             // after clickable so it grows the tap target: short names were
             // easy to miss otherwise.
             Text(
                 header,
-                style = if (overVideo) aligned(nameStyle) else MaterialTheme.typography.bodyMedium,
-                color = if (!overVideo) Color.Unspecified else if (msg.isPm) pmColor else nameColor,
-                onTextLayout = { if (overVideo) headerLayout = it },
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .then(if (usernameClickable) Modifier.clickable(onClick = onNameClick) else Modifier)
                     // Vertical only, so the name lines up with the message.
-                    .padding(vertical = if (overVideo) 1.dp else 4.dp)
-                    .then(if (overVideo) Modifier.textOutline { headerLayout } else Modifier)
+                    .padding(vertical = 4.dp)
             )
         }
         // ClickableText cannot take inlineContent, and inline emotes are not
         // negotiable, so the tap is hit-tested against the laid-out text
         // instead. Taps that don't land on a link fall through untouched.
         var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+        // Coloured for now where the channel's text changes colour; taps are
+        // matched against [hit], whose places are the same. Over video, both
+        // start with the name.
+        val animated = animatedChatText(text, rendered.textFx, animateText)
+        val shown = if (namePrefix == null) animated else remember(namePrefix, animated) { namePrefix + animated }
+        val hit = if (namePrefix == null) text else remember(namePrefix, text) { namePrefix + text }
         Text(
-            // Coloured for now where the channel's text changes colour; taps
-            // are still matched against [text], whose places are the same.
-            text = animatedChatText(text, rendered.textFx, animateText),
+            text = shown,
             inlineContent = inline,
             style = aligned(MaterialTheme.typography.bodyMedium),
             onTextLayout = { layout = it },
             modifier = Modifier
-                .then(if (overVideo) Modifier.textOutline { layout } else Modifier)
-                .pointerInput(text, usernameClickable) {
+                .pointerInput(hit, usernameClickable) {
                     // Emotes render small (28sp inline, still only 56sp even for
                     // a solo emote), and getOffsetForPosition only ever resolves
                     // to the exact character the finger landed on — a tap a few
@@ -2024,11 +2029,17 @@ private fun ChatRow(
                     detectTapGestures { pos ->
                         val l = layout ?: return@detectTapGestures
                         val offset = l.getOffsetForPosition(pos)
+                        // Over video, the name at its start: as a tap on the
+                        // name line is off video.
+                        if (usernameClickable && hit.getStringAnnotations(CHAT_NAME_TAG, offset, offset).isNotEmpty()) {
+                            onNameClick()
+                            return@detectTapGestures
+                        }
                         // Emotes and links never overlap, but check emotes first
                         // since that's the more specific hit.
-                        val emote = ChatHtml.emoteAt(text, offset) ?: run {
-                            val spans = text.getStringAnnotations(
-                                ChatHtml.EMOTE_TAG, 0, text.length
+                        val emote = ChatHtml.emoteAt(hit, offset) ?: run {
+                            val spans = hit.getStringAnnotations(
+                                ChatHtml.EMOTE_TAG, 0, hit.length
                             )
                             spans.firstOrNull { span ->
                                 val box = l.getBoundingBox(span.start)
@@ -2042,8 +2053,8 @@ private fun ChatRow(
                         // emote in it works like anywhere else, and a tap on its
                         // plain text hides it again. Skipped outright when
                         // revealSpoilers is on (TV): nothing is hidden there.
-                        val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(text, offset) else null
-                        val link = if (overVideo) null else ChatHtml.linkAt(text, offset)
+                        val spoilerIndex = if (!revealSpoilers) ChatHtml.spoilerAt(hit, offset) else null
+                        val link = if (overVideo) null else ChatHtml.linkAt(hit, offset)
                         when {
                             spoilerIndex != null && spoilerIndex !in revealedSpoilers ->
                                 revealedSpoilers = revealedSpoilers + spoilerIndex
