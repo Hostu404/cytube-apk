@@ -109,18 +109,21 @@ data class Settings(
      *  sent (see SentChat). Phone only; on by default. */
     val messageRecall: Boolean = true,
     /** How solid hybrid chat's messages are over the fullscreen video (see
-     *  HybridChatLayer): 0.2 to 1 (solid, the default). Phone only. */
+     *  HybridChatLayer): 0.2 to 1 (solid, the default). */
     val hybridChatOpacity: Float = 1f,
     /** Hybrid chat down the right side of the fullscreen video, rather
-     *  than the left (the default, as in CyTube Plus). Phone only. */
+     *  than the left (the default, as in CyTube Plus). */
     val hybridChatRight: Boolean = false,
     /** Fade old messages: each of hybrid chat's messages fading back once
      *  it's 15 seconds old, scrolling the chat bringing them back (see
-     *  ChatPanel's overVideo). Off by default. Phone only. */
+     *  ChatPanel's overVideo). Off by default. */
     val hybridChatDims: Boolean = false,
     /** How big hybrid chat's messages are, emotes and all: 0.8 to 2 (1, the
-     *  usual size, by default). Phone only. */
-    val hybridChatTextSize: Float = 1f
+     *  usual size, by default). */
+    val hybridChatTextSize: Float = 1f,
+    /** Hybrid chat on TV, over the video in every channel (the phone's is
+     *  turned on in a channel, for that visit). Off by default. TV only. */
+    val hybridChatTv: Boolean = false
 )
 
 /** Lights down's darkness as it always was, until changed in Settings. */
@@ -219,7 +222,8 @@ class SettingsStore(private val context: Context) {
             hybridChatOpacity = hybridChatOpacityOf(p[HYBRID_CHAT_OPACITY]),
             hybridChatRight = p[HYBRID_CHAT_RIGHT] ?: false,
             hybridChatDims = p[HYBRID_CHAT_DIMS] ?: false,
-            hybridChatTextSize = hybridChatTextSizeOf(p[HYBRID_CHAT_TEXT_SIZE])
+            hybridChatTextSize = hybridChatTextSizeOf(p[HYBRID_CHAT_TEXT_SIZE]),
+            hybridChatTv = p[HYBRID_CHAT_TV] ?: false
         )
     }.distinctUntilChanged()
 
@@ -266,6 +270,7 @@ class SettingsStore(private val context: Context) {
     suspend fun setHybridChatRight(v: Boolean) = save { it[HYBRID_CHAT_RIGHT] = v }
     suspend fun setHybridChatDims(v: Boolean) = save { it[HYBRID_CHAT_DIMS] = v }
     suspend fun setHybridChatTextSize(v: Float) = save { it[HYBRID_CHAT_TEXT_SIZE] = hybridChatTextSizeOf(v) }
+    suspend fun setHybridChatTv(v: Boolean) = save { it[HYBRID_CHAT_TV] = v }
 
     // ---- per-channel state ----
 
@@ -348,6 +353,7 @@ class SettingsStore(private val context: Context) {
         val HYBRID_CHAT_RIGHT = booleanPreferencesKey("hybrid_chat_right")
         val HYBRID_CHAT_DIMS = booleanPreferencesKey("hybrid_chat_dims")
         val HYBRID_CHAT_TEXT_SIZE = floatPreferencesKey("hybrid_chat_text_size")
+        val HYBRID_CHAT_TV = booleanPreferencesKey("hybrid_chat_tv")
         val IGNORED = stringSetPreferencesKey("ignored_users")
         val FAVOURITES = stringSetPreferencesKey("favourites")
         val RECENTS = stringPreferencesKey("recents")

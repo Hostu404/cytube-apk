@@ -16,6 +16,8 @@ class HybridChatSettingsTest {
         assertFalse(Settings().hybridChatDims)
         assertEquals(1f, Settings().hybridChatOpacity)
         assertEquals(1f, Settings().hybridChatTextSize)
+        // On TV, off until turned on in Settings.
+        assertFalse(Settings().hybridChatTv)
     }
 
     @Test fun solidUntilChanged() {

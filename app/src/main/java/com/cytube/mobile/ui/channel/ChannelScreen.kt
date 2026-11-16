@@ -170,6 +170,10 @@ private enum class Panel { PLAYLIST, USERS, POLL }
  *  started. */
 internal const val CONTROLS_AUTO_HIDE_MS = 1_000L
 
+/** TV's hybrid chat, clear of the screen's edges, which some sets crop. */
+private val TV_HYBRID_EDGE_H = 32.dp
+private val TV_HYBRID_EDGE_V = 16.dp
+
 /** How dark lights down makes everything around the video (black at this
  *  opacity), how long the fades take (going down, coming up), and how long
  *  a tap around the video brings the lights up for. */
@@ -604,12 +608,51 @@ fun ChannelScreen(
         // by construction (only one Down handler ever sets either one).
         var tvShowingPlaylist by remember { mutableStateOf(false) }
         val videoFocusRequester = remember { FocusRequester() }
+        // Hybrid chat (Settings, on TV): the channel's chat down one side of
+        // the video, as the phone's is in fullscreen, with nothing in it to
+        // stop on while watching. ↓ brings its message box up with the remote
+        // on it (OK to type; sent, or left alone, and it's gone again), ← goes
+        // to the box's CC button when the video has subtitles, and ↑ or Back
+        // go back to the video; it's the chat, so ↓ goes nowhere else (not to
+        // the chat screen, nor the playlist). Back on the video puts
+        // it away for this visit, leaving a quiet "↓ Show chat" in its corner
+        // with what's come in since, and ↓ brings it back. Never with the
+        // Nico comments, should they be on. Nor with sync off, when TV has no
+        // chat at all, and ↓ is the playlist's (see tvShowingPlaylist): back
+        // in sync, it's back.
+        val tvHybridOn = state.hybridChatTv && !chatOverlayOn && state.syncEnabled
+        var tvHybridHidden by remember { mutableStateOf(false) }
+        var tvHybridHiddenAfterSeq by remember { mutableLongStateOf(Long.MIN_VALUE) }
+        // The remote's in its message box (or the box's send button, or its
+        // CC button, or the CC button's menu: the box's row).
+        var tvHybridInBox by remember { mutableStateOf(false) }
+        val tvHybridBox = remember { FocusRequester() }
+        // The box's CC button, at its start (← from the box), when the video
+        // has subtitles, as on the full chat screen: the box stays up while
+        // the remote's on it or in its menu.
+        val tvHybridCc = remember { FocusRequester() }
+        val tvHybridCcAvailable = state.subtitles.available && state.player != MediaTypes.Player.WEB
+        var tvHybridCcFocused by remember { mutableStateOf(false) }
+        var tvHybridCcMenu by remember { mutableStateOf(false) }
+        // Gone with the next video having none: nothing left to hold the box up.
+        LaunchedEffect(tvHybridCcAvailable) {
+            if (!tvHybridCcAvailable) {
+                tvHybridCcFocused = false
+                tvHybridCcMenu = false
+            }
+        }
+        val tvHybridInRow = tvHybridInBox || tvHybridCcMenu
 
         BackHandler {
-            when {
-                tvShowingChat -> tvShowingChat = false
-                tvShowingPlaylist -> tvShowingPlaylist = false
-                else -> onBack()
+            when (tvBack(tvShowingChat, tvShowingPlaylist, inBox = tvHybridOn && tvHybridInRow, hybridShowing = tvHybridOn && !tvHybridHidden)) {
+                TvBack.CLOSE_FULL_CHAT -> tvShowingChat = false
+                TvBack.CLOSE_PLAYLIST -> tvShowingPlaylist = false
+                TvBack.LEAVE_BOX -> runCatching { videoFocusRequester.requestFocus() }
+                TvBack.HIDE_CHAT -> {
+                    tvHybridHiddenAfterSeq = messages.value.lastOrNull()?.seq ?: Long.MIN_VALUE
+                    tvHybridHidden = true
+                }
+                TvBack.LEAVE_CHANNEL -> onBack()
             }
         }
         LaunchedEffect(Unit) {
@@ -629,6 +672,19 @@ fun ChannelScreen(
         // to focus instead.
         LaunchedEffect(tvShowingChat, tvShowingPlaylist) {
             if (!tvShowingChat && !tvShowingPlaylist) runCatching { videoFocusRequester.requestFocus() }
+        }
+        // And out of hybrid chat's message box (sent, left alone a while, ↑,
+        // or hybrid chat itself gone, with sync turned off): back on the
+        // video, not on nothing, which would leave the remote's next press
+        // dead. A frame first: focus on its way back into the row (CC's menu
+        // closing puts it back on CC) gets there before this looks.
+        LaunchedEffect(tvHybridInRow, tvHybridOn) {
+            if (tvHybridInRow && tvHybridOn) return@LaunchedEffect
+            withFrameNanos { }
+            val inRow = tvHybridInBox || tvHybridCcMenu
+            if ((!inRow || !tvHybridOn) && !tvShowingChat && !tvShowingPlaylist) {
+                runCatching { videoFocusRequester.requestFocus() }
+            }
         }
         val overlayOpen = tvShowingChat || tvShowingPlaylist
 
@@ -711,12 +767,18 @@ fun ChannelScreen(
                                 // Personally browsing (sync off): straight to the
                                 // playlist, never chat — see tvShowingPlaylist's
                                 // own comment above for why the two never both
-                                // apply. Synced (the ordinary case): unchanged,
-                                // same chat view as always. On release; the
-                                // press itself is kept from an embedded page
-                                // underneath too.
+                                // apply. Synced (the ordinary case): the chat
+                                // view; or, with hybrid chat, only its message
+                                // box (and put away, it comes back first: see
+                                // tvDown). On release; the press itself is kept
+                                // from an embedded page underneath too.
                                 if (event.type == KeyEventType.KeyUp) {
-                                    if (state.syncEnabled) tvShowingChat = true else tvShowingPlaylist = true
+                                    when (tvDown(state.syncEnabled, hybridOn = tvHybridOn, hybridHidden = tvHybridHidden)) {
+                                        TvDown.SHOW_CHAT -> tvHybridHidden = false
+                                        TvDown.MESSAGE_BOX -> runCatching { tvHybridBox.requestFocus() }
+                                        TvDown.FULL_CHAT -> tvShowingChat = true
+                                        TvDown.PLAYLIST -> tvShowingPlaylist = true
+                                    }
                                 }
                                 true
                             }
@@ -779,18 +841,111 @@ fun ChannelScreen(
                         DisconnectedNotice(reason = reason, onRetry = vm::retry, onBack = onBack)
                     }
                 }
+            }
 
-                if (ownControls && !overlayOpen && state.kicked == null) {
-                    val now = transportTick
-                    val status = transport.status
-                    if (status != null && transport.visibleAt(now)) {
-                        TvTransportBar(
-                            positionSeconds = transport.positionAt(now) ?: status.positionSeconds,
-                            lengthSeconds = status.lengthSeconds,
-                            paused = status.paused,
-                            modifier = Modifier.align(Alignment.BottomCenter)
+            if (state.hybridChatTv) {
+                val chatAtStart = state.hybridChatRight != (LocalLayoutDirection.current == LayoutDirection.Ltr)
+                HybridChatLayer(
+                    // Not under the chat screen or the playlist (it slides
+                    // back in as they close), nor with Nico on or sync off.
+                    visible = tvHybridOn && !tvHybridHidden && !overlayOpen,
+                    instant = false,
+                    onRight = state.hybridChatRight,
+                    onTapVideo = {}
+                ) { chatModifier ->
+                    HybridChatTheme {
+                        ChatPanel(
+                            // Read here, so new chat recomposes the chat alone.
+                            messages = messages.value,
+                            canSend = state.connection == ConnectionState.CONNECTED,
+                            disabledHint = chatUnavailableHint(state.connection),
+                            showEmotes = state.showEmotes,
+                            emotes = state.emotes,
+                            onSend = onSendChat,
+                            highlightName = state.localUser,
+                            users = state.users,
+                            nameColors = state.nameColors,
+                            coolingDown = state.chatCoolingDown,
+                            // As TV's chat view: nothing in the list to stop on,
+                            // and no emote sheet to pick from with a remote.
+                            messagesFocusable = false,
+                            showEmotePickerButton = false,
+                            inputFieldModifier = Modifier.focusRequester(tvHybridBox),
+                            // Up while the remote's on CC, or in its menu.
+                            showBox = tvHybridCcAvailable && (tvHybridCcFocused || tvHybridCcMenu),
+                            boxLeading = if (!tvHybridCcAvailable) null else {
+                                {
+                                    Box(
+                                        Modifier.padding(start = 6.dp, end = 2.dp)
+                                            .onFocusChanged { tvHybridCcFocused = it.hasFocus }
+                                    ) {
+                                        TvSubtitleButton(
+                                            options = state.subtitles,
+                                            onSelect = vm::selectSubtitle,
+                                            focusRequester = tvHybridCc,
+                                            onFocused = {},
+                                            // → back to the box; ↓, like ↑, is
+                                            // the box's own (see below).
+                                            onRight = { runCatching { tvHybridBox.requestFocus() } },
+                                            onDown = {},
+                                            onMenuOpen = { tvHybridCcMenu = it }
+                                        )
+                                    }
+                                }
+                            },
+                            overVideo = true,
+                            overVideoOpacity = state.hybridChatOpacity,
+                            overVideoOnRight = state.hybridChatRight,
+                            fadeOldMessages = state.hybridChatDims,
+                            overVideoTextScale = state.hybridChatTextSize,
+                            focusPmOnOpen = false,
+                            // Clear of a TV's edges, which some sets crop. From
+                            // the box (or its send button), ↑ goes back to the
+                            // video, and ↓ nowhere: both presses taken whole,
+                            // so the default focus search never goes anywhere
+                            // else.
+                            modifier = chatModifier
+                                .padding(horizontal = TV_HYBRID_EDGE_H, vertical = TV_HYBRID_EDGE_V)
+                                .onFocusChanged { tvHybridInBox = it.hasFocus }
+                                .onPreviewKeyEvent { event ->
+                                    when (event.key) {
+                                        Key.DirectionUp -> {
+                                            if (event.type == KeyEventType.KeyUp) runCatching { videoFocusRequester.requestFocus() }
+                                            true
+                                        }
+                                        Key.DirectionDown -> true
+                                        else -> false
+                                    }
+                                }
                         )
                     }
+                }
+                // Put away: what's come in since, and that ↓ brings it back.
+                if (tvHybridOn && tvHybridHidden && !overlayOpen) {
+                    HybridChatToggle(
+                        showing = false,
+                        messages = messages,
+                        since = tvHybridHiddenAfterSeq,
+                        localName = state.localUser,
+                        onClick = null,
+                        modifier = Modifier.align(if (chatAtStart) Alignment.TopStart else Alignment.TopEnd)
+                            .padding(horizontal = TV_HYBRID_EDGE_H, vertical = TV_HYBRID_EDGE_V)
+                    )
+                }
+            }
+
+            // Over hybrid chat, so its time and progress are never under the
+            // messages. Never focused: the keys are the video's.
+            if (ownControls && !overlayOpen && state.kicked == null) {
+                val now = transportTick
+                val status = transport.status
+                if (status != null && transport.visibleAt(now)) {
+                    TvTransportBar(
+                        positionSeconds = transport.positionAt(now) ?: status.positionSeconds,
+                        lengthSeconds = status.lengthSeconds,
+                        paused = status.paused,
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                    )
                 }
             }
 
@@ -2646,16 +2801,18 @@ private fun TvChatView(
 }
 
 /**
- * TV's CC button, in TvChatView's top row left of Nico, drawn and focused
- * the same way as Nico (a primary-coloured outline when focused). OK turns
- * the one track on or off, or with several opens the same menu as the
- * phone (SubtitleMenu), with what's showing focused; picking from it or
- * Back closes it and puts focus back here, where it started.
+ * TV's CC button, in TvChatView's top row left of Nico (and at the start
+ * of hybrid chat's message box), drawn and focused the same way as Nico (a
+ * primary-coloured outline when focused). OK turns the one track on or off,
+ * or with several opens the same menu as the phone (SubtitleMenu), with
+ * what's showing focused; picking from it or Back closes it and puts focus
+ * back here, where it started.
  *
- * Right goes to Nico and Down to the chat bar ([onRight], [onDown]); Left
- * has nowhere to go; Up is TvChatView's (back to the video). Moves happen
- * on KeyUp and both phases are taken, so Compose's own focus search (on
- * KeyDown) never lands on anything else, as with Nico.
+ * Right goes to Nico (in hybrid chat, the box) and Down to the chat bar
+ * ([onRight], [onDown]); Left has nowhere to go; Up is the screen's own
+ * (back to the video). Moves happen on KeyUp and both phases are taken, so
+ * Compose's own focus search (on KeyDown) never lands on anything else, as
+ * with Nico.
  */
 @Composable
 private fun TvSubtitleButton(
@@ -2664,7 +2821,10 @@ private fun TvSubtitleButton(
     focusRequester: FocusRequester,
     onFocused: (Boolean) -> Unit,
     onRight: () -> Unit,
-    onDown: () -> Unit
+    onDown: () -> Unit,
+    /** Its menu opening and closing (hybrid chat keeps its box up while the
+     *  remote's in it, as focus goes into the menu). */
+    onMenuOpen: (Boolean) -> Unit = {}
 ) {
     var focused by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
@@ -2675,6 +2835,7 @@ private fun TvSubtitleButton(
     // or the item changing.
     var menuWasOpen by remember { mutableStateOf(false) }
     LaunchedEffect(menuOpen) {
+        onMenuOpen(menuOpen)
         if (menuOpen) menuWasOpen = true
         else if (menuWasOpen) {
             menuWasOpen = false

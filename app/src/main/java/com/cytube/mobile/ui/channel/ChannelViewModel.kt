@@ -229,6 +229,8 @@ data class ChannelUiState(
     val hybridChatDims: Boolean = false,
     /** See Settings.hybridChatTextSize. */
     val hybridChatTextSize: Float = 1f,
+    /** See Settings.hybridChatTv. */
+    val hybridChatTv: Boolean = false,
     /** User-toggled audio mute, independent of play/pause. Applied to the
      *  active PlayerHandle whenever one is attached (see attachPlayer) so a
      *  media switch never silently unmutes. */
@@ -653,6 +655,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                 hybridChatRight = settings.hybridChatRight,
                 hybridChatDims = settings.hybridChatDims,
                 hybridChatTextSize = settings.hybridChatTextSize,
+                hybridChatTv = settings.hybridChatTv,
                 syncEnabled = settings.syncEnabled,
                 isFavourite = settingsStore.favourites.first().contains(channel)
             )
@@ -690,6 +693,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             it.hybridChatRight == s.hybridChatRight &&
                             it.hybridChatDims == s.hybridChatDims &&
                             it.hybridChatTextSize == s.hybridChatTextSize &&
+                            it.hybridChatTv == s.hybridChatTv &&
                             it.syncEnabled == s.syncEnabled
                         ) s
                         else s.copy(
@@ -707,6 +711,7 @@ class ChannelViewModel(app: Application) : AndroidViewModel(app) {
                             hybridChatRight = it.hybridChatRight,
                             hybridChatDims = it.hybridChatDims,
                             hybridChatTextSize = it.hybridChatTextSize,
+                            hybridChatTv = it.hybridChatTv,
                             syncEnabled = it.syncEnabled
                         )
                     }

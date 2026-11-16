@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Icon
@@ -67,12 +68,14 @@ import kotlinx.collections.immutable.PersistentList
 import kotlin.math.roundToInt
 
 /**
- * Hybrid chat (Hybrid, on the chat button in the channel's top bar, for that
- * visit as Nico is, and never on with it; phone only): in fullscreen, the
- * channel's own chat down the whole of one side of the video (the right, or
- * the left, as Settings has it), and fully usable (reading, scrolling back,
- * typing, emotes, PMs), with its message box in the middle of the bottom edge
- * (see ChatPanel's overVideo). While it's showing:
+ * Hybrid chat (on a phone, Hybrid, on the chat button in the channel's top
+ * bar, for that visit as Nico is, and never on with it; on TV, Settings'
+ * Hybrid chat, worked with the remote: see ChannelScreen's TV branch): in
+ * fullscreen, the channel's own chat down the whole of one side of the video
+ * (the left, or the right, as Settings has it), and fully usable (reading,
+ * scrolling back, typing, emotes, PMs), with its message box in the middle
+ * of the bottom edge (see ChatPanel's overVideo). While it's showing on a
+ * phone:
  *  - the video itself can't be touched: a tap on it brings the fullscreen
  *    controls (exit, title, Hide chat and the message box) up or down, and
  *    nothing reaches the player, its own controls or an embed's page;
@@ -201,7 +204,8 @@ internal fun Density.hybridColumnPx(full: Int): Int =
  * lit it already) if a private message came. It goes in the fullscreen
  * controls' top row (FullscreenPlayer), at chat's end of it: up with them,
  * beside the chat and never over it, and the same quiet look either way
- * unless it's lit.
+ * unless it's lit. On TV, put away, it's only shown, in chat's corner, with
+ * the remote's ↓ (which brings chat back) for its picture.
  */
 @Composable
 internal fun HybridChatToggle(
@@ -211,7 +215,8 @@ internal fun HybridChatToggle(
     /** Our own name: who a mention mentions, and whose own messages and
      *  PMs aren't news. */
     localName: String?,
-    onClick: () -> Unit,
+    /** Null on TV: nothing to press, the remote's ↓ does it. */
+    onClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     if (showing) {
@@ -228,7 +233,7 @@ internal fun HybridChatToggle(
             else -> "Show chat · $unread"
         }
         HybridPill(
-            Icons.Default.Visibility,
+            if (onClick == null) Icons.Default.KeyboardArrowDown else Icons.Default.Visibility,
             if (alerts.pm) "$count · PM" else count,
             onClick,
             modifier,
@@ -286,19 +291,17 @@ private val HTML_TAG = Regex("<[^>]*>")
 private fun HybridPill(
     icon: ImageVector,
     text: String,
-    onClick: () -> Unit,
+    /** Null: only shown, never focused (TV's put-away pill). */
+    onClick: (() -> Unit)?,
     modifier: Modifier = Modifier,
     /** Lit up in this, with something for you (see HybridChatToggle). */
     accent: Color? = null
 ) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(50),
-        // Quiet, so it isn't one more thing to look at, unless it's lit.
-        color = accent ?: Color.Black.copy(alpha = 0.25f),
-        contentColor = if (accent != null) Color.White else Color.White.copy(alpha = 0.5f),
-        modifier = modifier
-    ) {
+    val shape = RoundedCornerShape(50)
+    // Quiet, so it isn't one more thing to look at, unless it's lit.
+    val color = accent ?: Color.Black.copy(alpha = 0.25f)
+    val contentColor = if (accent != null) Color.White else Color.White.copy(alpha = 0.5f)
+    val content: @Composable () -> Unit = {
         Row(
             Modifier.padding(start = 10.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -307,6 +310,11 @@ private fun HybridPill(
             Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
             Text(text, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+    }
+    if (onClick == null) {
+        Surface(shape = shape, color = color, contentColor = contentColor, modifier = modifier, content = content)
+    } else {
+        Surface(onClick = onClick, shape = shape, color = color, contentColor = contentColor, modifier = modifier, content = content)
     }
 }
 
@@ -426,6 +434,34 @@ internal fun TextFieldValue.typedIn(text: String): TextFieldValue {
     val start = minOf(selection.start, selection.end).coerceIn(0, this.text.length)
     val end = maxOf(selection.start, selection.end).coerceIn(0, this.text.length)
     return TextFieldValue(this.text.substring(0, start) + text + this.text.substring(end), TextRange(start + text.length))
+}
+
+/** On TV, what the remote's ↓ does on the video. */
+internal enum class TvDown { SHOW_CHAT, MESSAGE_BOX, FULL_CHAT, PLAYLIST }
+
+/** ↓ on the video, on TV. With hybrid chat on here ([hybridOn]: Settings,
+ *  in sync, Nico off), only ever hybrid chat: put away, it comes back; up,
+ *  its message box. Without it, as ever: with sync off, the playlist (TV
+ *  has no chat then); else the full chat screen. */
+internal fun tvDown(synced: Boolean, hybridOn: Boolean, hybridHidden: Boolean): TvDown = when {
+    hybridOn && hybridHidden -> TvDown.SHOW_CHAT
+    hybridOn -> TvDown.MESSAGE_BOX
+    !synced -> TvDown.PLAYLIST
+    else -> TvDown.FULL_CHAT
+}
+
+/** On TV, what the remote's Back does. */
+internal enum class TvBack { CLOSE_FULL_CHAT, CLOSE_PLAYLIST, LEAVE_BOX, HIDE_CHAT, LEAVE_CHANNEL }
+
+/** Back on TV, one step at a time: out of the full chat screen or the
+ *  playlist; out of hybrid chat's message box ([inBox]) to the video;
+ *  hybrid chat showing, put away; and only then out of the channel. */
+internal fun tvBack(fullChat: Boolean, playlist: Boolean, inBox: Boolean, hybridShowing: Boolean): TvBack = when {
+    fullChat -> TvBack.CLOSE_FULL_CHAT
+    playlist -> TvBack.CLOSE_PLAYLIST
+    inBox -> TvBack.LEAVE_BOX
+    hybridShowing -> TvBack.HIDE_CHAT
+    else -> TvBack.LEAVE_CHANNEL
 }
 
 /** With hybrid chat on, how long the fullscreen controls stay up (and with

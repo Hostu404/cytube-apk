@@ -217,9 +217,17 @@ fun SettingsScreen(
                 ) { scope.launch { store.setNicoEmoteOpacity(it) } }
             }
 
-            // Hybrid chat (the chat button's Hybrid, in a channel's top bar) is
-            // the phone's, in fullscreen.
-            if (!isTv) {
+            // Hybrid chat: on a phone, turned on in a channel (the chat button's
+            // Hybrid, in its top bar), in fullscreen; on TV, from here, for
+            // every channel, its own settings showing once it's on.
+            if (isTv) {
+                SwitchRow(
+                    title = "Hybrid chat",
+                    subtitle = "Chat down one side of the video, while in sync. ↓ to write a message, Back to hide it.",
+                    checked = settings.hybridChatTv
+                ) { scope.launch { store.setHybridChatTv(it) } }
+            }
+            if (!isTv || settings.hybridChatTv) {
                 HybridChatSideRow(right = settings.hybridChatRight) {
                     scope.launch { store.setHybridChatRight(it) }
                 }
@@ -240,7 +248,12 @@ fun SettingsScreen(
                 ) { scope.launch { store.setHybridChatTextSize(it) } }
                 SwitchRow(
                     title = "Fade old messages",
-                    subtitle = "Hybrid chat: each message fades 15 seconds after it comes in. Scroll the chat to bring them back.",
+                    // TV's hybrid chat isn't scrolled.
+                    subtitle = if (isTv) {
+                        "Hybrid chat: each message fades 15 seconds after it comes in."
+                    } else {
+                        "Hybrid chat: each message fades 15 seconds after it comes in. Scroll the chat to bring them back."
+                    },
                     checked = settings.hybridChatDims
                 ) { scope.launch { store.setHybridChatDims(it) } }
             }

@@ -319,6 +319,9 @@ fun ChatPanel(
     // picker's own grid is a whole separate focus surface this screen's
     // fixed video -> Nico -> chat bar stop order was never built to host.
     showEmotePickerButton: Boolean = true,
+    /** Over video: something at the start of the message box, where the
+     *  emotes' button would be (TV's hybrid chat: its CC button). */
+    boxLeading: (@Composable () -> Unit)? = null,
     /** The local user's name: other people's messages mentioning it get
      *  highlighted (see buildMentionRegex). Null for no highlighting. */
     highlightName: String? = null,
@@ -879,8 +882,9 @@ fun ChatPanel(
         // A physical keyboard, with nothing being typed in: a key that types
         // something puts it in the box, and the box in use, so the rest
         // follows it there; Enter just puts the box in use. Not a shortcut,
-        // nor Space.
-        UnhandledKeys { event ->
+        // nor Space. Not on TV, whose remote has keys that type (its number
+        // keys) without meaning to write anything: ↓ goes to the box there.
+        if (!isTv) UnhandledKeys { event ->
             if (event.action != AndroidKeyEvent.ACTION_DOWN || !canSend || inputFocused) return@UnhandledKeys false
             if (event.keyCode == AndroidKeyEvent.KEYCODE_ENTER || event.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER) {
                 if (!event.hasNoModifiers()) return@UnhandledKeys false
@@ -965,7 +969,9 @@ fun ChatPanel(
                             .padding(horizontal = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        if (emotes.all.isNotEmpty() && showEmotePickerButton) {
+                        if (boxLeading != null) {
+                            boxLeading()
+                        } else if (emotes.all.isNotEmpty() && showEmotePickerButton) {
                             IconButton(onClick = { showEmotePicker = true }, modifier = Modifier.size(40.dp)) {
                                 Icon(
                                     Icons.Default.Mood, contentDescription = "Emotes",
@@ -984,7 +990,13 @@ fun ChatPanel(
                             maxLines = 4,
                             textStyle = MaterialTheme.typography.bodyLarge.copy(color = Color.White),
                             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            // On TV the remote comes to the box first (↓), and
+                            // OK brings the keyboard up: up at once, it would
+                            // take the remote's next presses for itself.
+                            keyboardOptions = KeyboardOptions(
+                                imeAction = ImeAction.Send,
+                                showKeyboardOnFocus = if (isTv) false else null
+                            ),
                             keyboardActions = KeyboardActions(onSend = {
                                 // Held while the server isn't taking messages; kept typed.
                                 if (!coolingDown) sendFromBox()
@@ -1021,8 +1033,10 @@ fun ChatPanel(
                 }
                 // Its place, while it's put away: a tap there is a tap on the
                 // video like any other (the box comes up with the controls),
-                // and doesn't reach the box's buttons, there but unseen.
-                if (!boxShown) {
+                // and doesn't reach the box's buttons, there but unseen. Not
+                // on TV, where there's no tapping, and where it would only be
+                // something unseen for the remote to land on.
+                if (!boxShown && !isTv) {
                     Spacer(
                         Modifier.matchParentSize().clickable(
                             interactionSource = remember { MutableInteractionSource() },
