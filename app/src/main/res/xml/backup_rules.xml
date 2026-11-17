@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 and older: allowBackup="false" (AndroidManifest.xml) already
+  turns backup off there; this says the same, nothing backed up, for the
+  Android 12+ rules' sake (see data_extraction_rules.xml).
+-->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

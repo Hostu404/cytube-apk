@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 and up: what goes to a cloud backup, and what moves to a new
+  phone. As allowBackup="false" (AndroidManifest.xml) already has it there:
+  no cloud backup at all. Moving to a new phone (device transfer, left to
+  its default here) carries the app's data over as it always has on
+  Android 12 and up; a remembered login doesn't survive it (its key never
+  leaves the old phone, see AuthStore), so that's just logged in again.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+</data-extraction-rules>

@@ -59,7 +59,9 @@ android {
             // Phones and Fire TV / Android TV devices are all ARM. The FFmpeg
             // decoders (nextlib) add several MB per architecture, so the
             // release APK carries only these two. Debug builds keep every
-            // architecture so they still run on an x86 emulator.
+            // architecture so they still run on an x86 emulator. (No x86_64
+            // ChromeOS build either, on purpose.)
+            //noinspection ChromeOsAbiSupport
             ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (hasReleaseKeystore) {
