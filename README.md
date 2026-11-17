@@ -51,7 +51,7 @@ use out of it:
 * Turn off "stay in sync" to watch your own picks from the playlist without affecting anyone else; it moves on to your next pick when one finishes
 * Subtitles: the **CC** button turns on a video's subtitles and picks between them — a custom manifest's subtitle files, a Google Drive video's, YouTube captions, or ones inside the stream. They stay off until you turn them on, and stay on for the next video once you have
 * Fullscreen and mute toggle
-* Lights down (phone): the light bulb button dims everything around the video. Touch the screen to lift them a little for a moment; everything still works while dimmed
+* Lights down (phone): **Lights down** in the ⋮ menu dims everything around the video. Touch the screen to lift them a little for a moment; everything still works while dimmed
 
 ### Chat
 
@@ -61,7 +61,20 @@ use out of it:
 * Ignore: the block symbol by a name in the user list hides that person's chat and private messages, including what they've already said. Only you can tell. Unignore them there, or under **Ignored users** in Settings (phone)
 * Tap an emote in chat to reuse it
 * Channel emote effects: on channels that set them up, modifiers like `/reverse`, `/rainbow` or `/overlay` flip, tint, stack and animate the emote after them, in chat and the Niconico overlay, as on the website
-* Niconico-style chat overlay across the video; tap the square to turn it on. **Nico chat: emotes only** in Settings flies just the emotes, **Nico chat: text only** just the text, and **Nico emote opacity** makes the flying emotes see-through (10–100%)
+* Niconico-style chat overlay across the video: pick **Nico** from the chat button in the top bar. **Nico chat: emotes only** in Settings flies just the emotes, **Nico chat: text only** just the text, and **Nico emote opacity** makes the flying emotes see-through (10–100%)
+
+### Hybrid chat
+
+The channel's chat over fullscreen video, down one side, and fully usable: scroll back, type, use emotes and private messages. On a phone, pick **Hybrid** from the chat button in the top bar, and it shows whenever the video is fullscreen. On a TV, turn on **Hybrid chat** in Settings (see Android TV below).
+
+* Looks like CyTube Plus: names and messages on one line with a soft shadow, so plenty of messages fit
+* While it's up, the video itself can't be touched: a tap brings up the fullscreen controls (exit, the title, **Hide chat** and the message box) or puts them away, and Niconico comments don't fly
+* **Fade old messages** (on by default): each message fades 15 seconds after it's posted, so older ones are already faded when chat opens, including the history you get when you join. Scroll the chat to bring them all back; they fade again 10 seconds after you stop
+* A message that mentions you glows blue as it comes in
+* **Hide chat** (or Back) puts it away and gives you the player back. **Show chat** brings it back with a count of what you missed, lit up blue if someone mentioned you and saying PM if a private message came
+* The message box tucks itself away after 6 seconds with nothing typed. With a physical keyboard, just start typing and it goes into the message box
+* Links show as plain text, so a stray tap can't open one
+* Settings: **Hybrid chat side** (left by default), **Hybrid chat opacity** (20–100%) and **Hybrid chat text size** (80–200%; emotes grow with the text)
 
 ### Channels
 
@@ -79,9 +92,10 @@ use out of it:
 Works with a TV remote's D-pad. From the video, press **Down**:
 
 * With "stay in sync" **on** (Settings), Down opens a full-screen chat view. When the video has subtitles, press **Left** from the Niconico square to reach the **CC** button. Press **Up** or **Back** to return to the video.
+* With **Hybrid chat** on as well (Settings, off by default), chat runs down one side of the video instead, and Down goes to its message box: **OK** opens the keyboard, **Left** reaches **CC** when the video has subtitles, and **Up** or **Back** returns to the video. **Back** on the video hides chat, leaving **↓ Show chat** with what's come in (blue for a mention, PM for a private message); **Down** brings it back, and **Back** again leaves the channel.
 * With "stay in sync" **off**, the video is yours to control: **OK** plays and pauses, **Left** and **Right** skip back and forward 10 seconds (hold to keep going), and the remote's own play/pause, rewind and fast-forward buttons work too. A bar along the bottom shows where you are. Down opens a full-screen playlist for picking your own videos (chat isn't available in this mode): it opens on what's playing, **OK** plays an item and takes you back to the video, and the search box at the top only brings up the keyboard when you press **OK** on it. **Back** returns to the video.
 
-Adding videos and private messages are phone-only.
+Adding videos and sending private messages are phone-only.
 
 ---
 
