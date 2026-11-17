@@ -67,7 +67,7 @@ use out of it:
 
 The channel's chat over fullscreen video, down one side, and fully usable: scroll back, type, use emotes and private messages. On a phone, pick **Hybrid** from the chat button in the top bar, and it shows whenever the video is fullscreen. On a TV, turn on **Hybrid chat** in Settings (see Android TV below).
 
-* Looks like CyTube Plus: names and messages on one line with a soft shadow, so plenty of messages fit
+* Names and messages on one line with a soft shadow, so plenty of messages fit
 * While it's up, the video itself can't be touched: a tap brings up the fullscreen controls (exit, the title, **Hide chat** and the message box) or puts them away, and Niconico comments don't fly
 * **Fade old messages** (on by default): each message fades 15 seconds after it's posted, so older ones are already faded when chat opens, including the history you get when you join. Scroll the chat to bring them all back; they fade again 10 seconds after you stop
 * A message that mentions you glows blue as it comes in
